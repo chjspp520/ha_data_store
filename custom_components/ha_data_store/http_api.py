@@ -3346,6 +3346,12 @@ class DBViewerUpdateView(_BaseDBView):
             value = None
         elif isinstance(value, str):
             value = value.strip()
+            if value == "" and column == "state_attr":
+                value = '[]'  # state_attr 是 NOT NULL，空值用空数组代替
+
+        # state_attr 是 NOT NULL 列，null 要转为空数组
+        if value is None and column == "state_attr":
+            value = '[]'
 
         def _update() -> None:
             conn = sqlite3.connect(db_path)

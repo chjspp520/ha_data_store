@@ -3145,8 +3145,8 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
     if is_on:
         # ★ 如果旧状态也是 on，说明只是模式/温度/速度等属性变化（非真正开机）
         if old_state and _is_on_state(entity_id, old_state.state):
-            # ★ 仅 HVAC 模式真正变化时才记录到 state_attr
-            if old_state.state != new_state_val:
+            # ★ 仅空调设备且 HVAC 模式真正变化时才记录到 state_attr
+            if old_state.state != new_state_val and _get_entity_domain(entity_id) == "climate":
                 entry = _extract_climate_state_attr(new_state, now_str)
                 await hass.async_add_executor_job(
                     _append_state_attr_to_record, db_path, entity_id, entry,
@@ -3170,6 +3170,32 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
         unclosed = await hass.async_add_executor_job(_check_unclosed)
         if unclosed:
             await _async_correct_unclosed(hass, db_path, entity_id, unclosed, tz)
+
+        # ★ 修正后再检查是否有任意未关闭记录（不限日期，重启后可能 on_time 不是今天）
+        after_unclosed = None
+        if unclosed:
+            def _recheck_unclosed():
+                conn = sqlite3.connect(db_path)
+                try:
+                    cursor = conn.execute(
+                        f"SELECT id FROM {TABLE_DEVICE_HISTORY} "
+                        f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL) "
+                        f"LIMIT 1",
+                        (entity_id,),
+                    )
+                    return cursor.fetchone()
+                finally:
+                    conn.close()
+            after_unclosed = await hass.async_add_executor_job(_recheck_unclosed)
+
+        if after_unclosed:
+            # 修正后仍有未关闭记录 → 设备之前就是开机状态，此次是重启后的重复事件，跳过
+            local_logger = get_logger()
+            if local_logger:
+                local_logger.info(
+                    "[device] 重启后跳过重复开机 entity_id=%s (已有未关闭记录)", entity_id,
+                )
+            return
 
         on_power = _get_power_value()
         local_logger = get_logger()
@@ -3205,11 +3231,12 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
                 )
             return
 
-        # ★ 关机前先追加末态到 state_attr
-        entry = _extract_climate_state_attr(new_state, now_str)
-        await hass.async_add_executor_job(
-            _append_state_attr_to_record, db_path, entity_id, entry,
-        )
+        # ★ 关机前先追加末态到 state_attr（仅空调设备）
+        if _get_entity_domain(entity_id) == "climate":
+            entry = _extract_climate_state_attr(new_state, now_str)
+            await hass.async_add_executor_job(
+                _append_state_attr_to_record, db_path, entity_id, entry,
+            )
 
         off_power = _get_power_value()
 

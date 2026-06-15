@@ -1,5 +1,23 @@
 # 更新日志
 
+## 2026-06-15 — v2.2.1 Bug 修复
+
+### 🐛 Bug 修复
+
+#### 1. `state_attr` 误写入非空调设备
+- **问题**：`_async_state_changed` 中 `_append_state_attr_to_record` 未做 domain 判断，`binary_sensor` 等设备也被写入空调状态数据
+- **修复**：on→on、on→off 两处追加操作均增加 `_get_entity_domain(entity_id) == "climate"` 检查
+
+#### 2. 重启后所有设备重复开记录
+- **问题**：HA 重启后 `old_state = None`，走 off→on 分支。修正旧记录后 `_recheck_unclosed` 查询带日期限制（`on_time LIKE today%`），多日运行未跨夜的设备查不到 → 重复 INSERT
+- **修复**：`_recheck_unclosed` 去掉 `AND on_time LIKE` 日期过滤，改为查询全部未关闭记录
+
+#### 3. db_viewer 编辑 `state_attr` 保存失败
+- **问题**：前端 `val === ''` 转 `null`，后端 UPDATE 设置 `NULL` 触发 `NOT NULL` 约束
+- **修复**：`DBViewerUpdateView` 中 `state_attr` 列为 `null` 时自动转为 `'[]'`
+
+---
+
 ## 2026-06-15 — v2.2.0 空调状态采集 + 分钟级功率快照（2026-06-15）
 
 ### 🆕 新增功能
