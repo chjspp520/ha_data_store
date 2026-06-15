@@ -1,5 +1,31 @@
 # 更新日志
 
+## 2026-06-15 — v2.2.2 state_attr 增强 + 目标温度追踪
+
+### 🆕 新增功能
+
+#### 1. `state_attr` 新增当前室温 `cur_temp` 字段
+- 每个状态 entry 增加 `cur_temp` 记录空调回读的实时室温
+- 空调不提供 `current_temperature` 属性时，`cur_temp` 填入 `"--"` 占位
+- 后端 `_extract_climate_state_attr` 提取逻辑已更新
+
+#### 2. 目标温度变化触发 state_attr 记录
+- 之前仅 HVAC 模式变化时记录，现在**目标温度（`temperature`）变化时也记录**
+- 每次调温在 `state_attr` 中追加一条新 entry
+- 去重逻辑同步升级：`state` 和 `temp` 都相同时才跳过（风速/预设/摆风变化仍不记录）
+
+#### 3. 前端 `usage-card.js` 状态时间线适配
+- 弹窗折叠详情每行增加 `室××°C` 显示当前室温
+- 显示格式：`设26°C · 室25.5°C · 风自动`
+
+### 🐛 Bug 修复
+
+#### 1. `_recheck_unclosed` 条件限制导致重复开记录
+- **问题**：`_recheck_unclosed` 被包裹在 `if unclosed:` 内，当运行记录 `on_time` 不是今天时（午夜拆分未执行场景），`_check_unclosed` 返回空导致重查被跳过
+- **修复**：去掉 `if unclosed:` 限制，`_recheck_unclosed` 无条件执行，查询全量未关闭记录
+
+---
+
 ## 2026-06-15 — v2.2.1 Bug 修复
 
 ### 🐛 Bug 修复

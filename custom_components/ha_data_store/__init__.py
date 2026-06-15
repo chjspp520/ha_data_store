@@ -1025,19 +1025,30 @@ def _extract_power_reading(state_obj) -> float | None:
 def _extract_climate_state_attr(state_obj, now_str: str) -> str:
     """从气候实体提取当前状态，返回 JSON entry 字符串。
 
-    返回格式: {"t":"2026-06-15 13:00:00","state":"cool","temp":26.0,"fan":"auto","preset":"eco","swing":"off"}
+    temp 记录目标温度（用户设定值），cur_temp 记录当前室温。
+    返回格式: {"t":"2026-06-15 13:00:00","state":"cool","temp":26.0,"cur_temp":25.5,"fan":"auto","preset":"eco","swing":"off"}
     state 为实体的主状态值（hvac_mode: cool/heat/auto/dry/fan_only/off）。
     """
     # 实体的 state 就是 HVAC 模式（cool/heat/auto/dry/fan_only/off）
     state_val = state_obj.state if state_obj else ""
     attrs = state_obj.attributes if state_obj else {}
 
-    temp = attrs.get("current_temperature") or attrs.get("temperature")
+    temp = attrs.get("temperature")  # 目标温度（用户设定值）
     if temp is not None:
         try:
             temp = round(float(temp), 1)
         except (ValueError, TypeError):
             temp = None
+
+    # 当前室温，没有此属性时用 "--" 占位
+    cur_temp = attrs.get("current_temperature")
+    if cur_temp is not None:
+        try:
+            cur_temp = round(float(cur_temp), 1)
+        except (ValueError, TypeError):
+            cur_temp = "--"
+    else:
+        cur_temp = "--"
 
     fan = attrs.get("fan_mode", "")
     preset = attrs.get("preset_mode", "")
@@ -1047,6 +1058,7 @@ def _extract_climate_state_attr(state_obj, now_str: str) -> str:
         "t": now_str[:19],
         "state": state_val,
         "temp": temp,
+        "cur_temp": cur_temp,
         "fan": fan or "",
         "preset": preset or "",
         "swing": swing or "",
@@ -1057,7 +1069,7 @@ def _extract_climate_state_attr(state_obj, now_str: str) -> str:
 def _append_state_attr_to_record(db_path: str, entity_id: str, new_entry_json: str) -> None:
     """查出当前未关闭记录，将新的 entry 追加到 state_attr JSON 数组。
 
-    ★ 去重：如果新 entry 的 state 值与数组中最后一条的 state 相同，跳过（仅 HVAC 模式变化才记录）。
+    ★ 去重：如果新 entry 的 state 和 temp 与最后一条都相同，跳过（仅真实变化才记录）。
     """
     conn = sqlite3.connect(db_path)
     try:
@@ -1082,10 +1094,13 @@ def _append_state_attr_to_record(db_path: str, entity_id: str, new_entry_json: s
 
         new_entry = json.loads(new_entry_json)
         new_state = new_entry.get("state", "")
+        new_temp = new_entry.get("temp")
 
-        # 去重：如果 state 值与最后一条相同，跳过
-        if arr and arr[-1].get("state", "") == new_state:
-            return
+        # 去重：state 和 temp 都与最后一条相同则跳过
+        if arr:
+            last = arr[-1]
+            if last.get("state", "") == new_state and last.get("temp") == new_temp:
+                return
 
         arr.append(new_entry)
 
@@ -3145,12 +3160,17 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
     if is_on:
         # ★ 如果旧状态也是 on，说明只是模式/温度/速度等属性变化（非真正开机）
         if old_state and _is_on_state(entity_id, old_state.state):
-            # ★ 仅空调设备且 HVAC 模式真正变化时才记录到 state_attr
-            if old_state.state != new_state_val and _get_entity_domain(entity_id) == "climate":
-                entry = _extract_climate_state_attr(new_state, now_str)
-                await hass.async_add_executor_job(
-                    _append_state_attr_to_record, db_path, entity_id, entry,
-                )
+            # ★ 空调设备：HVAC 模式或目标温度变化时记录到 state_attr
+            if _get_entity_domain(entity_id) == "climate":
+                old_attrs = old_state.attributes if old_state else {}
+                old_temp = old_attrs.get("temperature")
+                new_temp = new_state.attributes.get("temperature") if new_state.attributes else None
+                temp_changed = old_temp is not None and old_temp != new_temp
+                if old_state.state != new_state_val or temp_changed:
+                    entry = _extract_climate_state_attr(new_state, now_str)
+                    await hass.async_add_executor_job(
+                        _append_state_attr_to_record, db_path, entity_id, entry,
+                    )
             return  # 非开关动作，跳过后续流程
 
         # 预检测：今日是否有未关闭的旧记录，有则先修正再插入新记录
@@ -3172,21 +3192,19 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
             await _async_correct_unclosed(hass, db_path, entity_id, unclosed, tz)
 
         # ★ 修正后再检查是否有任意未关闭记录（不限日期，重启后可能 on_time 不是今天）
-        after_unclosed = None
-        if unclosed:
-            def _recheck_unclosed():
-                conn = sqlite3.connect(db_path)
-                try:
-                    cursor = conn.execute(
-                        f"SELECT id FROM {TABLE_DEVICE_HISTORY} "
-                        f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL) "
-                        f"LIMIT 1",
-                        (entity_id,),
-                    )
-                    return cursor.fetchone()
-                finally:
-                    conn.close()
-            after_unclosed = await hass.async_add_executor_job(_recheck_unclosed)
+        def _recheck_unclosed():
+            conn = sqlite3.connect(db_path)
+            try:
+                cursor = conn.execute(
+                    f"SELECT id FROM {TABLE_DEVICE_HISTORY} "
+                    f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL) "
+                    f"LIMIT 1",
+                    (entity_id,),
+                )
+                return cursor.fetchone()
+            finally:
+                conn.close()
+        after_unclosed = await hass.async_add_executor_job(_recheck_unclosed)
 
         if after_unclosed:
             # 修正后仍有未关闭记录 → 设备之前就是开机状态，此次是重启后的重复事件，跳过
