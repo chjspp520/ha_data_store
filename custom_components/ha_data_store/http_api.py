@@ -826,6 +826,18 @@ class QueryView(_BaseDBView):
     # ------------------------------------------------------------------ #
     #  device_history：按时间粒度智能返回 + 内嵌汇总                        #
     # ------------------------------------------------------------------ #
+    def _parse_records_state_attr(self, records: list[dict]) -> None:
+        """将 records 中 state_attr 字符串原地解析为 JSON 数组。"""
+        for r in records:
+            sa = r.get("state_attr")
+            if sa:
+                try:
+                    r["state_attr"] = json.loads(sa)
+                except (json.JSONDecodeError, TypeError):
+                    r["state_attr"] = []
+            else:
+                r["state_attr"] = []
+
     def _query_device_history(self, db_path: str, request: web.Request) -> dict:
         params = self._extract_params(request)
         entity_id = params["entity_id"]
@@ -867,6 +879,7 @@ class QueryView(_BaseDBView):
                     (*sql_params, pattern, limit),
                 )
                 records = [dict(row) for row in cursor.fetchall()]
+                self._parse_records_state_attr(records)
                 summary = self._calc_device_summary_by_where(conn, where_clause, sql_params, pattern)
                 return {"records": records, "summary": summary}
 
@@ -881,6 +894,7 @@ class QueryView(_BaseDBView):
                         (*sql_params, pattern, limit),
                     )
                     records = [dict(row) for row in cursor.fetchall()]
+                    self._parse_records_state_attr(records)
                     summary = self._calc_device_summary_by_where(conn, where_clause, sql_params, pattern)
                     return {"records": records, "summary": summary}
                 else:
@@ -927,6 +941,7 @@ class QueryView(_BaseDBView):
                 (*sql_params, limit),
             )
             records = [dict(row) for row in cursor.fetchall()]
+            self._parse_records_state_attr(records)
             summary = self._calc_device_summary_by_where(conn, where_clause, sql_params, "%")
             return {"records": records, "summary": summary}
 

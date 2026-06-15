@@ -1,5 +1,44 @@
 # 更新日志
 
+## 2026-06-15 — v2.2.0 空调状态采集 + 分钟级功率快照（2026-06-15）
+
+### 🆕 新增功能
+
+#### 1. `device_history` 表新增 `state_attr` 字段（空调状态变化链）
+- 空调 HVAC 模式变化时（`off→cool`、`cool→heat`、`heat→off` 等）自动记录
+- JSON 数组格式存储完整开机周期内的状态变化：
+  ```json
+  {"t":"2026-06-15 14:04:21","state":"cool","temp":26.0,"fan":"自动","preset":"","swing":"off"}
+  ```
+- 包含：时间、HVAC 模式（`state`）、温度、风速、预设模式、摆风
+- **去重**：仅 HVAC 模式真实变化时写入，属性变化自动跳过
+- 跨天午夜拆分时新记录也自动携带当前状态
+- API 返回时自动解析为原生 JSON 数组（前端直接使用）
+
+#### 2. `device_history` 表新增 `now_kwh` 字段（分钟级功率快照）
+- 对配置了 `power_entity` 的设备，每分钟自动写入传感器当前值
+- **只保留最新一条**：设备关闭时 `now_kwh` 自动清空
+- 关机时若 `off_power` 未被捕获，自动用 `now_kwh` 补齐计算能耗
+- 前端直接取 `record.now_kwh` 作为实时读数
+
+### 🐛 Bug 修复
+
+#### 1. 关机时 `off_power` 缺失导致能耗为 0
+- **问题**：关机时 `_get_power_value()` 返回 `None`，`energy_consumed` 无法计算
+- **修复**：`_update_device_off_record` 中查询记录时一并取出 `now_kwh`
+- 若 `off_power` 为空且 `now_kwh` 有值，自动补齐为关机读数
+- 回退方案：改用分钟级 `now_kwh` 而非 recorder 历史查询（更可靠）
+
+### 🔧 其他优化
+
+#### API 返回 `state_attr` 预解析为 JSON 数组
+- `_query_device_history` 新增 `_parse_records_state_attr` 方法
+- 所有 device_history 查询出口（按日/按月/无时间范围）均经过预解析
+- 前端直接用 `record.state_attr[0].state`，无需手动 `JSON.parse`
+- 空记录自动转为空数组 `[]`
+
+---
+
 ## 2026-06-11 — 多项功能新增与修复
 
 ### 🆕 新增功能

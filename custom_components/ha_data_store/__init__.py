@@ -191,7 +191,9 @@ def _init_database(db_path: str) -> None:
                 energy_consumed REAL,
                 duration        REAL,
                 cross_day       INTEGER NOT NULL DEFAULT 0,
-                room            TEXT NOT NULL DEFAULT ''
+                room            TEXT NOT NULL DEFAULT '',
+                state_attr      TEXT NOT NULL DEFAULT '',
+                now_kwh         REAL
             );
             """
         )
@@ -199,6 +201,13 @@ def _init_database(db_path: str) -> None:
             f"CREATE INDEX IF NOT EXISTS idx_device_entity_time "
             f"ON {TABLE_DEVICE_HISTORY} (entity_id, on_time);"
         )
+
+        # 迁移：已有表补充新列
+        existing_cols = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_DEVICE_HISTORY})")]
+        if "state_attr" not in existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN state_attr TEXT NOT NULL DEFAULT ''")
+        if "now_kwh" not in existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN now_kwh REAL")
 
         # 3) 传感器数据表：每种指标独立建表（统一结构 id, entity_id, name, datetime, value）
         #    sensor 类型 value 为 TEXT（支持非数值），其余为 REAL
@@ -845,7 +854,7 @@ def _get_all_env_entities(db_path: str) -> list[dict]:
 # =========================================================================== #
 def _insert_device_on_record(
     db_path: str, entity_id: str, name: str, on_time: str, on_power: float | None,
-    room: str = "", pending_json_path: str = "",
+    room: str = "", pending_json_path: str = "", state_attr: str = "",
 ) -> int | None:
     """写入开机记录，返回新记录 id。若 pending_json_path 非空则同步写入 JSON。"""
     # 毫秒防护：截断可能的毫秒后缀
@@ -863,6 +872,17 @@ def _insert_device_on_record(
             (entity_id, name, on_time, on_power, room),
         )
         record_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 开机时写入初始 state_attr（兼容旧版设备无此字段则静默失败）
+        if state_attr:
+            try:
+                conn.execute(
+                    f"UPDATE {TABLE_DEVICE_HISTORY} SET state_attr = ? WHERE id = ?",
+                    (state_attr, record_id),
+                )
+            except Exception:
+                pass
+
         conn.commit()
         local_logger = get_logger()
         if local_logger:
@@ -903,7 +923,7 @@ def _update_device_off_record(
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
-            f"SELECT id, on_time, on_power FROM {TABLE_DEVICE_HISTORY} "
+            f"SELECT id, on_time, on_power, now_kwh FROM {TABLE_DEVICE_HISTORY} "
             f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL) "
             f"ORDER BY id DESC LIMIT 1",
             (entity_id,),
@@ -918,6 +938,11 @@ def _update_device_off_record(
         record_id = row["id"]
         on_time = row["on_time"]
         on_power = row["on_power"]
+        now_kwh = row["now_kwh"]
+
+        # ★ 如果关机时没有捕获 off_power，用 now_kwh 回退（每分钟更新，误差可接受）
+        if off_power is None and now_kwh is not None:
+            off_power = round(now_kwh, 2)
 
         # 毫秒防护：截断 on_time 中的毫秒
         if len(on_time) > 19:
@@ -940,7 +965,7 @@ def _update_device_off_record(
 
         conn.execute(
             f"UPDATE {TABLE_DEVICE_HISTORY} "
-            f"SET off_time = ?, off_power = ?, energy_consumed = ?, duration = ? "
+            f"SET off_time = ?, off_power = ?, energy_consumed = ?, duration = ?, now_kwh = NULL "
             f"WHERE id = ?",
             (off_time, off_power, energy_consumed, duration, record_id),
         )
@@ -992,6 +1017,149 @@ def _extract_power_reading(state_obj) -> float | None:
             except (ValueError, TypeError):
                 continue
     return None
+
+
+# =========================================================================== #
+#  空调状态提取 & 写入 state_attr                                              #
+# =========================================================================== #
+def _extract_climate_state_attr(state_obj, now_str: str) -> str:
+    """从气候实体提取当前状态，返回 JSON entry 字符串。
+
+    返回格式: {"t":"2026-06-15 13:00:00","state":"cool","temp":26.0,"fan":"auto","preset":"eco","swing":"off"}
+    state 为实体的主状态值（hvac_mode: cool/heat/auto/dry/fan_only/off）。
+    """
+    # 实体的 state 就是 HVAC 模式（cool/heat/auto/dry/fan_only/off）
+    state_val = state_obj.state if state_obj else ""
+    attrs = state_obj.attributes if state_obj else {}
+
+    temp = attrs.get("current_temperature") or attrs.get("temperature")
+    if temp is not None:
+        try:
+            temp = round(float(temp), 1)
+        except (ValueError, TypeError):
+            temp = None
+
+    fan = attrs.get("fan_mode", "")
+    preset = attrs.get("preset_mode", "")
+    swing = attrs.get("swing_mode", "")
+
+    entry = {
+        "t": now_str[:19],
+        "state": state_val,
+        "temp": temp,
+        "fan": fan or "",
+        "preset": preset or "",
+        "swing": swing or "",
+    }
+    return json.dumps(entry, ensure_ascii=False)
+
+
+def _append_state_attr_to_record(db_path: str, entity_id: str, new_entry_json: str) -> None:
+    """查出当前未关闭记录，将新的 entry 追加到 state_attr JSON 数组。
+
+    ★ 去重：如果新 entry 的 state 值与数组中最后一条的 state 相同，跳过（仅 HVAC 模式变化才记录）。
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            f"SELECT id, state_attr FROM {TABLE_DEVICE_HISTORY} "
+            f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL) "
+            f"ORDER BY id DESC LIMIT 1",
+            (entity_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return
+
+        record_id = row["id"]
+        existing = row["state_attr"] or "[]"
+
+        try:
+            arr = json.loads(existing)
+        except (json.JSONDecodeError, TypeError):
+            arr = []
+
+        new_entry = json.loads(new_entry_json)
+        new_state = new_entry.get("state", "")
+
+        # 去重：如果 state 值与最后一条相同，跳过
+        if arr and arr[-1].get("state", "") == new_state:
+            return
+
+        arr.append(new_entry)
+
+        new_state_attr = json.dumps(arr, ensure_ascii=False)
+        conn.execute(
+            f"UPDATE {TABLE_DEVICE_HISTORY} SET state_attr = ? WHERE id = ?",
+            (new_state_attr, record_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# =========================================================================== #
+#  设备类 now_kwh：每分钟轮询辅助函数                                            #
+# =========================================================================== #
+def _get_device_kwh_entities(db_path: str) -> list[dict]:
+    """获取所有启用的、配置了 power_entity 的设备类实体。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            f"SELECT entity_id, power_entity FROM {TABLE_ENTITY_CONFIGS} "
+            f"WHERE enabled = 1 AND category = '{CATEGORY_DEVICE}' "
+            f"AND power_entity != ''"
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def _update_device_now_kwh(db_path: str, entity_id: str, value: float) -> None:
+    """更新当前未关闭记录的 now_kwh。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            f"UPDATE {TABLE_DEVICE_HISTORY} SET now_kwh = ? "
+            f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL)",
+            (round(value, 3), entity_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _async_device_now_kwh_poll(hass: HomeAssistant, db_path: str, now=None) -> None:
+    """每分钟执行：对配置了 power_entity 的设备更新 now_kwh。"""
+    try:
+        entities = await hass.async_add_executor_job(_get_device_kwh_entities, db_path)
+    except Exception:
+        return
+
+    if not entities:
+        return
+
+    for ent in entities:
+        entity_id = ent["entity_id"]
+        power_entity = ent["power_entity"]
+
+        p_state = hass.states.get(power_entity)
+        if not p_state or p_state.state in ("unavailable", "unknown", None, ""):
+            continue
+
+        try:
+            value = float(p_state.state)
+        except (ValueError, TypeError):
+            continue
+
+        try:
+            await hass.async_add_executor_job(
+                _update_device_now_kwh, db_path, entity_id, value,
+            )
+        except Exception:
+            pass
 
 
 # =========================================================================== #
@@ -1275,9 +1443,6 @@ def _get_latest_power_from_history(conn: sqlite3.Connection, entity_id: str) -> 
     if row and row[0] is not None:
         return row[0]
 
-    return None
-
-
 # =========================================================================== #
 #  本地 JSON 缓存：防止关机事件丢失                                                #
 # =========================================================================== #
@@ -1520,11 +1685,12 @@ def _do_midnight_splits(db_path: str, items: list[dict], off_time_str: str,
                 continue
 
             # 插入新记录：on_time=当天00:00:00, off_time='', cross_day=1, room
+            init_sa = item.get("init_state_attr", "")
             conn.execute(
                 f"INSERT INTO {TABLE_DEVICE_HISTORY} "
-                f"(entity_id, name, on_time, off_time, on_power, off_power, energy_consumed, duration, cross_day, room) "
-                f"VALUES (?, ?, ?, '', ?, NULL, NULL, NULL, 1, ?)",
-                (entity_id, name, on_time_str, current_power, room),
+                f"(entity_id, name, on_time, off_time, on_power, off_power, energy_consumed, duration, cross_day, room, state_attr) "
+                f"VALUES (?, ?, ?, '', ?, NULL, NULL, NULL, 1, ?, ?)",
+                (entity_id, name, on_time_str, current_power, room, init_sa),
             )
             new_record_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -1591,6 +1757,15 @@ async def _async_midnight_split(hass: HomeAssistant, db_path: str) -> None:
         # ── 方案二：读取设备当前是否开机 ──
         state = hass.states.get(entity_id)
         item["is_on"] = state is not None and _is_on_state(entity_id, state.state)
+
+        # ★ 如果是气候实体且当前开机，记录当前状态用于新记录的 state_attr
+        domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+        if domain == "climate" and item["is_on"] and state:
+            now_str = _get_local_now_str(tz)
+            entry = _extract_climate_state_attr(state, now_str)
+            item["init_state_attr"] = f"[{entry}]"
+        else:
+            item["init_state_attr"] = ""
 
     # 3. 获取 pending JSON 路径
     storage_dir = os.path.dirname(db_path)
@@ -2968,15 +3143,15 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
     pending_json_path = _get_pending_json_path(storage_dir)
 
     if is_on:
-        # ★ 如果旧状态也是 on，说明只是模式/温度/速度等属性变化（非真正开机），忽略
+        # ★ 如果旧状态也是 on，说明只是模式/温度/速度等属性变化（非真正开机）
         if old_state and _is_on_state(entity_id, old_state.state):
-            local_logger = get_logger()
-            if local_logger:
-                local_logger.info(
-                    "[device] 忽略属性变化 entity_id=%s old=%s new=%s (非开关动作)",
-                    entity_id, old_state.state, new_state_val,
+            # ★ 仅 HVAC 模式真正变化时才记录到 state_attr
+            if old_state.state != new_state_val:
+                entry = _extract_climate_state_attr(new_state, now_str)
+                await hass.async_add_executor_job(
+                    _append_state_attr_to_record, db_path, entity_id, entry,
                 )
-            return
+            return  # 非开关动作，跳过后续流程
 
         # 预检测：今日是否有未关闭的旧记录，有则先修正再插入新记录
         today_prefix = now_str[:10]
@@ -3003,10 +3178,17 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
                 "[device] 设备开机 entity_id=%s on_time=%s on_power=%s name=%s room=%s",
                 entity_id, now_str, on_power or "N/A", name or "N/A", room or "N/A",
             )
+
+        # 提取初始 climate state_attr
+        init_state_attr = ""
+        if _get_entity_domain(entity_id) == "climate":
+            entry = _extract_climate_state_attr(new_state, now_str)
+            init_state_attr = f"[{entry}]"
+
         try:
             await hass.async_add_executor_job(
                 _insert_device_on_record, db_path, entity_id, name, now_str, on_power, room,
-                pending_json_path,
+                pending_json_path, init_state_attr,
             )
         except Exception:
             local_logger = get_logger()
@@ -3023,7 +3205,14 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
                 )
             return
 
+        # ★ 关机前先追加末态到 state_attr
+        entry = _extract_climate_state_attr(new_state, now_str)
+        await hass.async_add_executor_job(
+            _append_state_attr_to_record, db_path, entity_id, entry,
+        )
+
         off_power = _get_power_value()
+
         local_logger = get_logger()
         if local_logger:
             local_logger.info(
@@ -3689,6 +3878,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass, _attr_poll_callback, second=0,
     )
     hass.data[DOMAIN]["cancel_attr_poll"] = cancel_attr_poll
+
+    # now_kwh：每分钟更新一次配置了 power_entity 的设备的当前值
+    async def _device_kwh_callback(now=None) -> None:
+        try:
+            await _async_device_now_kwh_poll(hass, db_path, now)
+        except Exception:
+            local_logger = get_logger()
+            if local_logger:
+                local_logger.exception("[device_kwh] now_kwh 轮询异常")
+
+    cancel_device_kwh = async_track_time_change(
+        hass, _device_kwh_callback, second=0,
+    )
+    hass.data[DOMAIN]["cancel_device_kwh"] = cancel_device_kwh
 
     # 午夜拆分：每天 00:00 执行
     async def _midnight_split_callback(now=None) -> None:
