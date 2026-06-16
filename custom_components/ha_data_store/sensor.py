@@ -68,7 +68,9 @@ class MonitoredEntitiesSensor(SensorEntity):
                 return "bad", t-bad, bad
 
             d_h, d_o, d_b = _health(device_list); e_h, e_o, e_b = _health(env_list)
-            a_h, a_o, a_b = _health(attr_list)
+            a_b = sum(1 for e in attr_list if e["status"] == "unavailable")
+            a_h = "good" if a_b == 0 else "bad"
+            a_o = len(attr_list) - a_b
             exp_bad = sum(1 for r in exports if not self._hass.states.get(r["entity_id"]) or self._hass.states.get(r["entity_id"]).state in ("unavailable","unknown"))
             exp_h = "good" if not exports or exp_bad==0 else ("warn" if exp_bad<len(exports) else "bad")
             fs_bad = sum(1 for r in file_srcs if not r.get("file_path") or not os.path.isfile(r["file_path"]))

@@ -77,6 +77,45 @@ PLATFORMS: list[str] = [
 ]
 
 
+def _refresh_monitored_set_sync(db_path: str) -> set[str]:
+    """同步查询数据库，返回需要监听 state_changed 的 entity_id 集合。
+
+    只包含用户主动配置且已启用的实体，避免全量监听 HA 所有实体变化。
+    """
+    import sqlite3
+    monitored: set[str] = set()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        # 1. device 类：entity_id + power_entity
+        rows = conn.execute(
+            f"SELECT entity_id, power_entity FROM {TABLE_ENTITY_CONFIGS} "
+            f"WHERE enabled = 1 AND category = ?",
+            (CATEGORY_DEVICE,),
+        ).fetchall()
+        for row in rows:
+            monitored.add(row["entity_id"])
+            if row["power_entity"]:
+                monitored.add(row["power_entity"])
+        # 2. attribute 类 event 模式：entity_id
+        rows = conn.execute(
+            f"SELECT entity_id FROM {TABLE_ENTITY_CONFIGS} "
+            f"WHERE enabled = 1 AND category = ? AND collect_mode = ?",
+            (CATEGORY_ATTRIBUTE, COLLECT_MODE_EVENT),
+        ).fetchall()
+        for row in rows:
+            monitored.add(row["entity_id"])
+        # 3. vacuum 类：trigger_entity_id
+        rows = conn.execute(
+            f"SELECT trigger_entity_id FROM {TABLE_VACUUM_CONFIGS} WHERE enabled = 1"
+        ).fetchall()
+        for row in rows:
+            monitored.add(row["trigger_entity_id"])
+    finally:
+        conn.close()
+    return monitored
+
+
 # =========================================================================== #
 #  时区辅助函数                                                                   #
 # =========================================================================== #
@@ -2489,8 +2528,11 @@ async def _async_attr_poll(hass: HomeAssistant, db_path: str, now=None) -> None:
 
     for ent in attr_entities:
         entity_id = ent["entity_id"]
+        attr_type = ent.get("attr_type", "")
         interval_min = int(ent.get("collect_interval", 30))
         round_minute = int(ent.get("round_minute", 0))
+        dedup_key = f"{entity_id}|{attr_type}"
+        local_logger = get_logger()
 
         if round_minute:
             # 整分钟采集：只在分钟数为 interval 的整倍数时采集
@@ -2500,13 +2542,18 @@ async def _async_attr_poll(hass: HomeAssistant, db_path: str, now=None) -> None:
             if current_minute % interval_min != 0:
                 continue
             # 防止同一分钟重复采集
-            last_minute = hass.data[DOMAIN].setdefault("last_attr_poll_minute", {}).get(entity_id, -1)
+            last_minute = hass.data[DOMAIN].setdefault("last_attr_poll_minute", {}).get(dedup_key, -1)
             if last_minute == current_minute:
+                if local_logger:
+                    local_logger.info("[attr] 跳过 %s (本分钟已采集) dedup_key=%s", entity_id, dedup_key)
                 continue
         else:
             # 普通间隔采集
-            last_ts = hass.data[DOMAIN].get("last_attr_poll", {}).get(entity_id, 0)
+            last_ts = hass.data[DOMAIN].get("last_attr_poll", {}).get(dedup_key, 0)
             if now_ts - last_ts < interval_min * 60:
+                if local_logger:
+                    local_logger.debug("[attr] 跳过 %s (距上次采集 %.0fs < %dmin) dedup_key=%s",
+                                       entity_id, now_ts - last_ts, interval_min, dedup_key)
                 continue
 
         state_obj = hass.states.get(entity_id)
@@ -2530,9 +2577,13 @@ async def _async_attr_poll(hass: HomeAssistant, db_path: str, now=None) -> None:
                 local_logger.exception("[attr] 属性轮询写入异常 entity_id=%s", entity_id)
 
         # 更新最后采集时间
-        hass.data[DOMAIN].setdefault("last_attr_poll", {})[entity_id] = now_ts
+        hass.data[DOMAIN].setdefault("last_attr_poll", {})[dedup_key] = now_ts
         if round_minute:
-            hass.data[DOMAIN].setdefault("last_attr_poll_minute", {})[entity_id] = datetime.now().minute
+            hass.data[DOMAIN].setdefault("last_attr_poll_minute", {})[dedup_key] = datetime.now().minute
+
+        if local_logger:
+            local_logger.info("[attr] 采集完成 %s attr_type=%s written=%s dedup_key=%s",
+                              entity_id, attr_type, written, dedup_key)
 
     # 存储本次轮询的按类型统计
     if poll_stats:
@@ -3098,6 +3149,14 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
 
     try:
         info = await hass.async_add_executor_job(_get_entity_info, db_path, entity_id)
+    except RuntimeError as exc:
+        # HA 关闭时 executor 已 shutdown，静默跳过
+        if "shutdown" in str(exc).lower():
+            return
+        local_logger = get_logger()
+        if local_logger:
+            local_logger.exception("[device] 查询实体配置异常 entity_id=%s", entity_id)
+        return
     except Exception:
         local_logger = get_logger()
         if local_logger:
@@ -3872,8 +3931,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 在 HA 完全启动后执行恢复
     hass.bus.async_listen_once("homeassistant_started", _recover_pending_on_startup)
 
-    # 设备类：监听 state_changed 事件
+    # 初始化受监控实体的白名单（必须在监听器注册之前，避免空窗期穿透）
+    hass.data[DOMAIN]["monitored_entities"] = await hass.async_add_executor_job(
+        _refresh_monitored_set_sync, db_path,
+    )
+    monitored_count = len(hass.data[DOMAIN]["monitored_entities"])
+    _LOGGER.warning("[HDS] 受监控实体白名单已加载 count=%d", monitored_count)
+    if local_logger:
+        await hass.async_add_executor_job(
+            local_logger.info,
+            "[sys] 受监控实体白名单已加载 count=%d entities=%s",
+            monitored_count, sorted(hass.data[DOMAIN]["monitored_entities"]),
+        )
+
+    # 设备类：监听 state_changed 事件（仅处理用户配置过的实体）
     async def _internal_state_listener(event: Event) -> None:
+        entity_id = event.data.get("entity_id")
+        monitored = hass.data.get(DOMAIN, {}).get("monitored_entities")
+        if monitored is not None and entity_id and entity_id not in monitored:
+            return  # 不在监控白名单中，跳过
         try:
             await _async_state_changed(hass, db_path, event)
         except Exception:
@@ -3886,6 +3962,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # 扫地机器人：监听 state_changed 事件（坐标变化时触发多实体快照采集）
     async def _vacuum_state_listener(event: Event) -> None:
+        entity_id = event.data.get("entity_id")
+        monitored = hass.data.get(DOMAIN, {}).get("monitored_entities")
+        if monitored is not None and entity_id and entity_id not in monitored:
+            return  # 不在监控白名单中，跳过
         try:
             await _async_vacuum_state_changed(hass, db_path, event)
         except Exception:
@@ -4010,12 +4090,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     hass.data[DOMAIN]["cancel_api_src"] = cancel_api_src
 
-    _LOGGER.warning("[HDS] 全量监听已注册（设备事件+环境轮询+属性轮询+文件源+API源+午夜拆分）")
+    _LOGGER.warning("[HDS] 监听已注册（白名单+环境轮询+属性轮询+文件源+API源+午夜拆分）")
 
     if local_logger:
         await hass.async_add_executor_job(
             local_logger.info,
-            "[sys] 全量监听已注册 功能=设备事件+环境轮询+午夜拆分 "
+            "[sys] 监听已注册 功能=白名单过滤+环境轮询+午夜拆分 "
             "db_path=%s log_dir=%s domain=%s",
             db_path, log_dir, DOMAIN,
         )

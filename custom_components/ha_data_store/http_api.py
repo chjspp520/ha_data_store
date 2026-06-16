@@ -65,6 +65,23 @@ from .logger import get_logger as _log_local
 
 _LOGGER = logging.getLogger(__name__)
 
+
+async def _refresh_monitored(hass: HomeAssistant, db_path: str) -> None:
+    """在 executor 中刷新受监控实体白名单，并输出日志。"""
+    from .__init__ import _refresh_monitored_set_sync
+    monitored = await hass.async_add_executor_job(_refresh_monitored_set_sync, db_path)
+    hass.data[DOMAIN]["monitored_entities"] = monitored
+    _LOGGER.info("[HDS] 受监控实体白名单已刷新 count=%d entities=%s",
+                 len(monitored), sorted(monitored))
+    from .logger import get_logger as _lg
+    local_logger = _lg()
+    if local_logger:
+        await hass.async_add_executor_job(
+            local_logger.info,
+            "[sys] 受监控实体白名单已刷新 count=%d entities=%s",
+            len(monitored), sorted(monitored),
+        )
+
 # SQL 安全沙箱：禁止出现的关键字（不区分大小写）
 _DANGEROUS_KEYWORDS = ("DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "CREATE", "TRUNCATE", "EXEC", "EXECUTE")
 
@@ -437,6 +454,7 @@ class EntityConfigView(_BaseDBView):
 
         try:
             await self._exec_in_executor(hass, _upsert)
+            await _refresh_monitored(hass, db_path)
             return self.json({"success": True, "message": f"实体 {entity_id} 配置已保存"})
         except Exception as exc:
             _LOGGER.exception("保存实体配置失败")
@@ -470,6 +488,7 @@ class EntityConfigView(_BaseDBView):
 
         try:
             await self._exec_in_executor(hass, _disable)
+            await _refresh_monitored(hass, db_path)
             return self.json({"success": True, "message": f"实体 {entity_id} 已移除"})
         except Exception as exc:
             _LOGGER.exception("删除实体配置失败")
@@ -3969,7 +3988,7 @@ class EntityMonitorView(_BaseDBView):
             a_unavail = sum(1 for e in a_ents if e["status"] == "unavailable")
             types["attribute"] = dict(
                 count=len(a_ents), online=a_online, unavailable=a_unavail,
-                health="good" if len(a_ents)==0 or a_unavail==0 else ("warn" if a_unavail<len(a_ents) else "bad"),
+                health="good" if a_unavail == 0 else "bad",
             )
             # 实体导出：检查实体在线 + 导出文件存在
             exp_bad = 0
@@ -4495,6 +4514,7 @@ class AttrConfigView(_BaseDBView):
 
         try:
             result_type = await self._exec_in_executor(hass, _do_config)
+            await _refresh_monitored(hass, db_path)
             return self.json({
                 "success": True,
                 "message": f"属性提取配置已保存，类型: {result_type}, 实体: {entity_id}",
@@ -4543,6 +4563,7 @@ class AttrConfigView(_BaseDBView):
 
         try:
             msg = await self._exec_in_executor(hass, _do_delete)
+            await _refresh_monitored(hass, db_path)
             return self.json({"success": True, "message": msg})
         except ValueError as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=400)
@@ -4761,9 +4782,20 @@ class FileSourceConfigView(_BaseDBView):
 
         device_id = await self._exec_in_executor(hass, _del)
         if device_id:
+            # 清理该设备下所有残留在 entity_registry 中的实体
+            from homeassistant.helpers import entity_registry as er2
+            er2_inst = er2.async_get(hass)
+            remove_ids = [
+                eid for eid, entry in er2_inst.entities.items()
+                if entry.device_id == device_id and entry.platform == DOMAIN
+            ]
+            for eid in remove_ids:
+                er2_inst.async_remove(eid)
+                hass.states.async_remove(eid)
             from homeassistant.helpers import device_registry as dr2
             dr2_inst = dr2.async_get(hass)
             dr2_inst.async_remove_device(device_id)
+            _LOGGER.warning("[HDS] 文件源删除清理 devices=%s entities=%d", device_id, len(remove_ids))
         return self.json({"success": True, "message": f"文件源已删除: {sid}"})
 
 
@@ -4874,9 +4906,20 @@ class ApiSourceConfigView(_BaseDBView):
 
         device_id = await self._exec_in_executor(hass, _del)
         if device_id:
+            # 清理该设备下所有残留在 entity_registry 中的实体
+            from homeassistant.helpers import entity_registry as er2
+            er2_inst = er2.async_get(hass)
+            remove_ids = [
+                eid for eid, entry in er2_inst.entities.items()
+                if entry.device_id == device_id and entry.platform == DOMAIN
+            ]
+            for eid in remove_ids:
+                er2_inst.async_remove(eid)
+                hass.states.async_remove(eid)
             from homeassistant.helpers import device_registry as dr2
             dr2_inst = dr2.async_get(hass)
             dr2_inst.async_remove_device(device_id)
+            _LOGGER.warning("[HDS] API源删除清理 devices=%s entities=%d", device_id, len(remove_ids))
         return self.json({"success": True, "message": f"API 源已删除: {sid}"})
 
 
@@ -5665,6 +5708,7 @@ class VacuumConfigsView(_BaseDBView):
 
         try:
             await self._exec_in_executor(hass, _upsert)
+            await _refresh_monitored(hass, db_path)
             return self.json({"success": True, "message": f"机器人 {vacuum_id} 配置已保存"})
         except Exception as exc:
             _LOGGER.exception("保存真空配置失败")
@@ -5692,6 +5736,7 @@ class VacuumConfigsView(_BaseDBView):
 
         try:
             await self._exec_in_executor(hass, _delete)
+            await _refresh_monitored(hass, db_path)
             return self.json({"success": True, "message": f"机器人 {vacuum_id} 已删除"})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -5787,6 +5832,32 @@ class BridgeConnectionsView(_BaseDBView):
         except ValueError:
             return self.json({"success": False, "error": "id 必须为整数"}, status_code=400)
 
+        # 先查出该连接下所有桥接实体的 entity_id
+        def _query_entity_ids() -> list[str]:
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    f"SELECT entity_id FROM {TABLE_BRIDGE_ENTITIES} WHERE connection_id = ?",
+                    (cid,),
+                ).fetchall()
+                return [r[0] for r in rows]
+            finally:
+                conn.close()
+
+        entity_ids = await self._exec_in_executor(hass, _query_entity_ids)
+
+        # 清理 HA 中的实体：entity_registry + state_machine + 内存实例
+        if entity_ids:
+            from homeassistant.helpers import entity_registry as er
+            reg = er.async_get(hass)
+            instances = hass.data.get(DOMAIN, {}).get("bridge_entity_instances", {})
+            for eid in entity_ids:
+                reg_entry = reg.async_get(eid)
+                if reg_entry and reg_entry.platform == DOMAIN:
+                    reg.async_remove(eid)
+                    hass.states.async_remove(eid)
+                instances.pop(eid, None)
+
         def _delete():
             conn = sqlite3.connect(db_path)
             try:
@@ -5798,6 +5869,7 @@ class BridgeConnectionsView(_BaseDBView):
 
         try:
             await self._exec_in_executor(hass, _delete)
+            _LOGGER.warning("[HDS] 桥接连接删除清理 entities=%d", len(entity_ids))
             return self.json({"success": True, "message": f"连接 {cid} 已删除"})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -5908,6 +5980,31 @@ class BridgeEntitiesView(_BaseDBView):
         except ValueError:
             return self.json({"success": False, "error": "id 必须为整数"}, status_code=400)
 
+        # 先查出该桥接实体的 entity_id
+        def _query_entity_id() -> str:
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    f"SELECT entity_id FROM {TABLE_BRIDGE_ENTITIES} WHERE id = ?",
+                    (eid,),
+                ).fetchone()
+                return row[0] if row else ""
+            finally:
+                conn.close()
+
+        ent_id = await self._exec_in_executor(hass, _query_entity_id)
+
+        # 清理 HA 中的实体
+        if ent_id:
+            from homeassistant.helpers import entity_registry as er
+            reg = er.async_get(hass)
+            reg_entry = reg.async_get(ent_id)
+            if reg_entry and reg_entry.platform == DOMAIN:
+                reg.async_remove(ent_id)
+                hass.states.async_remove(ent_id)
+            instances = hass.data.get(DOMAIN, {}).get("bridge_entity_instances", {})
+            instances.pop(ent_id, None)
+
         def _delete():
             conn = sqlite3.connect(db_path)
             try:
@@ -5918,6 +6015,7 @@ class BridgeEntitiesView(_BaseDBView):
 
         try:
             await self._exec_in_executor(hass, _delete)
+            _LOGGER.warning("[HDS] 桥接实体删除清理 entity=%s id=%s", ent_id, eid)
             return self.json({"success": True, "message": f"桥接实体 {eid} 已删除"})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)

@@ -1,5 +1,41 @@
 # 更新日志
 
+## 2026-06-16 — v2.2.3 删除实体自动清理 + bug 修复
+
+### 🐛 Bug 修复
+
+#### 1. 属性轮询 `last_attr_poll` 使用 `(entity_id, attr_type)` 联合 key
+- **问题**：`last_attr_poll` 和 `last_attr_poll_minute` 仅以 `entity_id` 为 key，同一 entity 多个 `attr_type`（如 `ele_year`、`ele_month`、`ele_day`）时，第一个类型采集后覆盖了其他类型的时间记录，导致后续类型被跳过
+- **修复**：key 改为 `f"{entity_id}|{attr_type}"` 联合字符串，每个 attr_type 独立计时
+
+#### 2. 删除文件源/API源/桥接/虚拟设备后实体残留不可用
+- **问题**：从前端删除文件源、API源、桥接连接、桥接实体、虚拟设备时，只删除了配置和 device_registry，entity_registry 和 state_machine 中的实体仍然存在，显示为"不可用"
+- **修复**：在删除配置前，遍历 entity_registry 中关联的实体，依次执行 `async_remove` + `hass.states.async_remove`，彻底清除
+
+### 🔧 其他优化
+
+#### 1. 属性轮询增加日志输出
+- 跳过时记录 `info`/`debug` 级别日志，采集完成时记录 `info` 日志，便于排查去重问题
+
+#### 2. 日志查看器倒序显示
+- `db_viewer.html` 日志页面改为最新日志在最上方，搜索过滤后同样倒序
+
+#### 3. Sub-tab 角标显示个数
+- `db_viewer.html` 系统监控页面各子选项卡右上角增加红色数字角标，显示当前项目数，数量为 0 时自动隐藏
+
+#### 4. 受监控实体白名单（仅监听用户配置的实体）
+- **问题**：`state_changed` 监听器注册了 HA 全部实体变化，每次变化都查一次 SQLite，未配置的实体空耗性能，且 HA 关闭时刷屏 `Executor shutdown` 错误
+- **修复**：新增 `_refresh_monitored_set_sync` 函数，启动时从 `entity_configs`、`vacuum_configs` 查询用户主动配置且已启用的实体，构建内存白名单 `Set[str]`
+- `_internal_state_listener` 和 `_vacuum_state_listener` 入口做 O(1) 集合检查，不在白名单中直接跳过
+- 白名单初始化移至监听器注册之前，避免空窗期穿透
+- 日志信息从"全量监听"改为"白名单过滤"，与实际行为一致
+- 用户通过 API 新增/修改/删除配置后自动刷新白名单，并输出日志确认
+
+#### 5. 属性提取卡片颜色优化
+- 系统监控页属性提取的健康指示改为二级（红色=有离线，绿色=无离线），移除中间的橙色状态
+
+---
+
 ## 2026-06-15 — v2.2.2 state_attr 增强 + 目标温度追踪
 
 ### 🆕 新增功能

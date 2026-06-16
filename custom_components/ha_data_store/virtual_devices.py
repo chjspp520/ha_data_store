@@ -1483,13 +1483,14 @@ class VirtualDeviceManager:
         if not target:
             return False
 
-        # 从 entity_registry 移除所有关联实体
+        # 从 entity_registry 和 state_machine 移除所有关联实体
         from homeassistant.helpers import entity_registry as er
         reg = er.async_get(self._hass)
         for ent in target["entities"]:
             eid = getattr(ent, 'entity_id', None) or getattr(ent, '_attr_entity_id', None)
             if eid:
                 reg.async_remove(eid)
+                self._hass.states.async_remove(eid)
 
         vd_list.remove(target)
         self._remove_from_db(entity_id)
