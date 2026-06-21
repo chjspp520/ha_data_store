@@ -92,3 +92,6 @@ PENDING_JSON_FILENAME = "ha_data_store_pending.json"
 
 # HA 停机判定阈值（秒）：超过此时间视为长时间停机
 SHUTDOWN_THRESHOLD_SECONDS = 1800
+
+# 系统版本号（与 manifest.json 同步）
+VERSION = "2.3.0"

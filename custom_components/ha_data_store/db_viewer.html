@@ -123,7 +123,11 @@
   .title-good { color: var(--green); }
   .title-warn { color: var(--orange); }
   .title-bad { color: var(--accent); }
-  .section-head { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; margin: 16px 0 6px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+  .section-head { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; margin: 16px 0 6px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.06); cursor: pointer; user-select: none; }
+  .section-head::before { content: '▶ '; font-size: 10px; opacity: .6; }
+  .section-head.expanded::before { content: '▼ '; }
+  .section-content { overflow: hidden; transition: max-height .2s; max-height: 20000px; }
+  .section-content.collapsed { max-height: 0; }
   .section-head.title-good { color: var(--green); }
   .section-head.title-warn { color: var(--orange); }
   .section-head.title-bad { color: var(--accent); }
@@ -217,6 +221,7 @@
     <button class="btn-accent" onclick="deleteSelectedTable()" style="background:#c0392b;border-color:#c0392b;font-size:12px;padding:6px 12px" title="删除当前选中表（需管理员密码）">🗑 删表</button>
     <button id="btnVacuum" class="btn-accent" onclick="vacuumDatabase()" style="background:var(--orange);border-color:var(--orange);font-size:12px;padding:6px 12px" title="压缩数据库文件">🗜 压缩</button>
     <button class="btn-accent" onclick="showUnclosedToday()" style="background:#8e44ad;border-color:#8e44ad;font-size:12px;padding:6px 12px" title="查找当日有on_time但没有off_time的记录">⚠ 未关闭记录</button>
+    <button class="btn-accent" onclick="showSQLModal()" style="background:#2ecc71;border-color:#2ecc71;font-size:12px;padding:6px 12px" title="执行自定义 SQL 语句">▶ 执行SQL</button>
     <span class="info" id="tableInfo"></span>
     <span class="batch-info" id="batchInfo"></span>
   </div>
@@ -238,6 +243,38 @@
     <button id="btnNext" onclick="loadTable(currentPage+1)">下一页</button>
     <button id="btnLast" onclick="loadTable(totalPages)">末页</button>
     <button class="btn-accent" onclick="loadTable(currentPage)">刷新</button>
+  </div>
+</div>
+
+<!-- SQL 执行弹窗 -->
+<div id="sqlModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:999" onclick="closeSQLModal()"></div>
+<div id="sqlModal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 20px;z-index:1000;width:80%;max-width:900px;max-height:85vh;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.6)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <h4 style="color:var(--accent);margin:0">▶ 执行 SQL 语句</h4>
+    <button onclick="closeSQLModal()" style="background:transparent;border:none;color:var(--text2);cursor:pointer;font-size:18px;padding:0 4px">✕</button>
+  </div>
+  <textarea id="sqlInput" style="width:100%;height:80px;padding:8px;font-family:monospace;font-size:13px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;resize:vertical;box-sizing:border-box;white-space:pre;overflow-wrap:normal;overflow-x:auto" placeholder="输入 SQL 语句，例如：&#10;SELECT * FROM device_history ORDER BY on_time DESC LIMIT 100"></textarea>
+  <div style="margin:4px 0;font-size:12px;color:var(--text2);background:var(--bg);padding:8px;border-radius:6px;border:1px dashed var(--border)">
+    <b>💡 固定功率补填历史数据：</b>
+    <code style="display:block;margin-top:4px;white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.5">UPDATE device_history SET energy_consumed = ROUND(
+  (SELECT power_rating FROM entity_configs WHERE entity_id = device_history.entity_id)
+  / 1000.0 * (julianday(off_time) - julianday(on_time)) * 24, 2)
+WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
+  AND off_time != '' AND energy_consumed IS NULL;</code>
+    <span style="display:block;margin-top:2px">↑ 复制到上面输入框执行，为已配置固定功率的历史记录补填用电量（已有值的不会覆盖）</span>
+  </div>
+  <div style="display:flex;gap:8px;margin:8px 0;align-items:center">
+    <button class="btn-green" onclick="execSQL()" style="padding:6px 16px">▶ 执行</button>
+    <button onclick="document.getElementById('sqlInput').value='';document.getElementById('sqlResult').innerHTML=''" style="padding:6px 12px">清除</button>
+    <span id="sqlStatus" style="font-size:12px;color:var(--text2)"></span>
+  </div>
+  <div id="sqlResult" style="max-height:calc(85vh - 200px);overflow:auto"></div>
+  <div class="pagination" id="sqlPagination" style="display:none;margin-top:8px">
+    <button id="sqlBtnFirst" onclick="sqlLoadPage(1)">首页</button>
+    <button id="sqlBtnPrev" onclick="sqlLoadPage(sqlCurPage-1)">上一页</button>
+    <span class="info" id="sqlPageInfo"></span>
+    <button id="sqlBtnNext" onclick="sqlLoadPage(sqlCurPage+1)">下一页</button>
+    <button id="sqlBtnLast" onclick="sqlLoadPage(sqlTotalPages)">末页</button>
   </div>
 </div>
 
@@ -287,8 +324,8 @@
     <div id="manageListDevice"></div>
     <div class="section">
       <h3>添加设备类实体</h3>
-      <textarea id="txtDevice" placeholder="每行一个，格式：房间, 设备名称, 实体ID, 电量传感器ID&#10;&#10;示例：&#10;厨房, 烧水壶, input_boolean.shao_shui_hu, sensor.xxx&#10;客厅, switch.ac, sensor.ac_energy&#10;climate.hall&#10;&#10;房间、设备名称、电量传感器均为选配"></textarea>
-      <div class="hint">房间、设备名称、电量传感器均为选配。设备名称会写入 device_history 表。</div>
+      <textarea id="txtDevice" placeholder="每行一个，格式：房间, 设备名称, 实体ID, [电量传感器ID|功率值W]&#10;&#10;示例：&#10;厨房, 烧水壶, input_boolean.shao_shui_hu, sensor.xxx   # 有电量传感器&#10;卧室, 台灯, switch.desk_lamp, 10                     # 固定功率10W&#10;客厅, switch.ac, sensor.ac_energy                     # 旧格式&#10;climate.hall                                           # 仅实体ID&#10;&#10;【注意】第4个参数含 . 视为电量传感器ID，纯数字视为固定功率(瓦特)"></textarea>
+      <div class="hint">第4参数：含 <code>.</code> 为电量传感器ID，纯数字为固定功率(W)。房间、设备名称均为选配。</div>
           <div class="row">
             <button class="btn-green" onclick="addDeviceEntities()">批量添加设备</button>
           </div>
@@ -1372,6 +1409,126 @@ async function vacuumDatabase() {
   } catch(e) { btn.disabled = false; btn.textContent = '🗜 压缩'; showToast('请求失败', false); }
 }
 
+// ==============================
+//  SQL 执行
+// ==============================
+const SQL_API = '/api/ha_data_store/db_viewer/sql';
+let sqlCurPage = 1, sqlTotalPages = 1, sqlLastResult = null;
+
+function closeSQLModal() {
+  document.getElementById('sqlModal').style.display = 'none';
+  document.getElementById('sqlModalOverlay').style.display = 'none';
+}
+
+function showSQLModal() {
+  document.getElementById('sqlModal').style.display = 'block';
+  document.getElementById('sqlModalOverlay').style.display = 'block';
+  document.getElementById('sqlInput').focus();
+  // 重置分页状态
+  sqlCurPage = 1; sqlTotalPages = 1; sqlLastResult = null;
+  document.getElementById('sqlPagination').style.display = 'none';
+}
+
+function escHtmlSql(v) {
+  if (v === null || v === undefined) return '<span style="color:#999">NULL</span>';
+  const s = String(v);
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function sqlRenderTable(result) {
+  const cols = result.columns || [];
+  const rows = result.rows || [];
+  let html = '<div class="table-wrap"><table><thead><tr>';
+  cols.forEach(c => { html += '<th>' + escHtmlSql(c) + '</th>'; });
+  html += '</tr></thead><tbody>';
+  if (rows.length === 0) {
+    html += '<tr><td colspan="' + cols.length + '" style="text-align:center;color:var(--text2)">(空结果)</td></tr>';
+  } else {
+    rows.forEach(r => {
+      html += '<tr>';
+      cols.forEach(c => { html += '<td>' + escHtmlSql(r[c]) + '</td>'; });
+      html += '</tr>';
+    });
+  }
+  html += '</tbody></table></div>';
+
+  if (result.affected !== undefined) {
+    html += '<div style="margin-top:8px;color:var(--text2);font-size:12px">受影响行数: ' + result.affected + '</div>';
+  } else {
+    html += '<div style="margin-top:8px;color:var(--text2);font-size:12px">共 ' + result.total + ' 条记录，当前第 ' + result.page + '/' + result.total_pages + ' 页</div>';
+  }
+  return html;
+}
+
+async function execSQL() {
+  const sql = document.getElementById('sqlInput').value.trim();
+  if (!sql) { showToast('请输入 SQL 语句', false); return; }
+  const statusEl = document.getElementById('sqlStatus');
+  const resultEl = document.getElementById('sqlResult');
+  statusEl.textContent = '执行中...';
+  resultEl.innerHTML = '';
+
+  try {
+    const resp = await fetch(SQL_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql, page: 1, page_size: 100 })
+    });
+    const json = await resp.json();
+    if (!json.success) {
+      statusEl.textContent = '❌ ' + (json.error || '执行失败');
+      return;
+    }
+    statusEl.textContent = '✅ 执行成功';
+    sqlLastResult = json;
+    sqlCurPage = json.page || 1;
+    sqlTotalPages = json.total_pages || 1;
+
+    resultEl.innerHTML = sqlRenderTable(json);
+
+    // 分页控件
+    const pag = document.getElementById('sqlPagination');
+    if (json.total_pages > 1) {
+      pag.style.display = 'flex';
+      document.getElementById('sqlPageInfo').textContent = '第 ' + sqlCurPage + ' / ' + sqlTotalPages + ' 页 (共 ' + json.total + ' 条)';
+    } else {
+      pag.style.display = 'none';
+    }
+  } catch(e) {
+    statusEl.textContent = '❌ 请求异常: ' + e;
+  }
+}
+
+async function sqlLoadPage(page) {
+  if (page < 1 || page > sqlTotalPages || !sqlLastResult) return;
+  const sql = document.getElementById('sqlInput').value.trim();
+  if (!sql) return;
+  const statusEl = document.getElementById('sqlStatus');
+  const resultEl = document.getElementById('sqlResult');
+  statusEl.textContent = '加载中...';
+
+  try {
+    const resp = await fetch(SQL_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql, page, page_size: 100 })
+    });
+    const json = await resp.json();
+    if (!json.success) {
+      statusEl.textContent = '❌ ' + (json.error || '加载失败');
+      return;
+    }
+    statusEl.textContent = '✅ 第 ' + page + ' 页';
+    sqlLastResult = json;
+    sqlCurPage = json.page || page;
+    sqlTotalPages = json.total_pages || 1;
+    resultEl.innerHTML = sqlRenderTable(json);
+    document.getElementById('sqlPageInfo').textContent = '第 ' + sqlCurPage + ' / ' + sqlTotalPages + ' 页 (共 ' + json.total + ' 条)';
+  } catch(e) {
+    statusEl.textContent = '❌ 请求异常: ' + e;
+  }
+}
+
 async function initDbViewer() {
   try {
     const resp = await fetch(DB_API);
@@ -2023,27 +2180,32 @@ async function loadMonitor() {
     let html = '';
     const tc = {good:'title-good', warn:'title-warn', bad:'title-bad'};
 
+    function sectionContent(htmlContent) {
+      return '<div class="section-content collapsed">' + htmlContent + '</div>';
+    }
+
     // -- 设备类 --
     let dh = (types.device||{}).health||'good';
     html += '<h4 class="section-head ' + (tc[dh]||'title-good') + '">📡 设备类 ' + healthBadge(dh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.device?types.device.online:0)+' <span class="stat-dot orange"></span>'+(types.device?types.device.offline:0)+' <span class="stat-dot red"></span>'+(types.device?types.device.unavailable:0)+'</span></h4>';
     let dEnts = ents.filter(e => e.category === 'device');
-    html += dEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildEntityTable(dEnts);
+    html += sectionContent(dEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildEntityTable(dEnts));
 
     // -- 传感器类 --
     let eh = (types.environment||{}).health||'good';
     html += '<h4 class="section-head ' + (tc[eh]||'title-good') + '">🌡️ 传感器类 ' + healthBadge(eh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.environment?types.environment.online:0)+' <span class="stat-dot red"></span>'+(types.environment?types.environment.unavailable:0)+'</span></h4>';
     let eEnts = ents.filter(e => e.category === 'environment');
-    html += eEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildEntityTable(eEnts);
+    html += sectionContent(eEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildEntityTable(eEnts));
 
     // -- 属性提取 --
     let ah = (types.attribute||{}).health||'good';
     html += '<h4 class="section-head ' + (tc[ah]||'title-good') + '">📊 属性提取 ' + healthBadge(ah) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.attribute?types.attribute.online:0)+' <span class="stat-dot red"></span>'+(types.attribute?types.attribute.unavailable:0)+'</span></h4>';
     let aEnts = ents.filter(e => e.category === 'attribute');
-    html += aEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildAttrEntityTable(aEnts);
+    html += sectionContent(aEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildAttrEntityTable(aEnts));
 
     // -- 实体导出 --
     let xh = (types.export||{}).health||'good';
     html += '<h4 class="section-head ' + (tc[xh]||'title-good') + '">📁 实体→json ' + healthBadge(xh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.export?types.export.ok:0)+' <span class="stat-dot red"></span>'+(types.export?types.export.bad:0)+'</span></h4>';
+    html += '<div class="section-content collapsed">';
     if (exports.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
       html += '<div class="table-wrap"><table><thead><tr><th style="width:30%">实体ID</th><th style="width:35%">文件名</th><th style="width:15%">状态</th><th style="width:20%">上次更新</th></tr></thead><tbody>';
@@ -2054,11 +2216,13 @@ async function loadMonitor() {
       });
       html += '</tbody></table></div>';
     }
+    html += '</div>';
 
     // -- 文件源 --
     let fh = (types.file_source||{}).health||'good';
     var fsCount = (types.file_source||{}).count||0, fsBad = (types.file_source||{}).bad||0;
     html += '<h4 class="section-head ' + (tc[fh]||'title-good') + '">📄 json→实体 ' + healthBadge(fh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(fsCount-fsBad)+' <span class="stat-dot red"></span>'+fsBad+'</span></h4>';
+    html += '<div class="section-content collapsed">';
     if (fileSrc.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
       html += '<div class="table-wrap"><table><thead><tr><th style="width:10%">名称</th><th style="width:28%">路径</th><th style="width:6%">文件</th><th style="width:8%">实体</th><th style="width:16%">前缀</th><th style="width:6%">间隔</th><th style="width:26%">上次更新</th></tr></thead><tbody>';
@@ -2072,10 +2236,12 @@ async function loadMonitor() {
       });
       html += '</tbody></table></div>';
     }
+    html += '</div>';
 
     // -- API 源 --
     let sh = (types.api_source||{}).health||'good';
     html += '<h4 class="section-head ' + (tc[sh]||'title-good') + '">🌐 API→实体 ' + healthBadge(sh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.api_source||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.api_source||{}).bad||0)+'</span></h4>';
+    html += '<div class="section-content collapsed">';
     if (apiSrc.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
       html += '<div class="table-wrap"><table><thead><tr><th style="width:10%">名称</th><th style="width:24%">URL</th><th style="width:12%">API请求</th><th style="width:8%">实体</th><th style="width:16%">前缀</th><th style="width:6%">间隔</th><th style="width:24%">上次更新</th></tr></thead><tbody>';
@@ -2089,11 +2255,13 @@ async function loadMonitor() {
       });
       html += '</tbody></table></div>';
     }
+    html += '</div>';
 
     // -- 实体→网络 --
     let pushTargets = d.push_targets || [];
     let pth = (types.push_target||{}).health||'good';
     html += '<h4 class="section-head ' + (tc[pth]||'title-good') + '">🌐 实体→网络 ' + healthBadge(pth) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.push_target||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.push_target||{}).bad||0)+'</span></h4>';
+    html += '<div class="section-content collapsed">';
     if (pushTargets.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
       html += '<div class="table-wrap"><table><thead><tr><th style="width:18%">实体ID</th><th style="width:14%">名称</th><th style="width:10%">实体状态</th><th style="width:8%">模式</th><th style="width:26%">访问Token</th><th style="width:8%">操作</th><th style="width:16%">上次更新</th></tr></thead><tbody>';
@@ -2111,16 +2279,28 @@ async function loadMonitor() {
       });
       html += '</tbody></table></div>';
     }
+    html += '</div>';
 
     // -- 桥接设备 --
     html += '<h4 class="section-head title-good">🌉 桥接设备 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="bridgeStat">加载中...</span></h4>';
-    html += '<div id="bridgeTbl" style="padding:8px;color:var(--text2)">加载中...</div>';
+    html += '<div class="section-content collapsed"><div id="bridgeTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
     // -- 虚拟设备 --
     html += '<h4 class="section-head title-good">🔮 虚拟设备 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="virtualStat">加载中...</span></h4>';
-    html += '<div id="virtualTbl" style="padding:8px;color:var(--text2)">加载中...</div>';
+    html += '<div class="section-content collapsed"><div id="virtualTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
     content.innerHTML = html;
+
+    // 绑定 section-head 点击展开/折叠
+    content.querySelectorAll('.section-head').forEach(el => {
+      el.addEventListener('click', function() {
+        const sib = this.nextElementSibling;
+        if (sib && sib.classList.contains('section-content')) {
+          sib.classList.toggle('collapsed');
+          this.classList.toggle('expanded');
+        }
+      });
+    });
 
     // 异步加载桥接和虚拟设备数据
     loadMonitorBridge();
@@ -2205,7 +2385,7 @@ function buildEntityTable(ents) {
     h += '<td>' + escHtml(e.entity_id) + '</td>';
     h += '<td>' + escHtml(e.name || 'N/A') + '</td>';
     h += '<td>' + escHtml(e.room || '-') + '</td>';
-    h += '<td>' + (e.metric_type ? escHtml(e.metric_type) : (e.power_entity ? '电量' : '-')) + '</td>';
+    h += '<td>' + (e.metric_type ? escHtml(e.metric_type) : (e.power_entity ? '电量' : (e.power_rating > 0 ? e.power_rating + 'W' : '-'))) + '</td>';
     h += '<td><span class="badge ' + cls + '">' + lbl + '</span></td>';
     h += '<td>' + escHtml(e.last_updated || '-') + '</td>';
     h += '</tr>';
@@ -2386,33 +2566,49 @@ async function addDeviceEntities() {
   let added = 0, fail = 0;
 
   for (const line of lines) {
-    const parts = line.split(',').map(p => p.trim());
-    let room = '', device_name = '', entity_id = '', power_entity = '';
+    // 去掉行尾注释（# 后的内容）
+    const cleanLine = line.split('#')[0].trim();
+    if (!cleanLine) continue;
+    const parts = cleanLine.split(',').map(p => p.trim());
+    let room = '', device_name = '', entity_id = '', power_entity = '', power_rating = 0;
 
     if (parts[0].includes('.')) {
-      // 旧格式：entity_id[, power_entity]
+      // 旧格式：entity_id[, power_entity|power_rating]
       entity_id = parts[0];
-      if (parts.length >= 2 && parts[1]) power_entity = parts[1];
+      if (parts.length >= 2 && parts[1]) {
+        if (parts[1].includes('.')) { power_entity = parts[1]; }
+        else { power_rating = parseFloat(parts[1]) || 0; }
+      }
     } else if (parts.length >= 4 || (parts.length >= 3 && !parts[1].includes('.'))) {
-      // 新格式：room, device_name, entity_id[, power_entity]
+      // 新格式：room, device_name, entity_id[, power_entity|power_rating]
       room = parts[0];
       device_name = parts[1] || '';
       entity_id = parts[2] || '';
-      if (parts.length >= 4 && parts[3]) power_entity = parts[3];
+      if (parts.length >= 4 && parts[3]) {
+        if (parts[3].includes('.')) { power_entity = parts[3]; }
+        else { power_rating = parseFloat(parts[3]) || 0; }
+      }
     } else {
-      // 旧新格式：room, entity_id[, power_entity]
+      // 旧新格式：room, entity_id[, power_entity|power_rating]
       room = parts[0];
       if (parts.length < 2 || !parts[1]) continue;
       entity_id = parts[1];
-      if (parts.length >= 3 && parts[2]) power_entity = parts[2];
+      if (parts.length >= 3 && parts[2]) {
+        if (parts[2].includes('.')) { power_entity = parts[2]; }
+        else { power_rating = parseFloat(parts[2]) || 0; }
+      }
     }
     if (!entity_id) continue;
+
+    const bodyData = { entity_id, category: 'device', room, device_name };
+    if (power_entity) { bodyData.power_entity = power_entity; }
+    if (power_rating > 0) { bodyData.power_rating = power_rating; }
 
     try {
       const resp = await fetch(CONFIG_API, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entity_id, category: 'device', room, power_entity, device_name })
+        body: JSON.stringify(bodyData)
       });
       const json = await resp.json();
       json.success ? added++ : fail++;

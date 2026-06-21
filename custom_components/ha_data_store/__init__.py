@@ -204,6 +204,7 @@ def _init_database(db_path: str) -> None:
                 collect_interval INTEGER NOT NULL DEFAULT 30,
                 round_minute     INTEGER NOT NULL DEFAULT 0,
                 power_entity     TEXT NOT NULL DEFAULT '',
+                power_rating     REAL NOT NULL DEFAULT 0,
                 friendly_name    TEXT NOT NULL DEFAULT '',
                 device_name      TEXT NOT NULL DEFAULT '',
                 room             TEXT NOT NULL DEFAULT '',
@@ -471,6 +472,7 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 "collect_interval INTEGER NOT NULL DEFAULT 30",
                 "round_minute INTEGER NOT NULL DEFAULT 0",
                 "power_entity TEXT NOT NULL DEFAULT ''",
+                "power_rating REAL NOT NULL DEFAULT 0",
                 "friendly_name TEXT NOT NULL DEFAULT ''",
                 "device_name TEXT NOT NULL DEFAULT ''",
                 "room TEXT NOT NULL DEFAULT ''",
@@ -491,8 +493,9 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
             copy_cols = []
             for c in old_col_names:
                 if c in ["entity_id", "enabled", "category", "metric_type", "collect_interval",
-                          "round_minute", "power_entity", "friendly_name", "device_name",
-                          "room", "attr_type", "collect_mode", "created_at", "updated_at"]:
+                          "round_minute", "power_entity", "power_rating", "friendly_name",
+                          "device_name", "room", "attr_type", "collect_mode",
+                          "created_at", "updated_at"]:
                     copy_cols.append(c)
 
             col_str = ", ".join(copy_cols)
@@ -529,6 +532,11 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"ALTER TABLE {TABLE_ENTITY_CONFIGS} "
                 f"ADD COLUMN power_entity TEXT NOT NULL DEFAULT ''"
+            )
+        if "power_rating" not in columns:
+            conn.execute(
+                f"ALTER TABLE {TABLE_ENTITY_CONFIGS} "
+                f"ADD COLUMN power_rating REAL NOT NULL DEFAULT 0"
             )
         if "room" not in columns:
             conn.execute(
@@ -863,7 +871,8 @@ def _get_entity_info(db_path: str, entity_id: str) -> dict | None:
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
-            f"SELECT enabled, category, metric_type, collect_interval, power_entity, friendly_name, device_name, room, attr_type, collect_mode "
+            f"SELECT enabled, category, metric_type, collect_interval, power_entity, power_rating, "
+            f"friendly_name, device_name, room, attr_type, collect_mode "
             f"FROM {TABLE_ENTITY_CONFIGS} WHERE entity_id = ?",
             (entity_id,),
         )
@@ -962,7 +971,7 @@ def _update_device_off_record(
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
-            f"SELECT id, on_time, on_power, now_kwh FROM {TABLE_DEVICE_HISTORY} "
+            f"SELECT id, on_time, on_power, now_kwh, energy_consumed FROM {TABLE_DEVICE_HISTORY} "
             f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL) "
             f"ORDER BY id DESC LIMIT 1",
             (entity_id,),
@@ -978,6 +987,7 @@ def _update_device_off_record(
         on_time = row["on_time"]
         on_power = row["on_power"]
         now_kwh = row["now_kwh"]
+        existing_energy = row["energy_consumed"]
 
         # ★ 如果关机时没有捕获 off_power，用 now_kwh 回退（每分钟更新，误差可接受）
         if off_power is None and now_kwh is not None:
@@ -988,7 +998,10 @@ def _update_device_off_record(
             on_time = on_time[:19]
 
         energy_consumed = None
-        if on_power is not None and off_power is not None:
+        if existing_energy is not None:
+            # 固定功率设备：每分钟已写入 energy_consumed，直接保留
+            energy_consumed = existing_energy
+        elif on_power is not None and off_power is not None:
             energy_consumed = round(off_power - on_power, 2)
 
         duration = None
@@ -1157,14 +1170,14 @@ def _append_state_attr_to_record(db_path: str, entity_id: str, new_entry_json: s
 #  设备类 now_kwh：每分钟轮询辅助函数                                            #
 # =========================================================================== #
 def _get_device_kwh_entities(db_path: str) -> list[dict]:
-    """获取所有启用的、配置了 power_entity 的设备类实体。"""
+    """获取所有启用的、配置了 power_entity 或 power_rating 的设备类实体。"""
     conn = sqlite3.connect(db_path)
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
-            f"SELECT entity_id, power_entity FROM {TABLE_ENTITY_CONFIGS} "
+            f"SELECT entity_id, power_entity, power_rating FROM {TABLE_ENTITY_CONFIGS} "
             f"WHERE enabled = 1 AND category = '{CATEGORY_DEVICE}' "
-            f"AND power_entity != ''"
+            f"AND (power_entity != '' OR power_rating > 0)"
         )
         return [dict(row) for row in cursor.fetchall()]
     finally:
@@ -1185,8 +1198,22 @@ def _update_device_now_kwh(db_path: str, entity_id: str, value: float) -> None:
         conn.close()
 
 
+def _update_device_energy_consumed(db_path: str, entity_id: str, energy: float) -> None:
+    """更新当前未关闭记录的 energy_consumed（固定功率设备每分钟计算）。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            f"UPDATE {TABLE_DEVICE_HISTORY} SET energy_consumed = ? "
+            f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL)",
+            (round(energy, 2), entity_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 async def _async_device_now_kwh_poll(hass: HomeAssistant, db_path: str, now=None) -> None:
-    """每分钟执行：对配置了 power_entity 的设备更新 now_kwh。"""
+    """每分钟执行：对配置了 power_entity 的设备更新 now_kwh，对固定功率设备更新 energy_consumed。"""
     try:
         entities = await hass.async_add_executor_job(_get_device_kwh_entities, db_path)
     except Exception:
@@ -1195,25 +1222,63 @@ async def _async_device_now_kwh_poll(hass: HomeAssistant, db_path: str, now=None
     if not entities:
         return
 
+    tz = _get_timezone(hass)
+    now_dt = _get_local_now(tz)
+
     for ent in entities:
         entity_id = ent["entity_id"]
-        power_entity = ent["power_entity"]
+        power_entity = ent.get("power_entity", "")
+        power_rating = ent.get("power_rating", 0)
 
-        p_state = hass.states.get(power_entity)
-        if not p_state or p_state.state in ("unavailable", "unknown", None, ""):
-            continue
+        if power_entity:
+            # 有传感器：读取传感器值 → 写 now_kwh（原逻辑）
+            p_state = hass.states.get(power_entity)
+            if not p_state or p_state.state in ("unavailable", "unknown", None, ""):
+                continue
+            try:
+                value = float(p_state.state)
+            except (ValueError, TypeError):
+                continue
+            try:
+                await hass.async_add_executor_job(
+                    _update_device_now_kwh, db_path, entity_id, value,
+                )
+            except Exception:
+                pass
 
-        try:
-            value = float(p_state.state)
-        except (ValueError, TypeError):
-            continue
-
-        try:
-            await hass.async_add_executor_job(
-                _update_device_now_kwh, db_path, entity_id, value,
-            )
-        except Exception:
-            pass
+        elif power_rating > 0:
+            # 固定功率：按 on_time 计算时长 → 写 energy_consumed
+            def _calc_and_update():
+                conn = sqlite3.connect(db_path)
+                try:
+                    row = conn.execute(
+                        f"SELECT on_time FROM {TABLE_DEVICE_HISTORY} "
+                        f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL) "
+                        f"ORDER BY id DESC LIMIT 1",
+                        (entity_id,),
+                    ).fetchone()
+                    if not row:
+                        return
+                    on_time = row[0]
+                    if len(on_time) > 19:
+                        on_time = on_time[:19]
+                    dt_on = datetime.strptime(on_time, "%Y-%m-%d %H:%M:%S")
+                    elapsed_hours = (now_dt - dt_on).total_seconds() / 3600
+                    if elapsed_hours < 0:
+                        elapsed_hours = 0
+                    energy = round(power_rating / 1000.0 * elapsed_hours, 2)
+                    conn.execute(
+                        f"UPDATE {TABLE_DEVICE_HISTORY} SET energy_consumed = ? "
+                        f"WHERE entity_id = ? AND (off_time = '' OR off_time IS NULL)",
+                        (energy, entity_id),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            try:
+                await hass.async_add_executor_job(_calc_and_update)
+            except Exception:
+                pass
 
 
 # =========================================================================== #
@@ -2551,9 +2616,6 @@ async def _async_attr_poll(hass: HomeAssistant, db_path: str, now=None) -> None:
             # 普通间隔采集
             last_ts = hass.data[DOMAIN].get("last_attr_poll", {}).get(dedup_key, 0)
             if now_ts - last_ts < interval_min * 60:
-                if local_logger:
-                    local_logger.debug("[attr] 跳过 %s (距上次采集 %.0fs < %dmin) dedup_key=%s",
-                                       entity_id, now_ts - last_ts, interval_min, dedup_key)
                 continue
 
         state_obj = hass.states.get(entity_id)
@@ -3181,6 +3243,7 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
 
     name = info.get("device_name", "") or info.get("friendly_name", "") or new_state.attributes.get("friendly_name", "")
     power_entity = info.get("power_entity", "")
+    power_rating = info.get("power_rating", 0)
     room = info.get("room", "")
     tz = _get_timezone(hass)
     now_str = _get_local_now_str(tz)
@@ -3653,6 +3716,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         DBViewerView,
         DBViewerDataView,
         DBViewerUpdateView,
+        DBViewerSQLView,
         LogDataView,
         EntityMonitorView,
         EntityStateView,
@@ -3692,6 +3756,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(DBViewerView(db_path))
     hass.http.register_view(DBViewerDataView(db_path))
     hass.http.register_view(DBViewerUpdateView(db_path))
+    hass.http.register_view(DBViewerSQLView(db_path))
     hass.http.register_view(LogDataView(hass))
     hass.http.register_view(EntityMonitorView(db_path, hass))
     hass.http.register_view(EntityStateView(db_path, hass))

@@ -1,5 +1,42 @@
 # 更新日志
 
+## 2026-06-21 — v2.3.0 固定功率计算用电量 + 前端SQL执行
+
+### ✨ 新功能
+
+#### 1. 固定功率计算用电量
+- 设备类实体新增 `power_rating`（功率瓦特）配置，适用于无电量传感器的设备
+- 每分钟根据 `power_rating × 时长` 计算 `energy_consumed`，保留2位小数
+- 前端添加格式：`房间, 设备名称, entity_id, 功率值W`（第4参数纯数字→固定功率，含`.`→电量传感器）
+- 已有设备可在数据库浏览器中直接编辑 `entity_configs.power_rating` 列
+- SQL 弹窗提供一键补填历史数据的示例语句
+
+#### 2. 前端SQL执行
+- HA设备新增开关"前端执行SQL语句"（默认关，重启后强制关）
+- 数据库浏览 toolbar 新增 `▶ 执行SQL` 按钮
+- 支持 SELECT 查询（自动子查询分页）和非 SELECT 语句
+- 开关开启后方可执行，控制权全在后端
+
+### 🔧 其他优化
+
+#### 1. `entity_configs` 表结构变更
+- 新增列 `power_rating REAL NOT NULL DEFAULT 0`
+- 自动迁移，无需手动操作
+
+### 依赖文件
+
+| 文件 | 改动 |
+|------|------|
+| `__init__.py` | `power_rating` 列；`_get_device_kwh_entities`；`_async_device_now_kwh_poll` 固定功率分支；`_update_device_off_record` 保留已有 energy_consumed；注册 DBViewerSQLView |
+| `http_api.py` | `EntityConfigView`/`EntityConfigListView`/`EntityMonitorView` 增加 power_rating；新增 `DBViewerSQLView` |
+| `switch.py` | 新增 `HaDataStoreDbSQLSwitch` |
+| `config_flow.py` | `power_rating` 列检查 |
+| `db_viewer.html` | 添加设备格式扩展；SQL 弹窗+分页+历史补填提示；实体列表显示功率值 |
+| `manifest.json` | 版本 2.2.3 → 2.3.0 |
+| `const.py` | 新增 `VERSION` 常量 |
+
+---
+
 ## 2026-06-16 — v2.2.3 删除实体自动清理 + bug 修复
 
 ### 🐛 Bug 修复

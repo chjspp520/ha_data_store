@@ -53,19 +53,17 @@ def _add_device_entities(db_path: str, entries: list[dict]) -> None:
     try:
         # 确保列存在
         columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_ENTITY_CONFIGS})")]
-        for col, default in [
-            ("category", f"'{CATEGORY_DEVICE}'"),
-            ("metric_type", "''"),
-            ("collect_interval", "30"),
-            ("power_entity", "''"),
-            ("room", "''"),
-            ("device_name", "''"),
+        for col, default, col_type in [
+            ("category", f"'{CATEGORY_DEVICE}'", "TEXT"),
+            ("metric_type", "''", "TEXT"),
+            ("collect_interval", "30", "INTEGER"),
+            ("power_entity", "''", "TEXT"),
+            ("room", "''", "TEXT"),
+            ("device_name", "''", "TEXT"),
+            ("power_rating", "0", "REAL"),
         ]:
             if col not in columns:
-                if default.startswith("'"):
-                    conn.execute(f"ALTER TABLE {TABLE_ENTITY_CONFIGS} ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}")
-                else:
-                    conn.execute(f"ALTER TABLE {TABLE_ENTITY_CONFIGS} ADD COLUMN {col} INTEGER NOT NULL DEFAULT {default}")
+                conn.execute(f"ALTER TABLE {TABLE_ENTITY_CONFIGS} ADD COLUMN {col} {col_type} NOT NULL DEFAULT {default}")
                 conn.commit()
 
         for entry in entries:

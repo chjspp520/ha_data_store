@@ -50,6 +50,15 @@ class HaDataStoreRemoteAccessSwitch(HaDataStoreMasterSwitch):
         self._hass.data.setdefault(DOMAIN, {})[self._key] = False
         self.async_write_ha_state()
 
+class HaDataStoreDbSQLSwitch(HaDataStoreMasterSwitch):
+    _key = "db_sql_enabled"; _attr_name = "前端执行SQL语句"
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        # 每次启动/重启都强制关闭，不同步历史状态
+        self._attr_is_on = False
+        self._hass.data.setdefault(DOMAIN, {})[self._key] = False
+        self.async_write_ha_state()
+
 
 async def async_setup_entry(hass, entry, async_add_entities):
     # 存储回调，供虚拟设备动态创建
@@ -64,6 +73,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         HaDataStoreDbViewerSwitch(hass, device_info),
         HaDataStoreDbEditSwitch(hass, device_info),
         HaDataStoreRemoteAccessSwitch(hass, device_info),
+        HaDataStoreDbSQLSwitch(hass, device_info),
     ]
 
     # 桥接开关

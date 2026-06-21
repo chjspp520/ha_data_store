@@ -278,7 +278,8 @@ class EntityConfigListView(_BaseDBView):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     f"SELECT entity_id, enabled, category, metric_type, collect_interval, "
-                    f"  power_entity, friendly_name, device_name, room, attr_type, collect_mode, created_at, updated_at "
+                    f"  power_entity, power_rating, friendly_name, device_name, room, "
+                    f"attr_type, collect_mode, created_at, updated_at "
                     f"FROM {TABLE_ENTITY_CONFIGS} ORDER BY entity_id"
                 )
                 return [dict(row) for row in cursor.fetchall()]
@@ -390,6 +391,7 @@ class EntityConfigView(_BaseDBView):
         collect_interval = int(body.get("collect_interval", 30))
         round_minute = int(body.get("round_minute", 0))
         power_entity = body.get("power_entity", "")
+        power_rating = float(body.get("power_rating", 0))
         friendly_name = body.get("friendly_name", "")
         device_name = body.get("device_name", "")
         room = body.get("room", "")
@@ -428,9 +430,9 @@ class EntityConfigView(_BaseDBView):
                     f"""
                     INSERT INTO {TABLE_ENTITY_CONFIGS}
                         (entity_id, enabled, category, metric_type, collect_interval, round_minute,
-                         power_entity, friendly_name, device_name, room,
+                         power_entity, power_rating, friendly_name, device_name, room,
                          attr_type, collect_mode, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(entity_id, attr_type) DO UPDATE SET
                         enabled          = excluded.enabled,
                         category         = excluded.category,
@@ -438,6 +440,7 @@ class EntityConfigView(_BaseDBView):
                         collect_interval = excluded.collect_interval,
                         round_minute     = excluded.round_minute,
                         power_entity     = excluded.power_entity,
+                        power_rating     = excluded.power_rating,
                         friendly_name    = excluded.friendly_name,
                         device_name      = excluded.device_name,
                         room             = excluded.room,
@@ -445,7 +448,7 @@ class EntityConfigView(_BaseDBView):
                         updated_at       = excluded.updated_at
                     """,
                     (entity_id, enabled, category_val, metric_type, collect_interval, round_minute,
-                     power_entity, friendly_name, device_name, room,
+                     power_entity, power_rating, friendly_name, device_name, room,
                      attr_type_val, collect_mode_val, now, now),
                 )
                 conn.commit()
@@ -3551,6 +3554,90 @@ class DBViewerUpdateView(_BaseDBView):
 
 
 # ========================================================================== #
+#  10. ★ 数据库浏览器 — SQL 执行 API ★                                        #
+#     挂载路径: POST /api/ha_data_store/db_viewer/sql                        #
+#     参数: { sql, page, page_size }                                         #
+#     说明: 前端执行SQL功能开关控制是否可用，默认关闭，重启后也强制关闭              #
+# ========================================================================== #
+class DBViewerSQLView(_BaseDBView):
+    """数据库浏览器 SQL 执行 API（受独立开关控制，默认关）。"""
+
+    url = "/api/ha_data_store/db_viewer/sql"
+    name = "api:ha_data_store:db_viewer_sql"
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        if not hass.data.get(DOMAIN, {}).get("db_sql_enabled", False):
+            return self.json({"success": False, "error": "前端执行SQL功能未开启"})
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        sql = body.get("sql", "").strip()
+        if not sql:
+            return self.json({"success": False, "error": "SQL 不能为空"})
+
+        try:
+            page = int(body.get("page", 1))
+            if page < 1: page = 1
+        except (ValueError, TypeError):
+            page = 1
+        try:
+            page_size = int(body.get("page_size", 100))
+            if page_size < 1: page_size = 100
+            if page_size > 1000: page_size = 1000
+        except (ValueError, TypeError):
+            page_size = 100
+
+        def _exec_sql() -> dict:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                sql_upper = sql.strip().upper()
+
+                # 非 SELECT 直接执行
+                if not sql_upper.startswith("SELECT"):
+                    cursor = conn.execute(sql)
+                    affected = conn.total_changes
+                    conn.commit()
+                    col_names = [d[0] for d in cursor.description] if cursor.description else []
+                    rows_data = [dict(r) for r in cursor.fetchall()] if cursor.description else []
+                    return {"success": True, "columns": col_names, "rows": rows_data,
+                            "affected": affected, "page": 1, "total_pages": 1, "total": len(rows_data)}
+
+                # SELECT 子查询分页
+                count_sql = f"SELECT COUNT(*) AS cnt FROM ({sql}) AS _sub"
+                cursor = conn.execute(count_sql)
+                total = cursor.fetchone()["cnt"]
+                total_pages = max(1, (total + page_size - 1) // page_size)
+                offset = (page - 1) * page_size
+                data_sql = f"SELECT * FROM ({sql}) AS _sub LIMIT ? OFFSET ?"
+                cursor = conn.execute(data_sql, (page_size, offset))
+                columns = [d[0] for d in cursor.description] if cursor.description else []
+                rows_data = [dict(r) for r in cursor.fetchall()]
+                return {"success": True, "columns": columns, "rows": rows_data,
+                        "page": page, "page_size": page_size, "total_pages": total_pages, "total": total}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+            finally:
+                conn.close()
+
+        try:
+            result = await self._exec_in_executor(hass, _exec_sql)
+            return self.json(result)
+        except Exception as exc:
+            _LOGGER.exception("SQL 执行失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ========================================================================== #
 #  9. ★ 数据库浏览器 — DBViewerView (HTML页面) ★                               #
 #     挂载路径: GET /api/device_energy/db_viewer                               #
 # ========================================================================== #
@@ -3748,7 +3835,8 @@ class EntityMonitorView(_BaseDBView):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     f"SELECT entity_id, enabled, category, metric_type, attr_type, "
-                    f"  collect_interval, collect_mode, power_entity, friendly_name, device_name, room "
+                    f"  collect_interval, collect_mode, power_entity, power_rating, "
+                    f"friendly_name, device_name, room "
                     f"FROM {TABLE_ENTITY_CONFIGS} WHERE enabled = 1 "
                     f"ORDER BY category, entity_id"
                 )
