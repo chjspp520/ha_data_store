@@ -317,6 +317,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('bridge')">🌉 设备桥接<span class="sub-tab-badge" id="badge-bridge"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('virtual')">🔮 虚拟设备<span class="sub-tab-badge" id="badge-virtual"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('media')">🎵 媒体播放列表<span class="sub-tab-badge" id="badge-media"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('xiaoai')">💬 小爱对话<span class="sub-tab-badge" id="badge-xiaoai"></span></button>
   </div>
 
   <!-- 子面板: 设备类 -->
@@ -831,6 +832,28 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 小爱对话 -->
+  <div id="sub-xiaoai" class="sub-panel">
+    <div id="xiaoaiConfigList"></div>
+    <div class="section">
+      <h3>💬 添加小爱对话实体</h3>
+      <div class="hint">配置小爱音箱的对话 sensor 实体（如 <code>sensor.xiaomi_xxx_conversation</code>）。实体状态为用户说的话，<code>answers[0].tts.text</code> 为 AI 回复，<code>timestamp</code> 为对话时间。支持配置多个实体，用 entity_id 区分。</div>
+      <div class="form-grid" style="grid-template-columns:2fr 1fr auto">
+        <div>
+          <label>实体 ID</label>
+          <input type="text" id="xiaoaiEntityId" placeholder="sensor.xiaomi_oh2p_dac5_play_control_conversation" style="width:100%">
+        </div>
+        <div>
+          <label>备注（房间/位置）</label>
+          <input type="text" id="xiaoaiName" placeholder="小房间" style="width:100%">
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:6px">
+          <button class="btn-green" onclick="addXiaoaiConfig()">➕ 添加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="sub-apisrc" class="sub-panel">
     <div id="apiSrcList"></div>
     <div class="section">
@@ -962,6 +985,9 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <optgroup label="健康数据">
           <option value="health_history">健康记录</option>
           <option value="health_latest">健康最新</option>
+        </optgroup>
+        <optgroup label="小爱对话">
+          <option value="xiaoai_history">小爱对话记录</option>
         </optgroup>
       </select>
     </div>
@@ -1147,6 +1173,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">electricity_standard</td><td>标准电费数据 · entity_id（必填）/day_table/month_table/year_table/条数限制 · 返回 state+attributes 结构</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">health_history</td><td>健康记录 · name/type/start/end/limit/offset/order_by · 返回健康记录列表</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">health_latest</td><td>健康最新 · name（必填） · 返回某人最新一条健康记录</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">xiaoai_history</td><td>小爱对话记录 · entity_id（必填）/start/end/limit · 返回对话列表（user_text=用户说话，ai_text=AI回复，conv_time=对话时间）</td></tr>
       </table>
 
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">rooms_multi_metric 参数（新增）</div>
@@ -1310,7 +1337,8 @@ function isUserTable(name) {
   if (name === 'attr_type_defs') return false;
   return name.startsWith('attr_') || name === 'device_history' || name.startsWith('env_')
       || name === 'health_records'
-      || name === 'media_playlists' || name === 'media_queue';
+      || name === 'media_playlists' || name === 'media_queue'
+      || name === 'xiaoai_conversations';
 }
 
 function populateTableSelect() {
@@ -2157,7 +2185,8 @@ async function loadMonitor() {
       makeCard('file_source','📄 json→实体') + makeCard('api_source','🌐 API→实体') +
       makeCard('push_target','🌐 实体→网络') +
       '<div class="summary-card c-online" id="bridgeCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🌉 桥接设备</div></div>' +
-      '<div class="summary-card c-online" id="virtualCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🔮 虚拟设备</div></div>';
+      '<div class="summary-card c-online" id="virtualCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🔮 虚拟设备</div></div>' +
+      '<div class="summary-card c-online" id="xiaoaiCard"><div class="health-dot ' + (healthCls[(types.xiaoai||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.xiaoai||{}).count||0) + '</div><div class="lbl">💬 小爱对话</div></div>';
 
     // 更新 sub-tab 角标
     setSubTabBadge('device', (types.device||{}).count||0);
@@ -2167,6 +2196,7 @@ async function loadMonitor() {
     setSubTabBadge('filesrc', (types.file_source||{}).count||0);
     setSubTabBadge('apisrc', (types.api_source||{}).count||0);
     setSubTabBadge('push', (types.push_target||{}).count||0);
+    setSubTabBadge('xiaoai', (types.xiaoai||{}).count||0);
 
     document.getElementById('monitorInfo').textContent = '刷新: ' + new Date().toLocaleTimeString();
 
@@ -2276,6 +2306,26 @@ async function loadMonitor() {
         html += '<td>' + displayToken + '</td>';
         html += '<td><button class="btn-del" onclick="togglePushTokenShow(' + i + ')">' + (shown ? '隐藏' : '显示') + '</button></td>';
         html += '<td style="font-size:12px;color:var(--text2)">' + fmtTime(p.updated_at) + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+
+    // -- 小爱对话 --
+    let xiaoaiList = d.xiaoai || [];
+    let xiaoaiH = (types.xiaoai||{}).health||'good';
+    html += '<h4 class="section-head ' + (tc[xiaoaiH]||'title-good') + '">💬 小爱对话 ' + healthBadge(xiaoaiH) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.xiaoai||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.xiaoai||{}).bad||0)+'</span></h4>';
+    html += '<div class="section-content collapsed">';
+    if (xiaoaiList.length === 0) { html += '<div class="empty" style="padding:8px">暂无配置</div>'; }
+    else {
+      html += '<div class="table-wrap"><table><thead><tr><th style="width:30%">实体ID</th><th style="width:12%">备注</th><th style="width:10%">状态</th><th style="width:14%">当前state</th><th style="width:8%">对话数</th><th style="width:26%">最新对话</th></tr></thead><tbody>';
+      xiaoaiList.forEach(x => {
+        let scls = x.status==='在线'?'badge-online':'badge-unavail';
+        html += '<tr><td>' + escHtml(x.entity_id) + '</td><td>' + escHtml(x.name||'-') + '</td>';
+        html += '<td><span class="badge ' + scls + '">' + x.status + '</span></td>';
+        html += '<td style="font-size:12px">' + escHtml(x.state) + '</td>';
+        html += '<td>' + (x.conv_count||0) + '</td>';
+        html += '<td style="font-size:12px;color:var(--text2)">' + escHtml(x.last_conv||'-') + '</td></tr>';
       });
       html += '</tbody></table></div>';
     }
@@ -2688,6 +2738,7 @@ function switchSubTab(name) {
   if (name === 'device' && !manageLoaded) { loadEntities(); }
   if (name === 'env' && !manageLoaded) { loadEntities(); }
   if (name === 'attr') { loadAttrTypes(); }
+  if (name === 'xiaoai') { loadXiaoaiConfigs(); }
 }
 
 async function loadAttrTypes() {
@@ -4340,6 +4391,76 @@ async function delMediaPlaylist(id) {
 }
 
 // =========================================================================
+// 小爱对话配置
+// =========================================================================
+const XIAOAI_API = '/api/ha_data_store/xiaoai/configs';
+
+async function loadXiaoaiConfigs() {
+  var div = document.getElementById('xiaoaiConfigList');
+  try {
+    var resp = await fetch(XIAOAI_API);
+    var json = await resp.json();
+    if (!json.success) { div.innerHTML = '<div class="hint">加载失败: ' + escHtml(json.error || '') + '</div>'; return; }
+    var configs = json.data || [];
+    setSubTabBadge('xiaoai', configs.length);
+    if (!configs.length) {
+      div.innerHTML = '<div class="hint">暂无小爱对话配置，请使用下方表单添加。</div>';
+      return;
+    }
+    var html = '<div class="section"><h3>已配置的小爱对话实体 (' + configs.length + '个)</h3>';
+    html += '<div class="table-wrap"><table><thead><tr>';
+    html += '<th>ID</th><th>实体 ID</th><th>备注</th><th>启用</th><th>创建时间</th><th>更新时间</th><th style="width:80px">操作</th>';
+    html += '</tr></thead><tbody>';
+    configs.forEach(function(c) {
+      var enabledHtml = c.enabled
+        ? '<span style="color:var(--green)">✓ 启用</span>'
+        : '<span style="color:var(--text2)">✗ 停用</span>';
+      html += '<tr>';
+      html += '<td>' + c.id + '</td>';
+      html += '<td><strong>' + escHtml(c.entity_id) + '</strong></td>';
+      html += '<td>' + escHtml(c.name || '-') + '</td>';
+      html += '<td>' + enabledHtml + '</td>';
+      html += '<td style="font-size:12px;color:var(--text2)">' + escHtml(c.created_at || '') + '</td>';
+      html += '<td style="font-size:12px;color:var(--text2)">' + escHtml(c.updated_at || '') + '</td>';
+      html += '<td><button class="btn-del" onclick="delXiaoaiConfig(' + c.id + ', \'' + escAttr(c.entity_id) + '\')">删除</button></td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+    div.innerHTML = html;
+  } catch(e) { div.innerHTML = '<div class="hint">加载失败: ' + e + '</div>'; }
+}
+
+async function addXiaoaiConfig() {
+  var entity_id = document.getElementById('xiaoaiEntityId').value.trim();
+  var name = document.getElementById('xiaoaiName').value.trim();
+  if (!entity_id) { showToast('请输入实体 ID', false); return; }
+  try {
+    var resp = await fetch(XIAOAI_API, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({entity_id: entity_id, name: name, enabled: true}),
+    });
+    var json = await resp.json();
+    showToast(json.message || '已添加', json.success);
+    if (json.success) {
+      document.getElementById('xiaoaiEntityId').value = '';
+      document.getElementById('xiaoaiName').value = '';
+      loadXiaoaiConfigs();
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function delXiaoaiConfig(id, entityId) {
+  if (!confirm('确定删除小爱对话配置？\n实体: ' + entityId + '\n\n注意：仅删除配置并停止采集，历史对话记录保留。')) return;
+  try {
+    var resp = await fetch(XIAOAI_API + '?id=' + id, { method: 'DELETE' });
+    var json = await resp.json();
+    showToast(json.message || '已删除', json.success);
+    if (json.success) loadXiaoaiConfigs();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// =========================================================================
 const BASE_PATH = window.location.origin;
 const BASE_URL = '/api/ha_data_store/query';
 let apiEntitiesData = [];
@@ -4420,6 +4541,7 @@ function onApiTypeChange() {
   const isHealthLatest = qt === 'health_latest';
   const isHealth = isHealthHistory || isHealthLatest;
   const isAttrDaily = qt === 'attr_daily';
+  const isXiaoaiHistory = qt === 'xiaoai_history';
 
   // 电费专属字段：默认隐藏，仅 electricity_standard 时显示
   document.getElementById('apiEleDayTableRow').style.display = isElectricityStandard ? '' : 'none';
@@ -4578,6 +4700,34 @@ function onApiTypeChange() {
       onDateModeChange();
     }
     loadHealthTypes();
+  } else if (isXiaoaiHistory) {
+    // 小爱对话：显示 entity_id（从 xiaoai_configs 加载）、日期模式、limit
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiEleDayTableRow').style.display = 'none';
+    document.getElementById('apiEleMonthTableRow').style.display = 'none';
+    document.getElementById('apiEleYearTableRow').style.display = 'none';
+    document.getElementById('apiEleDayLimitRow').style.display = 'none';
+    document.getElementById('apiEleMonthLimitRow').style.display = 'none';
+    document.getElementById('apiEleYearLimitRow').style.display = 'none';
+    document.getElementById('apiEleTranslatedFieldRow').style.display = 'none';
+    document.getElementById('apiHealthNameRow').style.display = 'none';
+    document.getElementById('apiHealthTypeRow').style.display = 'none';
+    document.getElementById('apiAttrDailyRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = '';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = '';
+    document.getElementById('apiDateMode').value = 'none';
+    onDateModeChange();
+    loadXiaoaiEntitiesForApi();
   } else if (isAttrDaily) {
     document.getElementById('apiEntityId').parentNode.style.display = '';
     document.getElementById('apiRoom').parentNode.style.display = 'none';
@@ -4704,6 +4854,20 @@ async function loadVacuumIdsForApi() {
     const json = await resp.json();
     (json.data||[]).forEach(c => {
       sel.innerHTML += '<option value="' + escAttr(c.vacuum_id) + '">' + escHtml(c.vacuum_id) + '</option>';
+    });
+  } catch(e) {}
+  generateApiUrl();
+}
+
+async function loadXiaoaiEntitiesForApi() {
+  const sel = document.getElementById('apiEntityId');
+  sel.innerHTML = '<option value="">-- 请选择 --</option>';
+  try {
+    const resp = await fetch(XIAOAI_API);
+    const json = await resp.json();
+    (json.data||[]).forEach(c => {
+      const label = c.name ? c.entity_id + ' (' + c.name + ')' : c.entity_id;
+      sel.innerHTML += '<option value="' + escAttr(c.entity_id) + '">' + escHtml(label) + '</option>';
     });
   } catch(e) {}
   generateApiUrl();
@@ -4863,6 +5027,23 @@ function generateApiUrl() {
         if (de) url += '&end=' + encodeURIComponent(de);
       }
     }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 小爱对话记录模式特殊处理
+  if (qt === 'xiaoai_history') {
+    if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
+    if (dateMode === 'single') {
+      const d = document.getElementById('apiDate').value;
+      if (d) url += '&start=' + encodeURIComponent(d);
+    } else if (dateMode === 'range') {
+      const ds = document.getElementById('apiDateStart').value;
+      const de = document.getElementById('apiDateEnd').value;
+      if (ds) url += '&start=' + encodeURIComponent(ds);
+      if (de) url += '&end=' + encodeURIComponent(de);
+    }
+    if (limit) url += '&limit=' + encodeURIComponent(limit);
     document.getElementById('apiUrlOutput').value = url;
     return;
   }

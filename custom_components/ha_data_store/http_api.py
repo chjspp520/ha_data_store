@@ -71,6 +71,11 @@ async def _refresh_monitored(hass: HomeAssistant, db_path: str) -> None:
     from .__init__ import _refresh_monitored_set_sync
     monitored = await hass.async_add_executor_job(_refresh_monitored_set_sync, db_path)
     hass.data[DOMAIN]["monitored_entities"] = monitored
+    # 同步刷新小爱对话实体集合（独立配置表）
+    from .xiaoai import get_monitored_entities as _xiaoai_get_monitored
+    hass.data[DOMAIN]["xiaoai_entities"] = await hass.async_add_executor_job(
+        _xiaoai_get_monitored, db_path,
+    )
     _LOGGER.info("[HDS] 受监控实体白名单已刷新 count=%d entities=%s",
                  len(monitored), sorted(monitored))
     from .logger import get_logger as _lg
@@ -744,7 +749,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history"},
                 status_code=400,
             )
 
@@ -794,6 +799,8 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_health_history, db_path, request)
             elif query_type == "health_latest":
                 result = await self._exec_in_executor(hass, self._query_health_latest, db_path, request)
+            elif query_type == "xiaoai_history":
+                result = await self._exec_in_executor(hass, self._query_xiaoai_history, db_path, request)
             else:
                 return self.json(
                     {"success": False, "error": f"未知的 type '{query_type}'"},
@@ -3150,6 +3157,18 @@ class QueryView(_BaseDBView):
         finally:
             conn.close()
 
+    def _query_xiaoai_history(self, db_path: str, request: web.Request) -> dict:
+        """查询小爱对话记录。参数: entity_id(必填), start, end, limit"""
+        from .xiaoai import query_history_sync
+        entity_id = request.query.get("entity_id", "").strip()
+        start = request.query.get("start", "").strip()
+        end = request.query.get("end", "").strip()
+        try:
+            limit = int(request.query.get("limit", "500").strip())
+        except ValueError:
+            limit = 500
+        return query_history_sync(db_path, entity_id, start, end, limit)
+
 
 # ========================================================================== #
 #  7. ★ 数据库浏览器 — DBViewerDataView (数据API) ★                            #
@@ -4172,9 +4191,47 @@ class EntityMonitorView(_BaseDBView):
                 health="good" if len(push_targets)==0 or pt_bad==0 else ("warn" if pt_bad<len(push_targets) else "bad"),
             )
 
+            # -- 小爱对话 --
+            xiaoai_info = []
+            try:
+                from .xiaoai import TABLE_XIAOAI_CONFIGS, TABLE_XIAOAI_CONVERSATIONS
+                conn2 = sqlite3.connect(db_path)
+                conn2.row_factory = sqlite3.Row
+                x_rows = conn2.execute(
+                    f"SELECT * FROM {TABLE_XIAOAI_CONFIGS} WHERE enabled = 1 ORDER BY id"
+                ).fetchall()
+                for row in x_rows:
+                    r = dict(row)
+                    eid = r["entity_id"]
+                    st = self._hass.states.get(eid)
+                    # 统计该实体对话记录数 + 最新对话时间
+                    cnt_row = conn2.execute(
+                        f"SELECT COUNT(*), MAX(conv_time) FROM {TABLE_XIAOAI_CONVERSATIONS} WHERE entity_id = ?",
+                        (eid,),
+                    ).fetchone()
+                    conv_count = cnt_row[0] if cnt_row else 0
+                    last_conv = cnt_row[1] if cnt_row else ""
+                    xiaoai_info.append(dict(
+                        entity_id=eid, name=r.get("name", ""),
+                        status="在线" if (st and st.state not in ("unavailable", "unknown")) else "不可用",
+                        state=(st.state if st else "N/A")[:20],
+                        conv_count=conv_count,
+                        last_conv=last_conv or "",
+                        updated_at=r.get("updated_at", ""),
+                    ))
+                conn2.close()
+            except Exception:
+                pass
+            x_bad = sum(1 for x in xiaoai_info if x["status"] != "在线")
+            types["xiaoai"] = dict(
+                count=len(xiaoai_info), bad=x_bad, ok=len(xiaoai_info)-x_bad,
+                health="good" if len(xiaoai_info)==0 or x_bad==0 else ("warn" if x_bad<len(xiaoai_info) else "bad"),
+            )
+
             return {"entities": entities, "summary": summary,
                     "exports": exports, "file_sources": file_sources, "api_sources": api_sources,
                     "push_targets": push_targets,
+                    "xiaoai": xiaoai_info,
                     "types": types}
 
         try:

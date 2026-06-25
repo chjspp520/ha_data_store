@@ -7,5 +7,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/chjspp520/ha_data_store/issues",
   "requirements": [],
-  "version": "2.3.0"
+  "version": "2.4.0"
 }

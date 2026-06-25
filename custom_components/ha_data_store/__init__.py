@@ -113,6 +113,9 @@ def _refresh_monitored_set_sync(db_path: str) -> set[str]:
             monitored.add(row["trigger_entity_id"])
     finally:
         conn.close()
+    # 4. 小爱对话类：entity_id（独立配置表，并入总白名单）
+    from .xiaoai import get_monitored_entities as _xiaoai_get_monitored
+    monitored |= _xiaoai_get_monitored(db_path)
     return monitored
 
 
@@ -3209,6 +3212,18 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
     if not entity_id or not new_state:
         return
 
+    # 小爱对话：独立采集分支（不进 entity_configs 表，O(1) 识别后直接处理）
+    xiaoai_entities = hass.data.get(DOMAIN, {}).get("xiaoai_entities")
+    if xiaoai_entities and entity_id in xiaoai_entities:
+        from .xiaoai import async_handle_state_changed as _xiaoai_handle
+        try:
+            await _xiaoai_handle(hass, db_path, entity_id, old_state, new_state)
+        except Exception:
+            local_logger = get_logger()
+            if local_logger:
+                local_logger.exception("[xiaoai] 采集异常 entity_id=%s", entity_id)
+        return  # 小爱实体不走后续 device/attr/vacuum 流程
+
     try:
         info = await hass.async_add_executor_job(_get_entity_info, db_path, entity_id)
     except RuntimeError as exc:
@@ -3788,6 +3803,10 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(MediaQueueView(db_path))
     hass.http.register_view(TableColumnsView(db_path))
 
+    # 小爱对话 API（独立模块）
+    from .xiaoai import register_api_views as _xiaoai_register_api_views
+    _xiaoai_register_api_views(hass, db_path)
+
 
 # =========================================================================== #
 #  Config Entry 入口                                                           #
@@ -3808,6 +3827,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     await hass.async_add_executor_job(_init_database, db_path)
+
+    # 小爱对话模块：独立建表（独立连接，不污染 _init_database）
+    from .xiaoai import init_database as _xiaoai_init_database
+    await hass.async_add_executor_job(_xiaoai_init_database, db_path)
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["entry_id"] = entry.entry_id
@@ -4008,6 +4031,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "[sys] 受监控实体白名单已加载 count=%d entities=%s",
             monitored_count, sorted(hass.data[DOMAIN]["monitored_entities"]),
         )
+
+    # 小爱对话：单独维护实体集合，供 _async_state_changed 快速识别（不进 entity_configs 表）
+    from .xiaoai import get_monitored_entities as _xiaoai_get_monitored
+    hass.data[DOMAIN]["xiaoai_entities"] = await hass.async_add_executor_job(
+        _xiaoai_get_monitored, db_path,
+    )
 
     # 设备类：监听 state_changed 事件（仅处理用户配置过的实体）
     async def _internal_state_listener(event: Event) -> None:
