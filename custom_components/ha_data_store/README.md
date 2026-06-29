@@ -437,6 +437,7 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `health_history` | 健康数据历史 | name(可选) |
 | `health_latest` | 最新健康数据 | name(可选) |
 | `entity_data_dates` | 实体有数据的所有日期 | entity_id |
+| `room_data_dates` | 房间指定月有数据日期（按 device/environment/attribute 多选查询） | room, month, category |
 
 **查询示例：**
 
@@ -452,6 +453,9 @@ curl "http://ha:8123/api/ha_data_store/query?type=rooms_daily&date=2024-01-15&ke
 
 # 查询月排行榜
 curl "http://ha:8123/api/ha_data_store/query?type=ranking_monthly&month=2024-01&detail=true"
+
+# 查询客厅 2025-01 哪些日期有数据
+curl "http://ha:8123/api/ha_data_store/query?type=room_data_dates&room=客厅&month=2025-01&category=device&key=your_api_key"
 ```
 
 ### 配置管理接口

@@ -6,6 +6,6 @@
   "documentation": "https://github.com/chjspp520/ha_data_store",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/chjspp520/ha_data_store/issues",
-  "requirements": [],
-  "version": "2.4.0"
+  "requirements": ["mutagen>=1.45"],
+  "version": "2.4.3"
 }

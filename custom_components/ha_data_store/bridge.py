@@ -255,8 +255,15 @@ class BridgeConnection:
                 pass
 
     def start(self) -> asyncio.Task:
-        """启动桥接（在 Home Assistant 事件循环中创建任务）。"""
-        self._ws_task = self._hass.async_create_task(self.run())
+        """启动桥接（在 Home Assistant 事件循环中创建后台任务）。
+
+        使用 async_create_background_task 而非 async_create_task，
+        因为 run() 是长期运行的 WebSocket 循环，前者不会被 HA 启动流程等待，
+        避免阻塞 "wrapping up the start up phase"。
+        """
+        self._ws_task = self._hass.async_create_background_task(
+            self.run(), f"bridge_connection_{self._conn_config.get('id', 'unknown')}"
+        )
         return self._ws_task
 
 

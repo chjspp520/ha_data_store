@@ -24,7 +24,9 @@ TABLE_BRIDGE_CONNECTIONS = "bridge_connections"
 TABLE_BRIDGE_ENTITIES = "bridge_entities"
 TABLE_HEALTH_RECORDS = "health_records"
 TABLE_MEDIA_PLAYLISTS = "media_playlists"
+TABLE_MEDIA_SONGS = "media_songs"
 TABLE_MEDIA_QUEUE = "media_queue"
+TABLE_MEDIA_NOW_PLAYING = "media_now_playing"
 
 # 传感器类：每种指标独立建表，表名前缀
 ENV_TABLE_PREFIX = "env_"

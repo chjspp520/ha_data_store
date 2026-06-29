@@ -46,7 +46,9 @@ from .const import (
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
     TABLE_MEDIA_PLAYLISTS,
+    TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
+    TABLE_MEDIA_NOW_PLAYING,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -188,6 +190,56 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 # =========================================================================== #
 #  数据库初始化 + 迁移                                                          #
 # =========================================================================== #
+def _migrate_legacy_songs_column(conn: sqlite3.Connection) -> None:
+    """将 media_playlists.songs JSON 列迁移到 media_songs 子表，然后删除该列。
+
+    迁移逻辑：
+      1. 遍历 media_playlists 每行，解析 songs JSON
+      2. 每首歌 INSERT 一行到 media_songs（仅 media_content_id/media_type/title，
+         元数据字段待 refresh_meta 探测）
+      3. SQLite 3.35+ 支持 DROP COLUMN，旧版本则保留空列（不影响功能）
+    """
+    import json as _json
+    local_logger = get_logger()
+    rows = conn.execute(
+        f"SELECT id, songs FROM {TABLE_MEDIA_PLAYLISTS} WHERE songs IS NOT NULL AND songs != '[]'"
+    ).fetchall()
+    migrated = 0
+    for playlist_id, songs_json in rows:
+        try:
+            songs = _json.loads(songs_json) if isinstance(songs_json, str) else (songs_json or [])
+        except _json.JSONDecodeError:
+            songs = []
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for idx, song in enumerate(songs):
+            if not isinstance(song, dict):
+                continue
+            media_content_id = song.get("media_content_id") or song.get("url") or ""
+            if not media_content_id:
+                continue
+            conn.execute(
+                f"INSERT INTO {TABLE_MEDIA_SONGS} "
+                f"(playlist_id, sort_order, media_content_id, media_type, title, "
+                f"has_cover, has_lyrics, created_at, updated_at) "
+                f"VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)",
+                (
+                    playlist_id, idx, media_content_id,
+                    song.get("media_type", "music"),
+                    song.get("title", ""),
+                    now, now,
+                ),
+            )
+            migrated += 1
+    # 尝试删除旧列（SQLite 3.35+ 支持，失败则忽略，列保留为空不影响功能）
+    try:
+        conn.execute(f"ALTER TABLE {TABLE_MEDIA_PLAYLISTS} DROP COLUMN songs")
+        local_logger.info("[HDS] media_playlists.songs 列已迁移并删除 rows_migrated=%d", migrated)
+    except Exception:
+        # 旧版本 SQLite 不支持 DROP COLUMN，清空列内容即可
+        conn.execute(f"UPDATE {TABLE_MEDIA_PLAYLISTS} SET songs = '[]'")
+        local_logger.info("[HDS] media_playlists.songs 已迁移到子表(rows=%d)，旧列保留(SQlite版本不支持DROP)", migrated)
+
+
 def _init_database(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     local_logger = get_logger()
@@ -409,24 +461,49 @@ def _init_database(db_path: str) -> None:
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_health_name_time ON {TABLE_HEALTH_RECORDS} (name, date_time);"
         )
-        # 14) 媒体播放列表表 — 存储用户播放列表名称 + 歌曲 JSON
+        # 14) 媒体播放列表表
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_MEDIA_PLAYLISTS} (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_name   TEXT NOT NULL,
                 name        TEXT NOT NULL DEFAULT '',
-                songs       TEXT NOT NULL DEFAULT '[]',
                 created_at  TEXT NOT NULL DEFAULT '',
                 updated_at  TEXT NOT NULL DEFAULT '',
                 UNIQUE(user_name, name)
             )
             """
         )
-        # 迁移：补充 songs 列（旧表）
+        # 14b) 媒体歌曲子表 — 每首歌独立一行，元数据 + 内嵌歌词
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_MEDIA_SONGS} (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id      INTEGER NOT NULL,
+                sort_order       INTEGER NOT NULL DEFAULT 0,
+                media_content_id TEXT NOT NULL,
+                media_type       TEXT NOT NULL DEFAULT 'music',
+                title            TEXT,
+                artist           TEXT,
+                album            TEXT,
+                duration         INTEGER,
+                has_cover        INTEGER NOT NULL DEFAULT 0,
+                has_lyrics       INTEGER NOT NULL DEFAULT 0,
+                lyrics           TEXT,
+                extra            TEXT NOT NULL DEFAULT '{{}}',
+                created_at       TEXT NOT NULL DEFAULT '',
+                updated_at       TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (playlist_id) REFERENCES {TABLE_MEDIA_PLAYLISTS}(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_media_songs_playlist ON {TABLE_MEDIA_SONGS}(playlist_id, sort_order);"
+        )
+        # 迁移：旧 media_playlists.songs JSON 列 → 拆入 media_songs 子表后删除该列
         mp_columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_MEDIA_PLAYLISTS})")]
-        if "songs" not in mp_columns:
-            conn.execute(f"ALTER TABLE {TABLE_MEDIA_PLAYLISTS} ADD COLUMN songs TEXT NOT NULL DEFAULT '[]'")
+        if "songs" in mp_columns:
+            _migrate_legacy_songs_column(conn)
         # 15) 媒体播放队列表 — 后端列表播放
         conn.execute(
             f"""
@@ -438,6 +515,18 @@ def _init_database(db_path: str) -> None:
                 is_active     INTEGER NOT NULL DEFAULT 0,
                 created_at    TEXT NOT NULL DEFAULT '',
                 updated_at    TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # 16) 媒体正在播放记录表 — 前端点歌时上报，用于恢复播放上下文
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_MEDIA_NOW_PLAYING} (
+                entity_id   TEXT PRIMARY KEY,
+                song_id     INTEGER,
+                playlist_id INTEGER,
+                user        TEXT,
+                updated_at  TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -3759,7 +3848,13 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         HealthTypesView,
         HealthDeleteView,
         MediaPlaylistView,
+        MediaPlaylistItemView,
+        MediaSongsView,
+        MediaSongItemView,
+        MediaLyricsView,
+        MediaCoverView,
         MediaQueueView,
+        MediaNowPlayingView,
         TableColumnsView,
     )
     hass.http.register_view(EntityConfigView(db_path))
@@ -3800,7 +3895,13 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(HealthTypesView(db_path))
     hass.http.register_view(HealthDeleteView(db_path))
     hass.http.register_view(MediaPlaylistView(db_path))
+    hass.http.register_view(MediaPlaylistItemView(db_path))
+    hass.http.register_view(MediaSongsView(db_path))
+    hass.http.register_view(MediaSongItemView(db_path))
+    hass.http.register_view(MediaLyricsView(db_path))
+    hass.http.register_view(MediaCoverView(db_path))
     hass.http.register_view(MediaQueueView(db_path))
+    hass.http.register_view(MediaNowPlayingView(db_path))
     hass.http.register_view(TableColumnsView(db_path))
 
     # 小爱对话 API（独立模块）
@@ -3848,8 +3949,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # ── 媒体播放队列：后端自动切歌 ──
     import json as _json
+    _mq_logger = get_logger()
 
-    def _handle_media_queue_event(event) -> None:
+    async def _handle_media_queue_event(event) -> None:
         """监听 media_player 状态变化，自动推进播放队列。"""
         entity_id = event.data.get("entity_id", "")
         if not entity_id or not entity_id.startswith("media_player."):
@@ -3858,17 +3960,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         new_state = event.data.get("new_state")
         if not new_state or not old_state:
             return
+        # 日志：仅记录有意义的状态变化（playing→playing 不记录，减少日志量）
+        if old_state.state != new_state.state:
+            if _mq_logger:
+                _mq_logger.info("[media_queue] 事件收到 entity=%s %s→%s", entity_id, old_state.state, new_state.state)
         # 只处理从 playing 变为 idle/paused 的情况
         if old_state.state != "playing" or new_state.state not in ("idle", "paused"):
             return
-        # 检查是否有人在听歌中途暂停（位置远小于总时长）
-        old_pos = (old_state.attributes or {}).get("media_position", 0) or 0
-        old_dur = (old_state.attributes or {}).get("media_duration", 0) or 0
-        if old_dur > 0 and old_pos < old_dur * 0.85:
-            return  # 用户手动暂停，不切歌
-        # 查询该实体是否有活跃队列
+        # 查询该实体是否有活跃队列（先查队列再决定是否切歌，有活跃队列就切）
         import sqlite3
-        try:
+        # sqlite 操作放 executor 避免阻塞事件循环
+        def _query_and_update():
             conn = sqlite3.connect(db_path)
             try:
                 row = conn.execute(
@@ -3876,9 +3978,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     (entity_id,),
                 ).fetchone()
                 if not row:
-                    return
+                    return None  # 无活跃队列，不处理
                 tracks = _json.loads(row[2]) if isinstance(row[2], str) else []
                 cur_idx = int(row[3])
+                old_attrs = old_state.attributes or {}
+                old_pos = old_attrs.get("media_position", 0) or 0
+                old_dur = old_attrs.get("media_duration", 0) or 0
+                if _mq_logger:
+                    _mq_logger.info("[media_queue] 状态变化 entity=%s %s→%s pos=%s dur=%s cur_idx=%d tracks=%d",
+                             entity_id, old_state.state, new_state.state, old_pos, old_dur, cur_idx, len(tracks))
                 next_idx = cur_idx + 1
                 if next_idx >= len(tracks):
                     # 播完，停止队列
@@ -3887,12 +3995,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         (__import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S"), entity_id),
                     )
                     conn.commit()
-                    _LOGGER.info("[media_queue] 列表播放完成 entity=%s", entity_id)
-                    return
+                    if _mq_logger:
+                        _mq_logger.info("[media_queue] 列表播放完成 entity=%s 共%d首", entity_id, len(tracks))
+                    return "completed"
                 next_track = tracks[next_idx]
                 media_id = next_track.get("media_content_id") or next_track.get("url", "")
                 if not media_id:
-                    return
+                    if _mq_logger:
+                        _mq_logger.warning("[media_queue] 下一首无 media_content_id entity=%s idx=%d", entity_id, next_idx)
+                    return None
                 # 更新索引
                 now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 conn.execute(
@@ -3900,23 +4011,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     (next_idx, now, entity_id),
                 )
                 conn.commit()
-                # 调用 HA 服务播放下一首
-                hass.async_create_task(
-                    hass.services.async_call(
-                        "media_player", "play_media",
-                        {"entity_id": entity_id, "media_content_id": media_id,
-                         "media_content_type": next_track.get("media_type", "music")},
-                    )
-                )
-                _LOGGER.info("[media_queue] 自动切歌 entity=%s idx=%d->%d title=%s",
-                             entity_id, cur_idx, next_idx, next_track.get("title", ""))
+                # 读取原 now_playing 记录的 user 和 playlist_id（用于切歌后保留上下文）
+                np_row = conn.execute(
+                    f"SELECT user, playlist_id FROM {TABLE_MEDIA_NOW_PLAYING} WHERE entity_id = ?",
+                    (entity_id,),
+                ).fetchone()
+                np_user = np_row[0] if np_row else ""
+                np_playlist_id = np_row[1] if np_row else None
+                return {"media_id": media_id, "media_type": next_track.get("media_type", "music"),
+                        "title": next_track.get("title", ""), "next_idx": next_idx, "cur_idx": cur_idx,
+                        "song_id": next_track.get("id"), "user": np_user, "playlist_id": np_playlist_id}
             finally:
                 conn.close()
+        try:
+            result = await hass.async_add_executor_job(_query_and_update)
+            if not result:
+                return
+            if result == "completed":
+                return
+            # 在事件循环线程中调用 HA 服务（异步）
+            await hass.services.async_call(
+                "media_player", "play_media",
+                {"entity_id": entity_id, "media_content_id": result["media_id"],
+                 "media_content_type": result["media_type"]},
+            )
+            # 同步更新 now_playing 表（后端切歌后记录新歌曲，保留原 user 和 playlist_id）
+            if result.get("song_id"):
+                _np_song_id = result["song_id"]
+                _np_user = result.get("user", "")
+                _np_playlist_id = result.get("playlist_id")
+                def _update_now_playing():
+                    import sqlite3 as _sql3
+                    _now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    _conn = _sql3.connect(db_path)
+                    try:
+                        _conn.execute(
+                            f"INSERT OR REPLACE INTO {TABLE_MEDIA_NOW_PLAYING} "
+                            f"(entity_id, song_id, playlist_id, user, updated_at) "
+                            f"VALUES (?, ?, ?, ?, ?)",
+                            (entity_id, _np_song_id, _np_playlist_id, _np_user, _now),
+                        )
+                        _conn.commit()
+                    finally:
+                        _conn.close()
+                await hass.async_add_executor_job(_update_now_playing)
+            if _mq_logger:
+                _mq_logger.info("[media_queue] 自动切歌 entity=%s idx=%d->%d title=%s song_id=%s",
+                         entity_id, result["cur_idx"], result["next_idx"], result["title"], result.get("song_id"))
         except Exception:
-            _LOGGER.exception("[media_queue] 切歌处理异常 entity=%s", entity_id)
+            if _mq_logger:
+                _mq_logger.exception("[media_queue] 切歌处理异常 entity=%s", entity_id)
 
     hass.bus.async_listen("state_changed", _handle_media_queue_event)
-    _LOGGER.info("[media_queue] 后端列表播放监听已启动")
+    if _mq_logger:
+        _mq_logger.info("[media_queue] 后端列表播放监听已启动")
 
     # ── 方案一：启动时从 pending JSON 恢复丢失的关机事件 ──
     async def _recover_pending_on_startup(_now=None) -> None:

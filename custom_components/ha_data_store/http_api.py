@@ -45,7 +45,9 @@ from .const import (
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
     TABLE_MEDIA_PLAYLISTS,
+    TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
+    TABLE_MEDIA_NOW_PLAYING,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -749,7 +751,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history"},
                 status_code=400,
             )
 
@@ -783,12 +785,20 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_vacuum_history, db_path, request)
             elif query_type == "entity_data_dates":
                 result = await self._exec_in_executor(hass, self._query_entity_data_dates, db_path, request)
+            elif query_type == "room_data_dates":
+                result = await self._exec_in_executor(hass, self._query_room_data_dates, db_path, request)
             elif query_type == "aggregate_daily":
                 result = await self._exec_in_executor(hass, self._query_aggregate_daily, db_path, request)
             elif query_type == "aggregate_monthly":
                 result = await self._exec_in_executor(hass, self._query_aggregate_monthly, db_path, request)
             elif query_type == "aggregate_yearly":
                 result = await self._exec_in_executor(hass, self._query_aggregate_yearly, db_path, request)
+            elif query_type == "aggregate_room_daily":
+                result = await self._exec_in_executor(hass, self._query_aggregate_room_daily, db_path, request)
+            elif query_type == "aggregate_room_monthly":
+                result = await self._exec_in_executor(hass, self._query_aggregate_room_monthly, db_path, request)
+            elif query_type == "aggregate_room_yearly_daily":
+                result = await self._exec_in_executor(hass, self._query_aggregate_room_yearly_daily, db_path, request)
             elif query_type in ("ranking_daily", "ranking_monthly", "ranking_yearly"):
                 result = await self._exec_in_executor(hass, self._query_ranking, db_path, request)
             elif query_type == "electricity_standard":
@@ -1326,6 +1336,103 @@ class QueryView(_BaseDBView):
             conn.close()
 
     # ------------------------------------------------------------------ #
+    #  room_data_dates：查询指定房间某月哪些日期有数据                          #
+    # ------------------------------------------------------------------ #
+    def _query_room_data_dates(self, db_path: str, request: web.Request) -> dict:
+        """返回指定房间在指定月份内指定类别的哪些日期有数据。
+
+        参数：
+          - room:       房间名（必填）
+          - month:      YYYY-MM（必填）
+          - category:   必填，逗号分隔，可多选 device/environment/attribute
+          - date_field: 可选，自定义日期字段；不填则按表自动检测（设备用 on_time，其余用 datetime）
+        """
+        params = self._extract_params(request)
+        room = params["room"]
+        month = params["month"]
+
+        if not room:
+            raise ValueError("room_data_dates 需要 room 参数")
+        if not month:
+            raise ValueError("room_data_dates 需要 month 参数（格式：YYYY-MM）")
+
+        import re
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            raise ValueError("month 参数格式错误，应为 YYYY-MM")
+
+        category_raw = params["category"].lower() if params["category"] else ""
+        date_field = request.query.get("date_field", "").strip()
+
+        categories = [c.strip() for c in category_raw.split(",") if c.strip()]
+        if not categories:
+            raise ValueError("room_data_dates 需要 category 参数（device/environment/attribute，可多选，逗号分隔）")
+        invalid = [c for c in categories if c not in ("device", "environment", "attribute")]
+        if invalid:
+            raise ValueError(f"category 参数无效: {', '.join(invalid)}，可选: device, environment, attribute")
+
+        pattern = f"{month}-%"
+
+        conn = sqlite3.connect(db_path)
+        try:
+            # 按类别收集 (表名, 日期字段) 列表
+            tables_to_query: list[tuple[str, str]] = []
+
+            for category in categories:
+                if category == "device":
+                    dfield = date_field or "on_time"
+                    tables_to_query.append((TABLE_DEVICE_HISTORY, dfield))
+                elif category == "environment":
+                    dfield = date_field or "datetime"
+                    for metric in VALID_METRICS:
+                        tables_to_query.append((get_env_table_name(metric), dfield))
+                elif category == "attribute":
+                    dfield = date_field or "datetime"
+                    cursor = conn.execute(f"SELECT type_name FROM {TABLE_ATTR_TYPE_DEFS}")
+                    for arow in cursor.fetchall():
+                        tables_to_query.append((get_attr_table_name(arow[0]), dfield))
+
+            all_dates: set = set()
+
+            for tbl, dfield in tables_to_query:
+                # 检查表是否存在
+                try:
+                    conn.execute(f"SELECT 1 FROM {tbl} LIMIT 1")
+                except Exception:
+                    continue
+                # 检查 room / 日期字段是否存在
+                try:
+                    col_info = conn.execute(f"PRAGMA table_info({tbl})").fetchall()
+                    col_names = [c[1] for c in col_info]
+                    if dfield not in col_names or "room" not in col_names:
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    cursor = conn.execute(
+                        f"SELECT DISTINCT SUBSTR({dfield}, 1, 10) AS date "
+                        f"FROM {tbl} "
+                        f"WHERE room = ? AND {dfield} LIKE ?",
+                        (room, pattern),
+                    )
+                    for row in cursor.fetchall():
+                        if row[0]:
+                            all_dates.add(row[0])
+                except sqlite3.OperationalError as exc:
+                    _LOGGER.warning("[room_data_dates] 查询 %s 失败: %s", tbl, exc)
+
+            dates = sorted(all_dates)
+            return {
+                "dates": dates,
+                "count": len(dates),
+                "month": month,
+                "room": room,
+                "categories": categories,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
     #  aggregate_daily：指定实体指定月的每日数据汇总                            #
     # ------------------------------------------------------------------ #
     def _query_aggregate_daily(self, db_path: str, request: web.Request) -> dict:
@@ -1662,6 +1769,250 @@ class QueryView(_BaseDBView):
                 "period": period_label,
                 "count": len(rankings),
                 "rankings": rankings,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  内部：按房间+时间周期聚合多类别数据（设备/环境/属性）                     #
+    #  categories: device/environment/attribute（可多选）                     #
+    #  pattern: 时间匹配模式，如 "2026-06-%" 或 "2026-%"                      #
+    #  group_len: 分组截取长度（10=按日，7=按月）                              #
+    #  group_key: 分组键名（"date" 或 "month"）                               #
+    # ------------------------------------------------------------------ #
+    def _aggregate_room_by_period(
+        self, conn: sqlite3.Connection, room: str, pattern: str,
+        group_len: int, group_key: str, categories: list,
+    ) -> dict:
+        """按类别分别聚合，返回 {category: [summary_rows]}。"""
+        summaries: dict[str, list] = {}
+
+        for category in categories:
+            rows_out: list = []
+            if category == "device":
+                dfield = "on_time"
+                col_names = self._get_table_columns(conn, TABLE_DEVICE_HISTORY)
+                has_duration = "duration" in col_names
+                has_energy = "energy_consumed" in col_names
+                sum_parts = ["COUNT(*) AS on_count"]
+                if has_energy:
+                    sum_parts.append(
+                        "COALESCE(SUM(CASE WHEN energy_consumed IS NOT NULL THEN energy_consumed ELSE 0 END), 0) AS total_energy"
+                    )
+                if has_duration:
+                    sum_parts.append(
+                        "COALESCE(SUM(CASE WHEN duration IS NOT NULL THEN duration ELSE 0 END), 0) AS total_duration"
+                    )
+                try:
+                    cursor = conn.execute(
+                        f"SELECT SUBSTR({dfield}, 1, {group_len}) AS {group_key}, {', '.join(sum_parts)} "
+                        f"FROM {TABLE_DEVICE_HISTORY} "
+                        f"WHERE room = ? AND {dfield} LIKE ? "
+                        f"GROUP BY SUBSTR({dfield}, 1, {group_len}) "
+                        f"ORDER BY {group_key}",
+                        (room, pattern),
+                    )
+                    for row in cursor.fetchall():
+                        item = {group_key: row[group_key], "on_count": row["on_count"]}
+                        if has_energy:
+                            item["total_energy"] = round(row["total_energy"], 2)
+                        if has_duration:
+                            item["total_duration"] = round(row["total_duration"], 0)
+                        rows_out.append(item)
+                except sqlite3.OperationalError as exc:
+                    _LOGGER.warning("[aggregate_room] device 聚合失败: %s", exc)
+
+            elif category == "environment":
+                dfield = "datetime"
+                for metric in VALID_METRICS:
+                    tbl = get_env_table_name(metric)
+                    try:
+                        conn.execute(f"SELECT 1 FROM {tbl} LIMIT 1")
+                    except Exception:
+                        continue
+                    col_names = self._get_table_columns(conn, tbl)
+                    if dfield not in col_names or "room" not in col_names:
+                        continue
+                    has_value = "value" in col_names
+                    sum_parts = ["COUNT(*) AS on_count"]
+                    if has_value:
+                        sum_parts.append(
+                            "COALESCE(SUM(CASE WHEN value IS NOT NULL THEN value ELSE 0 END), 0) AS total_value"
+                        )
+                    try:
+                        cursor = conn.execute(
+                            f"SELECT SUBSTR({dfield}, 1, {group_len}) AS {group_key}, {', '.join(sum_parts)} "
+                            f"FROM {tbl} "
+                            f"WHERE room = ? AND {dfield} LIKE ? "
+                            f"GROUP BY SUBSTR({dfield}, 1, {group_len}) "
+                            f"ORDER BY {group_key}",
+                            (room, pattern),
+                        )
+                        for row in cursor.fetchall():
+                            item = {
+                                group_key: row[group_key],
+                                "metric": metric,
+                                "on_count": row["on_count"],
+                            }
+                            if has_value:
+                                item["total_value"] = round(row["total_value"], 2)
+                            rows_out.append(item)
+                    except sqlite3.OperationalError as exc:
+                        _LOGGER.warning("[aggregate_room] env %s 聚合失败: %s", metric, exc)
+
+            elif category == "attribute":
+                dfield = "datetime"
+                cursor_types = conn.execute(f"SELECT type_name FROM {TABLE_ATTR_TYPE_DEFS}")
+                for arow in cursor_types.fetchall():
+                    attr_type = arow[0]
+                    tbl = get_attr_table_name(attr_type)
+                    try:
+                        conn.execute(f"SELECT 1 FROM {tbl} LIMIT 1")
+                    except Exception:
+                        continue
+                    col_names = self._get_table_columns(conn, tbl)
+                    if dfield not in col_names or "room" not in col_names:
+                        continue
+                    try:
+                        cursor = conn.execute(
+                            f"SELECT SUBSTR({dfield}, 1, {group_len}) AS {group_key}, COUNT(*) AS on_count "
+                            f"FROM {tbl} "
+                            f"WHERE room = ? AND {dfield} LIKE ? "
+                            f"GROUP BY SUBSTR({dfield}, 1, {group_len}) "
+                            f"ORDER BY {group_key}",
+                            (room, pattern),
+                        )
+                        for row in cursor.fetchall():
+                            item = {
+                                group_key: row[group_key],
+                                "attr_type": attr_type,
+                                "on_count": row["on_count"],
+                            }
+                            rows_out.append(item)
+                    except sqlite3.OperationalError as exc:
+                        _LOGGER.warning("[aggregate_room] attr %s 聚合失败: %s", attr_type, exc)
+
+            if rows_out:
+                summaries[category] = rows_out
+
+        return summaries
+
+    # ------------------------------------------------------------------ #
+    #  aggregate_room_daily：指定房间指定月每日汇总（多类别）                  #
+    # ------------------------------------------------------------------ #
+    def _query_aggregate_room_daily(self, db_path: str, request: web.Request) -> dict:
+        params = self._extract_params(request)
+        room = params["room"]
+        month = params["month"]
+        category_raw = params["category"].lower() if params["category"] else "device"
+
+        if not room:
+            raise ValueError("aggregate_room_daily 需要 room 参数")
+        if not month:
+            raise ValueError("aggregate_room_daily 需要 month 参数（格式：YYYY-MM）")
+
+        import re
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            raise ValueError("month 参数格式错误，应为 YYYY-MM")
+
+        categories = [c.strip() for c in category_raw.split(",") if c.strip()]
+        if not categories:
+            raise ValueError("aggregate_room_daily 需要 category 参数（device/environment/attribute，可多选）")
+        invalid = [c for c in categories if c not in ("device", "environment", "attribute")]
+        if invalid:
+            raise ValueError(f"category 参数无效: {', '.join(invalid)}，可选: device, environment, attribute")
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            summaries = self._aggregate_room_by_period(
+                conn, room, f"{month}-%", 10, "date", categories,
+            )
+            return {
+                "room": room,
+                "month": month,
+                "categories": categories,
+                "summaries": summaries,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  aggregate_room_monthly：指定房间指定年每月汇总（多类别）                #
+    # ------------------------------------------------------------------ #
+    def _query_aggregate_room_monthly(self, db_path: str, request: web.Request) -> dict:
+        params = self._extract_params(request)
+        room = params["room"]
+        year = params["year"]
+        category_raw = params["category"].lower() if params["category"] else "device"
+
+        if not room:
+            raise ValueError("aggregate_room_monthly 需要 room 参数")
+        if not year:
+            raise ValueError("aggregate_room_monthly 需要 year 参数（格式：YYYY）")
+
+        import re
+        if not re.match(r"^\d{4}$", year):
+            raise ValueError("year 参数格式错误，应为 YYYY")
+
+        categories = [c.strip() for c in category_raw.split(",") if c.strip()]
+        if not categories:
+            raise ValueError("aggregate_room_monthly 需要 category 参数（device/environment/attribute，可多选）")
+        invalid = [c for c in categories if c not in ("device", "environment", "attribute")]
+        if invalid:
+            raise ValueError(f"category 参数无效: {', '.join(invalid)}，可选: device, environment, attribute")
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            summaries = self._aggregate_room_by_period(
+                conn, room, f"{year}-%", 7, "month", categories,
+            )
+            return {
+                "room": room,
+                "year": year,
+                "categories": categories,
+                "summaries": summaries,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  aggregate_room_yearly_daily：指定房间指定年每日汇总（多类别）           #
+    # ------------------------------------------------------------------ #
+    def _query_aggregate_room_yearly_daily(self, db_path: str, request: web.Request) -> dict:
+        params = self._extract_params(request)
+        room = params["room"]
+        year = params["year"]
+        category_raw = params["category"].lower() if params["category"] else "device"
+
+        if not room:
+            raise ValueError("aggregate_room_yearly_daily 需要 room 参数")
+        if not year:
+            raise ValueError("aggregate_room_yearly_daily 需要 year 参数（格式：YYYY）")
+
+        import re
+        if not re.match(r"^\d{4}$", year):
+            raise ValueError("year 参数格式错误，应为 YYYY")
+
+        categories = [c.strip() for c in category_raw.split(",") if c.strip()]
+        if not categories:
+            raise ValueError("aggregate_room_yearly_daily 需要 category 参数（device/environment/attribute，可多选）")
+        invalid = [c for c in categories if c not in ("device", "environment", "attribute")]
+        if invalid:
+            raise ValueError(f"category 参数无效: {', '.join(invalid)}，可选: device, environment, attribute")
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            summaries = self._aggregate_room_by_period(
+                conn, room, f"{year}-%", 10, "date", categories,
+            )
+            return {
+                "room": room,
+                "year": year,
+                "categories": categories,
+                "summaries": summaries,
             }
         finally:
             conn.close()
@@ -6511,14 +6862,13 @@ class HealthDeleteView(_BaseDBView):
 
 
 # ===========================================================================
-#  媒体播放列表管理 API                                                         #
+#  媒体播放列表管理 API（子表 media_songs）                                    #
 # ===========================================================================
 class MediaPlaylistView(_BaseDBView):
-    """管理用户播放列表。
-    GET    /api/ha_data_store/media/playlists?user=xxx   → 列出用户播放列表
-    GET    /api/ha_data_store/media/users                → 列出所有用户
-    POST   /api/ha_data_store/media/playlist             → 新增/重命名播放列表
-    DELETE /api/ha_data_store/media/playlist?id=xxx      → 删除播放列表
+    """播放列表集合操作。
+    GET    /api/ha_data_store/media/playlists?user=xxx       → 列出用户播放列表（含 songs 元数据，不含 lyrics）
+    GET    /api/ha_data_store/media/playlists?users=true     → 列出所有用户
+    POST   /api/ha_data_store/media/playlists               → 新建播放列表
     """
 
     url = "/api/ha_data_store/media/playlists"
@@ -6542,7 +6892,6 @@ class MediaPlaylistView(_BaseDBView):
             finally:
                 conn.close()
 
-        import json as _json
         def _list_playlists():
             conn = sqlite3.connect(db_path)
             try:
@@ -6552,25 +6901,25 @@ class MediaPlaylistView(_BaseDBView):
                         f"SELECT * FROM {TABLE_MEDIA_PLAYLISTS} WHERE user_name = ? ORDER BY name",
                         (user,),
                     ).fetchall()
-                    playlist_count = len(rows)
                 else:
                     rows = conn.execute(
                         f"SELECT * FROM {TABLE_MEDIA_PLAYLISTS} ORDER BY user_name, name"
                     ).fetchall()
-                    playlist_count = len(rows)
                 playlists = []
                 for r in rows:
                     d = dict(r)
-                    if isinstance(d.get("songs"), str):
-                        try:
-                            d["songs"] = _json.loads(d["songs"])
-                        except _json.JSONDecodeError:
-                            d["songs"] = []
+                    # 查子表歌曲（不带 lyrics 列，列表轻量化）
+                    songs = conn.execute(
+                        f"SELECT id, playlist_id, sort_order, media_content_id, media_type, "
+                        f"title, artist, album, duration, has_cover, has_lyrics, extra, "
+                        f"created_at, updated_at FROM {TABLE_MEDIA_SONGS} "
+                        f"WHERE playlist_id = ? ORDER BY sort_order",
+                        (d["id"],),
+                    ).fetchall()
+                    d["songs"] = [dict(s) for s in songs]
+                    d["song_count"] = len(songs)
                     playlists.append(d)
-                return {
-                    "playlists": playlists,
-                    "total": playlist_count,
-                }
+                return {"playlists": playlists, "total": len(rows)}
             finally:
                 conn.close()
 
@@ -6595,40 +6944,25 @@ class MediaPlaylistView(_BaseDBView):
 
         user_name = (body.get("user_name") or "").strip()
         name = (body.get("name") or "").strip()
-        playlist_id = body.get("id")
-        songs = body.get("songs")
-
         if not user_name:
             return self.json({"success": False, "error": "user_name 必填"}, status_code=400)
-        if not name and not playlist_id:
-            return self.json({"success": False, "error": "name 或 id 必填"}, status_code=400)
+        if not name:
+            return self.json({"success": False, "error": "name 必填"}, status_code=400)
 
-        now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         def _save():
             conn = sqlite3.connect(db_path)
             try:
-                if playlist_id:
-                    # 更新名称
-                    if songs is not None:
-                        songs_json = json.dumps(songs, ensure_ascii=False)
-                        conn.execute(
-                            f"UPDATE {TABLE_MEDIA_PLAYLISTS} SET name = ?, songs = ?, updated_at = ? WHERE id = ?",
-                            (name, songs_json, now, playlist_id),
-                        )
-                    else:
-                        conn.execute(
-                            f"UPDATE {TABLE_MEDIA_PLAYLISTS} SET name = ?, updated_at = ? WHERE id = ?",
-                            (name, now, playlist_id),
-                        )
-                else:
-                    songs_json = json.dumps(songs, ensure_ascii=False) if songs is not None else '[]'
-                    conn.execute(
-                        f"INSERT OR IGNORE INTO {TABLE_MEDIA_PLAYLISTS} (user_name, name, songs, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                        (user_name, name, songs_json, now, now),
-                    )
+                cur = conn.execute(
+                    f"INSERT OR IGNORE INTO {TABLE_MEDIA_PLAYLISTS} (user_name, name, created_at, updated_at) "
+                    f"VALUES (?, ?, ?, ?)",
+                    (user_name, name, now, now),
+                )
                 conn.commit()
-                return {"success": True, "message": f"播放列表 '{name}' 已保存"}
+                if cur.rowcount == 0:
+                    return {"success": False, "error": f"播放列表 '{name}' 已存在"}
+                return {"success": True, "id": cur.lastrowid, "message": f"播放列表 '{name}' 已创建"}
             except Exception as exc:
                 return {"success": False, "error": str(exc)}
             finally:
@@ -6637,73 +6971,422 @@ class MediaPlaylistView(_BaseDBView):
         result = await self._exec_in_executor(hass, _save)
         return self.json(result)
 
-    async def delete(self, request: web.Request) -> web.Response:
+
+class MediaPlaylistItemView(_BaseDBView):
+    """单个播放列表操作。
+    GET    /api/ha_data_store/media/playlists/{playlist_id}                  → 获取单个播放列表详情
+    PUT    /api/ha_data_store/media/playlists/{playlist_id}                  → 重命名（body: {name}）
+    PUT    /api/ha_data_store/media/playlists/{playlist_id}?refresh_meta=1   → 整列刷新元数据
+    DELETE /api/ha_data_store/media/playlists/{playlist_id}                  → 删除播放列表（级联删歌曲）
+    """
+
+    url = "/api/ha_data_store/media/playlists/{playlist_id}"
+    name = "api:ha_data_store:media_playlist_item"
+
+    async def get(self, request: web.Request, playlist_id: str = "") -> web.Response:
         hass: HomeAssistant = request.app["hass"]
         if (resp := self._check_api_enabled(request)):
             return resp
         db_path = self._db_path
-        playlist_id = request.query.get("id", "").strip()
-        user_name = request.query.get("user", "").strip()
+        playlist_id = request.match_info["playlist_id"]
 
-        if not playlist_id and not user_name:
-            return self.json({"success": False, "error": "需要 id 或 user 参数"}, status_code=400)
-
-        def _delete():
+        def _get():
             conn = sqlite3.connect(db_path)
             try:
-                if playlist_id:
-                    conn.execute(f"DELETE FROM {TABLE_MEDIA_PLAYLISTS} WHERE id = ?", (playlist_id,))
-                elif user_name:
-                    conn.execute(f"DELETE FROM {TABLE_MEDIA_PLAYLISTS} WHERE user_name = ?", (user_name,))
-                conn.commit()
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    f"SELECT * FROM {TABLE_MEDIA_PLAYLISTS} WHERE id = ?", (playlist_id,)
+                ).fetchone()
+                if not row:
+                    return {"success": False, "error": "播放列表不存在"}
+                d = dict(row)
+                songs = conn.execute(
+                    f"SELECT id, playlist_id, sort_order, media_content_id, media_type, "
+                    f"title, artist, album, duration, has_cover, has_lyrics, extra, "
+                    f"created_at, updated_at FROM {TABLE_MEDIA_SONGS} "
+                    f"WHERE playlist_id = ? ORDER BY sort_order",
+                    (playlist_id,),
+                ).fetchall()
+                d["songs"] = [dict(s) for s in songs]
+                d["song_count"] = len(songs)
+                return {"success": True, "data": d}
             finally:
                 conn.close()
 
         try:
-            await self._exec_in_executor(hass, _delete)
-            msg = f"已删除用户 '{user_name}' 的全部播放列表" if user_name else f"播放列表已删除"
-            return self.json({"success": True, "message": msg})
+            result = await self._exec_in_executor(hass, _get)
+            status = 404 if not result.get("success") else 200
+            return self.json(result, status_code=status)
         except Exception as exc:
+            _LOGGER.exception("[media] GET playlist/%s 异常", playlist_id)
             return self.json({"success": False, "error": str(exc)}, status_code=500)
 
-    async def put(self, request: web.Request) -> web.Response:
-        """更新播放列表的歌曲字段。
-        PUT /api/ha_data_store/media/playlists?id=xxx&key=xxx
-        Body: { "songs": [...] }
-        """
+    async def put(self, request: web.Request, playlist_id: str = "") -> web.Response:
         hass: HomeAssistant = request.app["hass"]
         if (resp := self._check_api_enabled(request)):
             return resp
         db_path = self._db_path
-        playlist_id = request.query.get("id", "").strip()
-        if not playlist_id:
-            return self.json({"success": False, "error": "缺少 id 参数"}, status_code=400)
+        playlist_id = request.match_info["playlist_id"]
+        refresh_meta = request.query.get("refresh_meta", "").strip().lower() in ("true", "1")
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if refresh_meta:
+            # 整列刷新元数据
+            from .media_meta import resolve_media_path, probe_media_meta
+
+            def _refresh():
+                conn = sqlite3.connect(db_path)
+                try:
+                    rows = conn.execute(
+                        f"SELECT id, media_content_id FROM {TABLE_MEDIA_SONGS} "
+                        f"WHERE playlist_id = ? ORDER BY sort_order",
+                        (playlist_id,),
+                    ).fetchall()
+                    refreshed = 0
+                    failed = []
+                    for song_id, media_content_id in rows:
+                        full = resolve_media_path(hass, media_content_id or "")
+                        if not full:
+                            failed.append({"id": song_id, "media_content_id": media_content_id,
+                                           "reason": "路径解析失败(文件未找到)"})
+                            continue
+                        try:
+                            meta = probe_media_meta(full)
+                            conn.execute(
+                                f"UPDATE {TABLE_MEDIA_SONGS} SET title=?, artist=?, album=?, duration=?, "
+                                f"has_cover=?, has_lyrics=?, lyrics=?, updated_at=? WHERE id=?",
+                                (meta["title"], meta["artist"], meta["album"], meta["duration"],
+                                 1 if meta["has_cover"] else 0, 1 if meta["has_lyrics"] else 0,
+                                 meta["lyrics"], now, song_id),
+                            )
+                            refreshed += 1
+                        except Exception as exc:
+                            failed.append({"id": song_id, "media_content_id": media_content_id,
+                                           "reason": f"探测异常: {exc}"})
+                    conn.execute(
+                        f"UPDATE {TABLE_MEDIA_PLAYLISTS} SET updated_at = ? WHERE id = ?",
+                        (now, playlist_id),
+                    )
+                    conn.commit()
+                    _LOGGER.info("[media] 刷新元数据 playlist=%s refreshed=%d failed=%d",
+                                 playlist_id, refreshed, len(failed))
+                    return {"success": True,
+                            "message": f"已刷新 {refreshed} 首，失败 {len(failed)} 首",
+                            "refreshed": refreshed, "failed_count": len(failed),
+                            "failed": failed[:20]}
+                finally:
+                    conn.close()
+
+            try:
+                result = await self._exec_in_executor(hass, _refresh)
+                return self.json(result)
+            except Exception as exc:
+                _LOGGER.exception("[media] PUT refresh playlist/%s 异常", playlist_id)
+                return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        # 普通重命名
         try:
             body = await request.json()
         except Exception:
             return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
-        songs = body.get("songs")
-        if songs is None:
-            return self.json({"success": False, "error": "缺少 songs 字段"}, status_code=400)
+        name = (body.get("name") or "").strip()
+        if not name:
+            return self.json({"success": False, "error": "缺少 name 字段"}, status_code=400)
 
-        now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        songs_json = json.dumps(songs, ensure_ascii=False)
-
-        def _update():
+        def _rename():
             conn = sqlite3.connect(db_path)
             try:
                 conn.execute(
-                    f"UPDATE {TABLE_MEDIA_PLAYLISTS} SET songs = ?, updated_at = ? WHERE id = ?",
-                    (songs_json, now, playlist_id),
+                    f"UPDATE {TABLE_MEDIA_PLAYLISTS} SET name = ?, updated_at = ? WHERE id = ?",
+                    (name, now, playlist_id),
                 )
                 conn.commit()
-                return {"success": True, "message": "歌曲已更新"}
+                return {"success": True, "message": f"已重命名为 '{name}'"}
+            finally:
+                conn.close()
+
+        result = await self._exec_in_executor(hass, _rename)
+        return self.json(result)
+
+    async def delete(self, request: web.Request, playlist_id: str = "") -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+        playlist_id = request.match_info["playlist_id"]
+
+        def _delete():
+            conn = sqlite3.connect(db_path)
+            try:
+                # SQLite 默认未开启外键约束，手动删子表
+                conn.execute(f"DELETE FROM {TABLE_MEDIA_SONGS} WHERE playlist_id = ?", (playlist_id,))
+                conn.execute(f"DELETE FROM {TABLE_MEDIA_PLAYLISTS} WHERE id = ?", (playlist_id,))
+                conn.commit()
+                return {"success": True, "message": "播放列表已删除"}
             finally:
                 conn.close()
 
         try:
-            result = await self._exec_in_executor(hass, _update)
+            result = await self._exec_in_executor(hass, _delete)
             return self.json(result)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class MediaSongsView(_BaseDBView):
+    """向播放列表添加歌曲。
+    POST /api/ha_data_store/media/playlists/{playlist_id}/songs
+    Body: { "media_content_id": "...", "media_type": "music", "sort_order": 0, "title": "..." }
+    """
+
+    url = "/api/ha_data_store/media/playlists/{playlist_id}/songs"
+    name = "api:ha_data_store:media_songs"
+
+    async def post(self, request: web.Request, playlist_id: str = "") -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+        playlist_id = request.match_info["playlist_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+
+        media_content_id = (body.get("media_content_id") or "").strip()
+        if not media_content_id:
+            return self.json({"success": False, "error": "media_content_id 必填"}, status_code=400)
+        media_type = body.get("media_type", "music")
+        title = body.get("title", "")
+        extra_raw = body.get("extra", {})
+        extra = json.dumps(extra_raw, ensure_ascii=False) if isinstance(extra_raw, (dict, list)) else "{}"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def _add():
+            conn = sqlite3.connect(db_path)
+            try:
+                # 校验播放列表存在
+                row = conn.execute(
+                    f"SELECT id FROM {TABLE_MEDIA_PLAYLISTS} WHERE id = ?", (playlist_id,)
+                ).fetchone()
+                if not row:
+                    return {"success": False, "error": "播放列表不存在"}
+                # sort_order 未传则取当前最大值+1
+                sort_order = body.get("sort_order")
+                if sort_order is None:
+                    max_row = conn.execute(
+                        f"SELECT MAX(sort_order) FROM {TABLE_MEDIA_SONGS} WHERE playlist_id = ?",
+                        (playlist_id,),
+                    ).fetchone()
+                    sort_order = (max_row[0] or -1) + 1
+                cur = conn.execute(
+                    f"INSERT INTO {TABLE_MEDIA_SONGS} "
+                    f"(playlist_id, sort_order, media_content_id, media_type, title, "
+                    f"has_cover, has_lyrics, extra, created_at, updated_at) "
+                    f"VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)",
+                    (playlist_id, int(sort_order), media_content_id, media_type, title,
+                     extra, now, now),
+                )
+                conn.commit()
+                return {"success": True, "id": cur.lastrowid, "sort_order": int(sort_order)}
+            except Exception as exc:
+                return {"success": False, "error": str(exc)}
+            finally:
+                conn.close()
+
+        result = await self._exec_in_executor(hass, _add)
+        status = 404 if "不存在" in str(result.get("error", "")) else 200
+        return self.json(result, status_code=status)
+
+
+class MediaSongItemView(_BaseDBView):
+    """单首歌曲操作。
+    PUT    /api/ha_data_store/media/songs/{song_id}                  → 调序（body: {sort_order}）
+    PUT    /api/ha_data_store/media/songs/{song_id}?refresh_meta=1   → 单首刷新元数据
+    DELETE /api/ha_data_store/media/songs/{song_id}                  → 删除单首
+    """
+
+    url = "/api/ha_data_store/media/songs/{song_id}"
+    name = "api:ha_data_store:media_song_item"
+
+    async def put(self, request: web.Request, song_id: str = "") -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+        song_id = request.match_info["song_id"]
+        refresh_meta = request.query.get("refresh_meta", "").strip().lower() in ("true", "1")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if refresh_meta:
+            from .media_meta import resolve_media_path, probe_media_meta
+
+            def _refresh():
+                conn = sqlite3.connect(db_path)
+                try:
+                    row = conn.execute(
+                        f"SELECT media_content_id FROM {TABLE_MEDIA_SONGS} WHERE id = ?", (song_id,)
+                    ).fetchone()
+                    if not row:
+                        return {"success": False, "error": "歌曲不存在"}
+                    media_content_id = row[0] or ""
+                    full = resolve_media_path(hass, media_content_id)
+                    if not full:
+                        return {"success": False,
+                                "error": f"无法解析音乐文件路径: {media_content_id}（详见 HA 日志 [media_meta]）"}
+                    meta = probe_media_meta(full)
+                    conn.execute(
+                        f"UPDATE {TABLE_MEDIA_SONGS} SET title=?, artist=?, album=?, duration=?, "
+                        f"has_cover=?, has_lyrics=?, lyrics=?, updated_at=? WHERE id=?",
+                        (meta["title"], meta["artist"], meta["album"], meta["duration"],
+                         1 if meta["has_cover"] else 0, 1 if meta["has_lyrics"] else 0,
+                         meta["lyrics"], now, song_id),
+                    )
+                    conn.commit()
+                    return {"success": True, "message": "元数据已刷新", "meta": meta}
+                finally:
+                    conn.close()
+
+            try:
+                result = await self._exec_in_executor(hass, _refresh)
+                status = 404 if "不存在" in str(result.get("error", "")) else 200
+                return self.json(result, status_code=status)
+            except Exception as exc:
+                return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        # 普通调序
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+        sort_order = body.get("sort_order")
+        if sort_order is None:
+            return self.json({"success": False, "error": "缺少 sort_order 字段"}, status_code=400)
+
+        def _reorder():
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    f"UPDATE {TABLE_MEDIA_SONGS} SET sort_order = ?, updated_at = ? WHERE id = ?",
+                    (int(sort_order), now, song_id),
+                )
+                conn.commit()
+                return {"success": True, "message": "顺序已更新"}
+            finally:
+                conn.close()
+
+        result = await self._exec_in_executor(hass, _reorder)
+        return self.json(result)
+
+    async def delete(self, request: web.Request, song_id: str = "") -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+        song_id = request.match_info["song_id"]
+
+        def _delete():
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(f"DELETE FROM {TABLE_MEDIA_SONGS} WHERE id = ?", (song_id,))
+                conn.commit()
+                return {"success": True, "message": "歌曲已删除"}
+            finally:
+                conn.close()
+
+        result = await self._exec_in_executor(hass, _delete)
+        return self.json(result)
+
+
+class MediaLyricsView(_BaseDBView):
+    """获取单首歌词。
+    GET /api/ha_data_store/media/songs/{song_id}/lyrics → { "lyrics": "...", "has_lyrics": true }
+    """
+
+    url = "/api/ha_data_store/media/songs/{song_id}/lyrics"
+    name = "api:ha_data_store:media_lyrics"
+
+    async def get(self, request: web.Request, song_id: str = "") -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+        song_id = request.match_info["song_id"]
+
+        def _get():
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    f"SELECT lyrics, has_lyrics FROM {TABLE_MEDIA_SONGS} WHERE id = ?", (song_id,)
+                ).fetchone()
+                if not row:
+                    return {"success": False, "error": "歌曲不存在"}
+                return {"success": True, "lyrics": row[0] or "", "has_lyrics": bool(row[1])}
+            finally:
+                conn.close()
+
+        try:
+            result = await self._exec_in_executor(hass, _get)
+            status = 404 if not result.get("success") else 200
+            return self.json(result, status_code=status)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class MediaCoverView(_BaseDBView):
+    """获取单首封面图（二进制）。
+    GET /api/ha_data_store/media/songs/{song_id}/cover → image/jpeg|png
+    """
+
+    url = "/api/ha_data_store/media/songs/{song_id}/cover"
+    name = "api:ha_data_store:media_cover"
+
+    async def get(self, request: web.Request, song_id: str = "") -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+        song_id = request.match_info["song_id"]
+
+        def _get_path():
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    f"SELECT media_content_id, has_cover FROM {TABLE_MEDIA_SONGS} WHERE id = ?",
+                    (song_id,),
+                ).fetchone()
+                if not row:
+                    return None, "歌曲不存在"
+                if not row[1]:
+                    return None, "无内嵌封面"
+                return row[0], None
+            finally:
+                conn.close()
+
+        try:
+            media_content_id, err = await self._exec_in_executor(hass, _get_path)
+            if err:
+                status = 404 if "不存在" in err else 404
+                return self.json({"success": False, "error": err}, status_code=status)
+            # 解析路径 + 提取封面
+            from .media_meta import resolve_media_path, extract_cover
+
+            def _extract():
+                full = resolve_media_path(hass, media_content_id or "")
+                if not full:
+                    return None
+                return extract_cover(full)
+
+            cover = await self._exec_in_executor(hass, _extract)
+            if not cover:
+                return self.json({"success": False, "error": "无法提取封面"}, status_code=404)
+            mime, data = cover
+            return web.Response(
+                body=data,
+                content_type=mime,
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
 
@@ -6769,6 +7452,11 @@ class MediaQueueView(_BaseDBView):
         if not entity_id:
             return self.json({"success": False, "error": "entity_id 必填"}, status_code=400)
 
+        _mq_log = _log_local()
+        if _mq_log:
+            _mq_log.info("[media_queue] POST 设置队列 entity=%s tracks=%d current_index=%d is_active=%d",
+                     entity_id, len(tracks) if isinstance(tracks, list) else 0, current_index, is_active)
+
         now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tracks_json = json.dumps(tracks, ensure_ascii=False)
 
@@ -6800,6 +7488,10 @@ class MediaQueueView(_BaseDBView):
         if not entity_id:
             return self.json({"success": False, "error": "缺少 entity_id 参数"}, status_code=400)
 
+        _mq_log = _log_local()
+        if _mq_log:
+            _mq_log.info("[media_queue] DELETE 停止队列 entity=%s", entity_id)
+
         def _stop():
             conn = sqlite3.connect(self._db_path)
             try:
@@ -6814,6 +7506,115 @@ class MediaQueueView(_BaseDBView):
         try:
             await self._exec_in_executor(hass, _stop)
             return self.json({"success": True, "message": "队列已停止"})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ===========================================================================
+#  媒体正在播放记录 API（前端点歌时上报，用于恢复播放上下文）                #
+#  GET    /api/ha_data_store/media/now_playing?entity_id=xxx  → 查询当前播放  #
+#  POST   /api/ha_data_store/media/now_playing                 → 上报（点歌/切歌）#
+#  DELETE /api/ha_data_store/media/now_playing?entity_id=xxx  → 清除          #
+# ===========================================================================
+class MediaNowPlayingView(_BaseDBView):
+    """记录前端正在播放的歌曲上下文（entity_id → song_id, playlist_id, user）。
+    前端点歌/切歌时 POST 上报；打开弹窗时 GET 查询恢复；停止时 DELETE 清除。
+    updated_at 由后端写入，不接收前端传入。
+    """
+
+    url = "/api/ha_data_store/media/now_playing"
+    name = "api:ha_data_store:media_now_playing"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        entity_id = request.query.get("entity_id", "").strip()
+        if not entity_id:
+            return self.json({"success": False, "error": "缺少 entity_id 参数"}, status_code=400)
+
+        def _query():
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    f"SELECT entity_id, song_id, playlist_id, user, updated_at "
+                    f"FROM {TABLE_MEDIA_NOW_PLAYING} WHERE entity_id = ?",
+                    (entity_id,),
+                ).fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
+        try:
+            data = await self._exec_in_executor(hass, _query)
+            return self.json({"success": True, "data": data})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+
+        entity_id = (body.get("entity_id") or "").strip()
+        if not entity_id:
+            return self.json({"success": False, "error": "entity_id 必填"}, status_code=400)
+        song_id = body.get("song_id")
+        playlist_id = body.get("playlist_id")
+        user = (body.get("user") or "").strip()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _np_log = _log_local()
+        if _np_log:
+            _np_log.info("[media_now_playing] POST entity=%s song_id=%s playlist_id=%s user=%s",
+                     entity_id, song_id, playlist_id, user)
+
+        def _save():
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute(
+                    f"INSERT OR REPLACE INTO {TABLE_MEDIA_NOW_PLAYING} "
+                    f"(entity_id, song_id, playlist_id, user, updated_at) "
+                    f"VALUES (?, ?, ?, ?, ?)",
+                    (entity_id, song_id, playlist_id, user, now),
+                )
+                conn.commit()
+                return {"success": True, "message": "已记录正在播放"}
+            finally:
+                conn.close()
+
+        try:
+            result = await self._exec_in_executor(hass, _save)
+            return self.json(result)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        entity_id = request.query.get("entity_id", "").strip()
+        if not entity_id:
+            return self.json({"success": False, "error": "缺少 entity_id 参数"}, status_code=400)
+
+        def _delete():
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute(
+                    f"DELETE FROM {TABLE_MEDIA_NOW_PLAYING} WHERE entity_id = ?",
+                    (entity_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        try:
+            await self._exec_in_executor(hass, _delete)
+            return self.json({"success": True, "message": "已清除播放记录"})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
 

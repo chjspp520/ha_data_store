@@ -801,26 +801,10 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
 
   <!-- 子面板: 媒体播放列表 -->
   <div id="sub-media" class="sub-panel">
-    <div id="mediaUserList"></div>
-
     <div class="section">
-      <h3>🎵 管理用户</h3>
-      <div class="hint">每个用户可拥有多个播放列表，由前端卡片展示和管理歌曲内容。</div>
+      <h3>🎵 媒体播放列表</h3>
+      <div class="hint">管理播放列表与歌曲。添加歌曲后点"🔄刷新"探测音乐文件标签/封面/歌词（同名 .lrc 文件自动读取）。</div>
       <div class="form-grid" style="grid-template-columns:1fr auto">
-        <div>
-          <label>用户名称</label>
-          <input type="text" id="mediaUserName" placeholder="如：张三" style="width:100%">
-        </div>
-        <div style="display:flex;align-items:flex-end;gap:6px">
-          <button class="btn-green" onclick="addMediaUser()">➕ 添加用户</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="section" id="mediaPlaylistSection" style="display:none">
-      <h3>📋 <span id="mediaCurrentUser"></span> 的播放列表</h3>
-      <div id="mediaPlaylistContent"></div>
-      <div class="form-grid" style="grid-template-columns:1fr auto;margin-top:12px">
         <div>
           <label>播放列表名称</label>
           <input type="text" id="mediaPlaylistName" placeholder="如：我的歌单" style="width:100%">
@@ -830,6 +814,13 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </div>
       </div>
     </div>
+
+    <div class="section">
+      <div id="mediaPlaylistContent"><div class="hint">加载中...</div></div>
+    </div>
+
+    <!-- 歌曲详情展开区（动态填充） -->
+    <div id="mediaSongsSection" style="display:none"></div>
   </div>
 
   <!-- 子面板: 小爱对话 -->
@@ -971,6 +962,12 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="aggregate_daily">指定月每日汇总</option>
           <option value="aggregate_monthly">指定年每月汇总</option>
           <option value="aggregate_yearly">所有年年度汇总</option>
+          <option value="aggregate_room_daily">🏠 房间指定月每日汇总</option>
+          <option value="aggregate_room_monthly">🏠 房间指定年每月汇总</option>
+          <option value="aggregate_room_yearly_daily">🏠 房间指定年每日汇总</option>
+        </optgroup>
+        <optgroup label="房间数据日历">
+          <option value="room_data_dates">📅 房间指定月有数据日期</option>
         </optgroup>
         <optgroup label="排行榜查询">
           <option value="ranking_daily">日排行榜</option>
@@ -988,6 +985,19 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </optgroup>
         <optgroup label="小爱对话">
           <option value="xiaoai_history">小爱对话记录</option>
+        </optgroup>
+        <optgroup label="🎵 音乐媒体">
+          <option value="media_playlists_list">列出播放列表</option>
+          <option value="media_playlists_users">列出所有用户</option>
+          <option value="media_playlists_create">新建播放列表</option>
+          <option value="media_playlist_detail">获取播放列表详情</option>
+          <option value="media_playlist_refresh">刷新列表元数据</option>
+          <option value="media_playlist_delete">删除播放列表</option>
+          <option value="media_song_add">添加歌曲</option>
+          <option value="media_song_refresh">刷新单首元数据</option>
+          <option value="media_song_delete">删除歌曲</option>
+          <option value="media_song_lyrics">获取歌词</option>
+          <option value="media_song_cover">获取封面</option>
         </optgroup>
       </select>
     </div>
@@ -1056,6 +1066,17 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="apiMonthRow" style="display:none">
       <label>月份 (YYYY-MM)</label>
       <input type="month" id="apiMonth" onchange="generateApiUrl()">
+    </div>
+    <div id="apiRoomDataCatRow" style="display:none" class="full">
+      <div style="display:flex;align-items:center;gap:8px">
+        <label>数据类别（可多选）</label>
+        <button type="button" onclick="toggleApiRoomDataCat()" style="font-size:11px;padding:2px 8px;border-radius:4px">全选</button>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;padding-top:2px" id="apiRoomDataCatCbs">
+        <label style="font-size:13px;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="device" onchange="generateApiUrl()"> 设备类</label>
+        <label style="font-size:13px;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="environment" onchange="generateApiUrl()"> 传感器类</label>
+        <label style="font-size:13px;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="attribute" onchange="generateApiUrl()"> 属性提取</label>
+      </div>
     </div>
     <div id="apiYearRow" style="display:none">
       <label>年份 (YYYY)</label>
@@ -1134,6 +1155,19 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <option value="">-- 全部 --</option>
       </select>
     </div>
+    <!-- 音乐媒体专用字段 -->
+    <div id="apiMediaUserRow" style="display:none">
+      <label>用户名 (user_name)</label>
+      <input type="text" id="apiMediaUser" placeholder="如：张三" oninput="generateApiUrl()">
+    </div>
+    <div id="apiMediaIdRow" style="display:none">
+      <label>ID (playlist_id / song_id)</label>
+      <input type="number" id="apiMediaId" placeholder="如：5" min="1" oninput="generateApiUrl()">
+    </div>
+    <div id="apiMediaNameRow" style="display:none">
+      <label>播放列表名称 (name)</label>
+      <input type="text" id="apiMediaName" placeholder="如：我的歌单" oninput="generateApiUrl()">
+    </div>
   </div>
 
   <div class="section">
@@ -1164,9 +1198,13 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">vacuum_history</td><td>扫地机器人轨迹 · vacuum_id/date/limit · 返回坐标+状态序列</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entities</td><td>实体列表 · category/room</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entity_data_dates</td><td>设备有数据的月份查询 · entity_id/month/date_field · 返回指定月份哪些日期有数据</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">room_data_dates</td><td>房间指定月有数据日期 · room/month/category(可多选)/date_field · 返回该房间该月勾选类别哪些日期有数据</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">aggregate_daily</td><td>指定月每日汇总 · entity_id/month/date_field · 返回每日 duration/energy_consumed 汇总</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">aggregate_monthly</td><td>指定年每月汇总 · entity_id/year/date_field · 返回每月 duration/energy_consumed 汇总</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">aggregate_yearly</td><td>所有年年度汇总 · entity_id/date_field · 返回每年 duration/energy_consumed 汇总</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">aggregate_room_daily</td><td>房间指定月每日汇总 · room/month/category(可多选) · 返回按类别分组的每日汇总（device:energy/duration/count，environment:value/count，attribute:count）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">aggregate_room_monthly</td><td>房间指定年每月汇总 · room/year/category(可多选) · 返回按类别分组的每月汇总</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">aggregate_room_yearly_daily</td><td>房间指定年每日汇总 · room/year/category(可多选) · 返回按类别分组的每日汇总（一年365条）</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">ranking_daily</td><td>日排行榜 · date/limit · 按 entity_id 汇总 duration/energy，按 duration 降序</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">ranking_monthly</td><td>月排行榜 · month/limit · 按 entity_id 汇总 duration/energy，按 duration 降序</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">ranking_yearly</td><td>年排行榜 · year/limit · 按 entity_id 汇总 duration/energy，按 duration 降序</td></tr>
@@ -1195,6 +1233,13 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div><code style="color:var(--green)">date_field=on_time</code> <span style="color:var(--text2)">— 日期字段名（可选，不填则自动检测：设备类用 on_time，环境/属性类用 datetime）</span></div>
       <div style="color:var(--text2);margin-top:4px">返回格式：{"dates":["2025-01-01","2025-01-02",...],"count":5}</div>
 
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">room_data_dates 参数</div>
+      <div><code style="color:var(--green)">room=客厅</code> <span style="color:var(--text2)">— 房间名（必填）</span></div>
+      <div><code style="color:var(--green)">month=2025-01</code> <span style="color:var(--text2)">— 月份 YYYY-MM（必填）</span></div>
+      <div><code style="color:var(--green)">category=device,environment</code> <span style="color:var(--text2)">— 数据类别（必填，可多选，逗号分隔：device/environment/attribute）</span></div>
+      <div><code style="color:var(--green)">date_field=on_time</code> <span style="color:var(--text2)">— 日期字段名（可选，不填则按表自动检测：设备用 on_time，环境/属性用 datetime）</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回格式：{"dates":["2025-01-01",...],"count":N,"month":"2025-01","room":"客厅","categories":["device","environment"]}</div>
+
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">electricity_standard 参数</div>
       <div><code style="color:var(--green)">entity_id=...</code> <span style="color:var(--text2)">— 实体 ID（必填）</span></div>
       <div><code style="color:var(--green)">day_table=attr_ele_day</code> <span style="color:var(--text2)">— 日电量表名（可选，默认 attr_ele_day）</span></div>
@@ -1221,6 +1266,24 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div><code style="color:var(--green)">entity_id=switch.ac</code> <span style="color:var(--text2)">— 实体 ID（必填）</span></div>
       <div><code style="color:var(--green)">date_field=on_time</code> <span style="color:var(--text2)">— 日期字段名（可选，不填则自动检测）</span></div>
       <div style="color:var(--text2);margin-top:4px">返回格式：{"yearly_summaries":[{"year":"2025","on_count":500,"total_energy":1200.5,"total_duration":500000},...]}</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">aggregate_room_daily 参数</div>
+      <div><code style="color:var(--green)">room=客厅</code> <span style="color:var(--text2)">— 房间名（必填）</span></div>
+      <div><code style="color:var(--green)">month=2025-01</code> <span style="color:var(--text2)">— 月份 YYYY-MM（必填）</span></div>
+      <div><code style="color:var(--green)">category=device,environment</code> <span style="color:var(--text2)">— 数据类别（可选，可多选，逗号分隔：device/environment/attribute，不填默认 device）</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回按类别分组：{"room":"客厅","month":"2025-01","categories":["device"],"summaries":{"device":[{"date":"2025-01-01","on_count":5,"total_energy":12.3,"total_duration":3600},...],"environment":[{"date":"2025-01-01","metric":"temperature","on_count":48,"total_value":720.0},...]}}</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">aggregate_room_monthly 参数</div>
+      <div><code style="color:var(--green)">room=客厅</code> <span style="color:var(--text2)">— 房间名（必填）</span></div>
+      <div><code style="color:var(--green)">year=2025</code> <span style="color:var(--text2)">— 年份 YYYY（必填）</span></div>
+      <div><code style="color:var(--green)">category=device,environment</code> <span style="color:var(--text2)">— 数据类别（可选，可多选，逗号分隔：device/environment/attribute，不填默认 device）</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回按类别分组：{"room":"客厅","year":"2025","categories":["device"],"summaries":{"device":[{"month":"2025-01","on_count":50,"total_energy":120.5,"total_duration":50000},...]}}</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">aggregate_room_yearly_daily 参数</div>
+      <div><code style="color:var(--green)">room=客厅</code> <span style="color:var(--text2)">— 房间名（必填）</span></div>
+      <div><code style="color:var(--green)">year=2025</code> <span style="color:var(--text2)">— 年份 YYYY（必填）</span></div>
+      <div><code style="color:var(--green)">category=device,environment</code> <span style="color:var(--text2)">— 数据类别（可选，可多选，逗号分隔：device/environment/attribute，不填默认 device）</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回按类别分组：{"room":"客厅","year":"2025","categories":["device"],"summaries":{"device":[{"date":"2025-01-01","on_count":5,"total_energy":12.3,"total_duration":3600},...]}}（一年365条每日汇总）</div>
 
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">通用参数（attr_history / env_history 支持）</div>
       <div><code style="color:var(--green)">fields=day,dayEleNum</code> <span style="color:var(--text2)">— 只返回指定字段</span></div>
@@ -1337,7 +1400,7 @@ function isUserTable(name) {
   if (name === 'attr_type_defs') return false;
   return name.startsWith('attr_') || name === 'device_history' || name.startsWith('env_')
       || name === 'health_records'
-      || name === 'media_playlists' || name === 'media_queue'
+      || name === 'media_playlists' || name === 'media_songs' || name === 'media_queue' || name === 'media_now_playing'
       || name === 'xiaoai_conversations';
 }
 
@@ -2739,6 +2802,7 @@ function switchSubTab(name) {
   if (name === 'env' && !manageLoaded) { loadEntities(); }
   if (name === 'attr') { loadAttrTypes(); }
   if (name === 'xiaoai') { loadXiaoaiConfigs(); }
+  if (name === 'media') { loadMediaPlaylists(); }
 }
 
 async function loadAttrTypes() {
@@ -4286,108 +4350,221 @@ async function createVirtualDevice() {
 //  媒体播放列表管理
 // ==============================
 const MEDIA_API = '/api/ha_data_store/media/playlists';
-var _currentMediaUser = '';
+const MEDIA_DEFAULT_USER = 'default';   // 后端 user_name 必填，前端固定用 default，用户无需感知
+var _expandedPlaylistId = null;          // 当前展开歌曲详情的播放列表 ID
 
-async function loadMediaUsers() {
-  var div = document.getElementById('mediaUserList');
-  try {
-    var resp = await fetch(MEDIA_API + '?users=true');
-    var json = await resp.json();
-    var users = json.data || [];
-    if (!users.length) {
-      div.innerHTML = '<div class="hint">暂无用户，请添加。</div>';
-      document.getElementById('mediaPlaylistSection').style.display = 'none';
-      return;
-    }
-    var html = '<h4>已有用户 (' + users.length + '个)</h4><div class="table-wrap"><table><thead><tr>' +
-      '<th>用户</th><th style="width:120px">操作</th></tr></thead><tbody>';
-    users.forEach(function(u) {
-      html += '<tr><td><a href="#" onclick="selectMediaUser(\'' + escAttr(u.user_name) + '\');return false">' + escHtml(u.user_name) + '</a></td>' +
-        '<td><button class="btn-del" onclick="delMediaUser(\'' + escAttr(u.user_name) + '\')">删除</button></td></tr>';
-    });
-    html += '</tbody></table></div>';
-    div.innerHTML = html;
-  } catch(e) { div.innerHTML = '<div class="hint">加载失败</div>'; }
-}
-
-async function selectMediaUser(userName) {
-  _currentMediaUser = userName;
-  document.getElementById('mediaCurrentUser').textContent = userName;
-  document.getElementById('mediaPlaylistSection').style.display = '';
-  await loadMediaPlaylists(userName);
-}
-
-async function loadMediaPlaylists(userName) {
+async function loadMediaPlaylists() {
   var div = document.getElementById('mediaPlaylistContent');
   try {
-    var resp = await fetch(MEDIA_API + '?user=' + encodeURIComponent(userName));
+    var resp = await fetch(MEDIA_API);
     var json = await resp.json();
+    if (!resp.ok || !json.success) {
+      div.innerHTML = '<div class="hint" style="color:#e74c3c">加载失败 (HTTP ' + resp.status + '): ' + escHtml(json.error || resp.statusText || '未知错误') + '</div>';
+      document.getElementById('mediaSongsSection').style.display = 'none';
+      return;
+    }
     var data = json.data || {};
     var playlists = data.playlists || [];
-    if (!playlists.length) { div.innerHTML = '<div class="hint">暂无播放列表</div>'; return; }
+    if (!playlists.length) {
+      div.innerHTML = '<div class="hint">暂无播放列表，请在上方添加。</div>';
+      document.getElementById('mediaSongsSection').style.display = 'none';
+      _expandedPlaylistId = null;
+      return;
+    }
     var html = '<div class="table-wrap"><table><thead><tr>' +
-      '<th>ID</th><th>播放列表名称</th><th>创建时间</th><th>更新时间</th><th style="width:60px">操作</th></tr></thead><tbody>';
+      '<th>ID</th><th>播放列表名称</th><th>歌曲数</th><th>创建时间</th><th>更新时间</th><th style="width:230px">操作</th></tr></thead><tbody>';
     playlists.forEach(function(p) {
-      html += '<tr><td>' + p.id + '</td><td>' + escHtml(p.name) + '</td><td>' + escHtml(p.created_at) +
-        '</td><td>' + escHtml(p.updated_at) + '</td><td><button class="btn-del" onclick="delMediaPlaylist(' + p.id + ')">删除</button></td></tr>';
+      var expanded = (_expandedPlaylistId === p.id);
+      html += '<tr><td>' + p.id + '</td><td>' + escHtml(p.name) + '</td><td>' + (p.song_count || 0) +
+        '</td><td>' + escHtml(p.created_at) +
+        '</td><td>' + escHtml(p.updated_at) +
+        '</td><td>' +
+        '<button class="btn-blue" onclick="togglePlaylistSongs(' + p.id + ', this)">' + (expanded ? '🔼收起' : '下拉▼') + '</button> ' +
+        '<button class="btn-blue" onclick="refreshMediaMeta(' + p.id + ', this)">🔄刷新</button> ' +
+        '<button class="btn-blue" onclick="renameMediaPlaylist(' + p.id + ')">✏️重命名</button> ' +
+        '<button class="btn-del" onclick="delMediaPlaylist(' + p.id + ')">🗑️删除</button>' +
+        '</td></tr>';
     });
     html += '</tbody></table></div>';
     div.innerHTML = html;
-  } catch(e) { div.innerHTML = '<div class="hint">加载失败</div>'; }
-}
-
-async function addMediaUser() {
-  var name = document.getElementById('mediaUserName').value.trim();
-  if (!name) { showToast('请输入用户名称', false); return; }
-  try {
-    var resp = await fetch(MEDIA_API, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_name: name, name: name + '的默认播放列表'}),
-    });
-    var json = await resp.json();
-    showToast(json.message || '已添加', json.success);
-    if (json.success) { document.getElementById('mediaUserName').value = ''; loadMediaUsers(); }
-  } catch(e) { showToast('请求失败', false); }
-}
-
-async function delMediaUser(userName) {
-  if (!confirm('确定删除用户 ' + userName + ' 及其所有播放列表？')) return;
-  try {
-    var resp = await fetch(MEDIA_API + '?user=' + encodeURIComponent(userName), { method: 'DELETE' });
-    var json = await resp.json();
-    showToast(json.message || '已删除', json.success);
-    if (json.success) {
-      if (_currentMediaUser === userName) { _currentMediaUser = ''; document.getElementById('mediaPlaylistSection').style.display = 'none'; }
-      loadMediaUsers();
+    // 恢复展开状态
+    if (_expandedPlaylistId !== null) {
+      await loadPlaylistSongs(_expandedPlaylistId);
+    } else {
+      document.getElementById('mediaSongsSection').style.display = 'none';
     }
-  } catch(e) { showToast('请求失败', false); }
+  } catch(e) { div.innerHTML = '<div class="hint">加载失败: ' + escHtml(e.message) + '</div>'; }
 }
 
 async function addMediaPlaylist() {
-  if (!_currentMediaUser) { showToast('请先选择用户', false); return; }
   var name = document.getElementById('mediaPlaylistName').value.trim();
   if (!name) { showToast('请输入播放列表名称', false); return; }
   try {
     var resp = await fetch(MEDIA_API, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_name: _currentMediaUser, name: name}),
+      body: JSON.stringify({user_name: MEDIA_DEFAULT_USER, name: name}),
     });
     var json = await resp.json();
     showToast(json.message || '已添加', json.success);
-    if (json.success) { document.getElementById('mediaPlaylistName').value = ''; loadMediaPlaylists(_currentMediaUser); }
+    if (json.success) { document.getElementById('mediaPlaylistName').value = ''; loadMediaPlaylists(); }
   } catch(e) { showToast('请求失败', false); }
 }
 
 async function delMediaPlaylist(id) {
-  if (!confirm('确定删除该播放列表？')) return;
+  if (!confirm('确定删除该播放列表及其所有歌曲？')) return;
   try {
-    var resp = await fetch(MEDIA_API + '?id=' + id, { method: 'DELETE' });
+    var resp = await fetch(MEDIA_API + '/' + id, { method: 'DELETE' });
     var json = await resp.json();
     showToast(json.message || '已删除', json.success);
-    if (json.success) loadMediaPlaylists(_currentMediaUser);
+    if (json.success) {
+      if (_expandedPlaylistId === id) { _expandedPlaylistId = null; }
+      loadMediaPlaylists();
+    }
   } catch(e) { showToast('请求失败', false); }
+}
+
+async function renameMediaPlaylist(id) {
+  var newName = prompt('请输入新的播放列表名称：');
+  if (!newName || !newName.trim()) return;
+  try {
+    var resp = await fetch(MEDIA_API + '/' + id, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: newName.trim()}),
+    });
+    var json = await resp.json();
+    showToast(json.message || '已重命名', json.success);
+    if (json.success) loadMediaPlaylists();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function refreshMediaMeta(id, btn) {
+  if (!confirm('确定刷新该播放列表所有歌曲的元数据（标签/封面/歌词）？\n需确保音乐文件可被后端访问。')) return;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳刷新中'; }
+  try {
+    var resp = await fetch(MEDIA_API + '/' + id + '?refresh_meta=1', { method: 'PUT' });
+    var json = await resp.json();
+    showToast(json.message || '已刷新', json.success);
+    // 若有失败项，展示详情
+    if (json.success && json.failed && json.failed.length > 0) {
+      var detail = json.failed.map(function(f) {
+        return 'song_id=' + f.id + '\n  media_content_id=' + f.media_content_id + '\n  原因=' + f.reason;
+      }).join('\n\n');
+      console.error('[media] 刷新失败的歌曲:\n' + detail);
+      alert('刷新失败的歌曲 (' + json.failed.length + ' 首):\n\n' + detail + '\n\n详情见浏览器控制台(F12)和 HA 日志 [media_meta]');
+    }
+    if (json.success) {
+      loadMediaPlaylists();
+    }
+  } catch(e) { showToast('请求失败', false); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '🔄刷新'; } }
+}
+
+// 展开/收起某播放列表的歌曲详情
+async function togglePlaylistSongs(id, btn) {
+  if (_expandedPlaylistId === id) {
+    // 收起
+    _expandedPlaylistId = null;
+    document.getElementById('mediaSongsSection').style.display = 'none';
+    if (btn) btn.textContent = '下拉▼';
+  } else {
+    _expandedPlaylistId = id;
+    await loadPlaylistSongs(id);
+    if (btn) btn.textContent = '🔼收起';
+  }
+  // 刷新列表以更新所有按钮文字
+  loadMediaPlaylists();
+}
+
+// 加载某播放列表的歌曲详情
+async function loadPlaylistSongs(id) {
+  var section = document.getElementById('mediaSongsSection');
+  try {
+    var resp = await fetch(MEDIA_API + '/' + id);
+    var json = await resp.json();
+    if (!resp.ok || !json.success) {
+      section.innerHTML = '<div class="hint" style="color:#e74c3c">加载失败 (HTTP ' + resp.status + '): ' + escHtml(json.error || resp.statusText || '未知错误') + '</div>';
+      section.style.display = '';
+      return;
+    }
+    var d = json.data || {};
+    var songs = d.songs || [];
+    var html = '<div class="section"><h3>🎵 ' + escHtml(d.name || '') + ' 的歌曲 (' + songs.length + '首)</h3>';
+    if (songs.length) {
+      html += '<div class="table-wrap"><table><thead><tr>' +
+        '<th>#</th><th>标题</th><th>歌手</th><th>专辑</th><th>时长</th><th>封面</th><th>歌词</th>' +
+        '<th>media_content_id</th><th style="width:130px">操作</th></tr></thead><tbody>';
+      songs.forEach(function(s) {
+        var dur = s.duration ? (Math.floor(s.duration/60) + ':' + String(s.duration%60).padStart(2,'0')) : '-';
+        html += '<tr><td>' + (s.sort_order||0) + '</td>' +
+          '<td>' + escHtml(s.title || '-') + '</td>' +
+          '<td>' + escHtml(s.artist || '-') + '</td>' +
+          '<td>' + escHtml(s.album || '-') + '</td>' +
+          '<td>' + dur + '</td>' +
+          '<td>' + (s.has_cover ? '✅' : '❌') + '</td>' +
+          '<td>' + (s.has_lyrics ? '✅' : '❌') + '</td>' +
+          '<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis" title="' + escAttr(s.media_content_id||'') + '">' + escHtml(s.media_content_id||'') + '</td>' +
+          '<td><button class="btn-blue" onclick="refreshMediaSong(' + s.id + ', this)">🔄刷新</button> ' +
+          '<button class="btn-del" onclick="delMediaSong(' + s.id + ')">🗑️</button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    } else {
+      html += '<div class="hint">暂无歌曲，请在下方添加。</div>';
+    }
+    // 添加歌曲表单
+    html += '<div class="form-grid" style="margin-top:12px;grid-template-columns:2fr 1fr 1fr auto">' +
+      '<div><label>media_content_id（必填）</label><input type="text" id="newSongMediaId" placeholder="media-source://media_source/local/xxx.mp3" style="width:100%"></div>' +
+      '<div><label>media_type</label><input type="text" id="newSongMediaType" value="music" style="width:100%"></div>' +
+      '<div><label>title（可选，刷新时会被标签覆盖）</label><input type="text" id="newSongTitle" placeholder="留空自动" style="width:100%"></div>' +
+      '<div style="display:flex;align-items:flex-end"><button class="btn-green" onclick="addMediaSong(' + id + ')">➕ 添加歌曲</button></div>' +
+      '</div>';
+    html += '</div>';
+    section.innerHTML = html;
+    section.style.display = '';
+  } catch(e) { section.innerHTML = '<div class="hint">加载失败: ' + escHtml(e.message) + '</div>'; section.style.display = ''; }
+}
+
+async function addMediaSong(playlistId) {
+  var mid = document.getElementById('newSongMediaId').value.trim();
+  if (!mid) { showToast('请输入 media_content_id', false); return; }
+  var body = { media_content_id: mid, media_type: document.getElementById('newSongMediaType').value || 'music' };
+  var title = document.getElementById('newSongTitle').value.trim();
+  if (title) body.title = title;
+  try {
+    var resp = await fetch(MEDIA_API + '/' + playlistId + '/songs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    var json = await resp.json();
+    showToast(json.message || '已添加', json.success);
+    if (json.success) { loadPlaylistSongs(playlistId); loadMediaPlaylists(); }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function delMediaSong(id) {
+  if (!confirm('确定删除该歌曲？')) return;
+  try {
+    var resp = await fetch('/api/ha_data_store/media/songs/' + id, { method: 'DELETE' });
+    var json = await resp.json();
+    showToast(json.message || '已删除', json.success);
+    if (json.success && _expandedPlaylistId !== null) { loadPlaylistSongs(_expandedPlaylistId); loadMediaPlaylists(); }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function refreshMediaSong(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  try {
+    var resp = await fetch('/api/ha_data_store/media/songs/' + id + '?refresh_meta=1', { method: 'PUT' });
+    var json = await resp.json();
+    showToast(json.message || '已刷新', json.success);
+    if (!json.success) {
+      alert('刷新失败: ' + (json.error || '未知错误') + '\n\n详情见 HA 日志 [media_meta]');
+    }
+    if (json.success && _expandedPlaylistId !== null) { loadPlaylistSongs(_expandedPlaylistId); }
+  } catch(e) { showToast('请求失败', false); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '🔄刷新'; } }
 }
 
 // =========================================================================
@@ -4525,16 +4702,58 @@ function toggleApiTableCbs() {
   generateApiUrl();
 }
 
+// 音乐媒体：隐藏所有常规表单控件
+function _hideAllApiFormRows() {
+  var ids = ['apiTableRow','apiAttrDailyRow','apiCategoryRow','apiMetricsRow','apiMonthRow',
+    'apiRoomDataCatRow','apiYearRow','apiDateFieldRow','apiDateSingle','apiDateRange',
+    'apiEleDayTableRow','apiEleMonthTableRow','apiEleYearTableRow','apiEleDayLimitRow',
+    'apiEleMonthLimitRow','apiEleYearLimitRow','apiEleTranslatedFieldRow',
+    'apiHealthNameRow','apiHealthTypeRow','apiMediaUserRow','apiMediaIdRow','apiMediaNameRow'];
+  ids.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  // 实体/房间/日期/分页/排序/字段等独立 div
+  ['apiEntityId','apiRoom','apiDateMode','apiLimit','apiOffset','apiOrderBy','apiFields'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el && el.parentNode) el.parentNode.style.display = 'none';
+  });
+}
+
+// 音乐媒体：根据查询类型显示对应专用字段
+function _showMediaApiRows(qt) {
+  // 需要 user 的：列出播放列表
+  if (qt === 'media_playlists_list') document.getElementById('apiMediaUserRow').style.display = '';
+  // 需要 name 的：新建播放列表
+  if (qt === 'media_playlists_create') {
+    document.getElementById('apiMediaUserRow').style.display = '';
+    document.getElementById('apiMediaNameRow').style.display = '';
+  }
+  // 需要 ID 的：详情/刷新/删除播放列表、刷新/删除歌曲、歌词、封面
+  if (['media_playlist_detail','media_playlist_refresh','media_playlist_delete',
+       'media_song_add','media_song_refresh','media_song_delete',
+       'media_song_lyrics','media_song_cover'].indexOf(qt) !== -1) {
+    document.getElementById('apiMediaIdRow').style.display = '';
+    // 添加歌曲也需要 user（用于展示说明，实际只需 playlist_id）
+    if (qt === 'media_song_add') document.getElementById('apiMediaUserRow').style.display = '';
+  }
+}
+
 function onApiTypeChange() {
   const qt = document.getElementById('apiQueryType').value;
   const isRoomsDaily = qt === 'rooms_daily';
   const isVacuumHistory = qt === 'vacuum_history';
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
   const isEntityDataDates = qt === 'entity_data_dates';
+  const isRoomDataDates = qt === 'room_data_dates';
   const isAggregateDaily = qt === 'aggregate_daily';
   const isAggregateMonthly = qt === 'aggregate_monthly';
   const isAggregateYearly = qt === 'aggregate_yearly';
   const isAggregate = isAggregateDaily || isAggregateMonthly || isAggregateYearly;
+  const isAggregateRoomDaily = qt === 'aggregate_room_daily';
+  const isAggregateRoomMonthly = qt === 'aggregate_room_monthly';
+  const isAggregateRoomYearlyDaily = qt === 'aggregate_room_yearly_daily';
+  const isAggregateRoom = isAggregateRoomDaily || isAggregateRoomMonthly || isAggregateRoomYearlyDaily;
   const isRanking = qt === 'ranking_daily' || qt === 'ranking_monthly' || qt === 'ranking_yearly';
   const isElectricityStandard = qt === 'electricity_standard';
   const isHealthHistory = qt === 'health_history';
@@ -4542,6 +4761,7 @@ function onApiTypeChange() {
   const isHealth = isHealthHistory || isHealthLatest;
   const isAttrDaily = qt === 'attr_daily';
   const isXiaoaiHistory = qt === 'xiaoai_history';
+  const isMediaApi = qt.startsWith('media_');
 
   // 电费专属字段：默认隐藏，仅 electricity_standard 时显示
   document.getElementById('apiEleDayTableRow').style.display = isElectricityStandard ? '' : 'none';
@@ -4551,15 +4771,17 @@ function onApiTypeChange() {
   document.getElementById('apiEleMonthLimitRow').style.display = isElectricityStandard ? '' : 'none';
   document.getElementById('apiEleYearLimitRow').style.display = isElectricityStandard ? '' : 'none';
   document.getElementById('apiEleTranslatedFieldRow').style.display = isElectricityStandard ? '' : 'none';
+  // room_data_dates 专用类别行：仅该模式显示
+  document.getElementById('apiRoomDataCatRow').style.display = isRoomDataDates ? 'block' : 'none';
 
   document.getElementById('apiCategoryRow').style.display = isRoomsDaily ? 'block' : 'none';
   document.getElementById('apiMetricsRow').style.display = isRoomsMultiMetric ? 'block' : 'none';
-  // 月份行：entity_data_dates 或 aggregate_daily 时显示
-  document.getElementById('apiMonthRow').style.display = (isEntityDataDates || isAggregateDaily) ? 'block' : 'none';
+  // 月份行：entity_data_dates / room_data_dates 或 aggregate_daily 时显示
+  document.getElementById('apiMonthRow').style.display = (isEntityDataDates || isRoomDataDates || isAggregateDaily) ? 'block' : 'none';
   // 年份行：aggregate_monthly 时显示
   document.getElementById('apiYearRow').style.display = isAggregateMonthly ? 'block' : 'none';
-  // 日期字段行：entity_data_dates 或聚合查询时显示（恢复为下拉选择）
-  if (isEntityDataDates || isAggregate) {
+  // 日期字段行：entity_data_dates / room_data_dates 或聚合查询时显示（恢复为下拉选择）
+  if (isEntityDataDates || isRoomDataDates || isAggregate) {
     document.getElementById('apiDateFieldRow').style.display = 'block';
     restoreDateFieldSelect();
   } else {
@@ -4619,6 +4841,21 @@ function onApiTypeChange() {
     document.getElementById('apiMetricsRow').style.display = 'none';
     // 从 vacuum_history 切换回来时需要重新加载实体列表
     loadApiEntitiesAndRooms();
+  } else if (isRoomDataDates) {
+    // 房间日期查询：只显示 room、category、month、date_field
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = '';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    loadApiEntitiesAndRooms();
   } else if (isAggregate) {
     // 聚合查询：只显示 entity_id、对应时间输入、date_field
     document.getElementById('apiEntityId').parentNode.style.display = '';
@@ -4633,6 +4870,25 @@ function onApiTypeChange() {
     document.getElementById('apiDateRange').style.display = 'none';
     document.getElementById('apiCategoryRow').style.display = 'none';
     document.getElementById('apiMetricsRow').style.display = 'none';
+    loadApiEntitiesAndRooms();
+  } else if (isAggregateRoom) {
+    // 房间聚合查询：显示 room、category 复选框、对应时间输入（month 或 year）
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = '';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = isAggregateRoomDaily ? 'block' : 'none';
+    document.getElementById('apiYearRow').style.display = (isAggregateRoomMonthly || isAggregateRoomYearlyDaily) ? 'block' : 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiRoomDataCatRow').style.display = 'block';
     loadApiEntitiesAndRooms();
   } else if (isRanking) {
     // 排行榜查询：只显示对应时间输入、limit
@@ -4749,6 +5005,10 @@ function onApiTypeChange() {
     switchDateFieldToInput();
     loadApiEntitiesAndRooms();
     loadAttrDailyTypes();
+  } else if (isMediaApi) {
+    // 音乐媒体：隐藏所有常规控件，只显示对应专用字段
+    _hideAllApiFormRows();
+    _showMediaApiRows(qt);
   } else {
     document.getElementById('apiEntityId').parentNode.style.display = '';
     document.getElementById('apiRoom').parentNode.style.display = '';
@@ -4907,6 +5167,58 @@ function generateApiUrl() {
   let url = BASE_PATH + BASE_URL + '?type=' + qt;
   if (selectedApiKey) url += '&key=' + encodeURIComponent(selectedApiKey);
 
+  // 音乐媒体 API 特殊处理（独立 RESTful 路径，不走 /query）
+  if (qt.startsWith('media_')) {
+    var base = BASE_PATH + '/api/ha_data_store/media';
+    var mediaId = document.getElementById('apiMediaId').value;
+    var mediaUser = document.getElementById('apiMediaUser').value;
+    var mediaName = document.getElementById('apiMediaName').value;
+    var keyParam = selectedApiKey ? ('&key=' + encodeURIComponent(selectedApiKey)) : '';
+    var mediaUrl = '';
+    switch (qt) {
+      case 'media_playlists_list':
+        mediaUrl = base + '/playlists';
+        if (mediaUser) mediaUrl += '?user=' + encodeURIComponent(mediaUser) + keyParam;
+        else if (keyParam) mediaUrl += '?' + keyParam.slice(1);
+        break;
+      case 'media_playlists_users':
+        mediaUrl = base + '/playlists?users=true' + keyParam;
+        break;
+      case 'media_playlists_create':
+        mediaUrl = base + '/playlists' + (keyParam ? ('?' + keyParam.slice(1)) : '');
+        if (mediaUrl.indexOf('?') === -1) mediaUrl += '?';
+        else mediaUrl += '&';
+        mediaUrl += '_method=POST&_body=' + encodeURIComponent(JSON.stringify({user_name: mediaUser, name: mediaName}));
+        break;
+      case 'media_playlist_detail':
+        mediaUrl = base + '/playlists/' + encodeURIComponent(mediaId) + (keyParam ? ('?' + keyParam.slice(1)) : '');
+        break;
+      case 'media_playlist_refresh':
+        mediaUrl = base + '/playlists/' + encodeURIComponent(mediaId) + '?refresh_meta=1' + keyParam + '&_method=PUT';
+        break;
+      case 'media_playlist_delete':
+        mediaUrl = base + '/playlists/' + encodeURIComponent(mediaId) + (keyParam ? ('?' + keyParam.slice(1) + '&_method=DELETE') : '?_method=DELETE');
+        break;
+      case 'media_song_add':
+        mediaUrl = base + '/playlists/' + encodeURIComponent(mediaId) + '/songs' + (keyParam ? ('?' + keyParam.slice(1) + '&_method=POST') : '?_method=POST');
+        break;
+      case 'media_song_refresh':
+        mediaUrl = base + '/songs/' + encodeURIComponent(mediaId) + '?refresh_meta=1' + keyParam + '&_method=PUT';
+        break;
+      case 'media_song_delete':
+        mediaUrl = base + '/songs/' + encodeURIComponent(mediaId) + (keyParam ? ('?' + keyParam.slice(1) + '&_method=DELETE') : '?_method=DELETE');
+        break;
+      case 'media_song_lyrics':
+        mediaUrl = base + '/songs/' + encodeURIComponent(mediaId) + '/lyrics' + (keyParam ? ('?' + keyParam.slice(1)) : '');
+        break;
+      case 'media_song_cover':
+        mediaUrl = base + '/songs/' + encodeURIComponent(mediaId) + '/cover' + (keyParam ? ('?' + keyParam.slice(1)) : '');
+        break;
+    }
+    document.getElementById('apiUrlOutput').value = mediaUrl;
+    return;
+  }
+
   // vacuum_history 模式特殊处理
   if (qt === 'vacuum_history') {
     if (entityId) url += '&vacuum_id=' + encodeURIComponent(entityId);
@@ -4953,6 +5265,22 @@ function generateApiUrl() {
     return;
   }
 
+  // room_data_dates 模式特殊处理
+  if (qt === 'room_data_dates') {
+    if (room) url += '&room=' + encodeURIComponent(room);
+    const catCbs = document.querySelectorAll('#apiRoomDataCatCbs input[type="checkbox"]:checked');
+    if (catCbs.length > 0) {
+      const cats = Array.from(catCbs).map(cb => cb.value).join(',');
+      url += '&category=' + encodeURIComponent(cats);
+    }
+    const month = document.getElementById('apiMonth').value;
+    if (month) url += '&month=' + encodeURIComponent(month);
+    const dateField = document.getElementById('apiDateField').value;
+    if (dateField) url += '&date_field=' + encodeURIComponent(dateField);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
   // aggregate_daily 模式特殊处理
   if (qt === 'aggregate_daily') {
     if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
@@ -4980,6 +5308,48 @@ function generateApiUrl() {
     if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
     const dateField = document.getElementById('apiDateField').value;
     if (dateField) url += '&date_field=' + encodeURIComponent(dateField);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // aggregate_room_daily 模式特殊处理（房间+月→每日，多类别）
+  if (qt === 'aggregate_room_daily') {
+    if (room) url += '&room=' + encodeURIComponent(room);
+    const month = document.getElementById('apiMonth').value;
+    if (month) url += '&month=' + encodeURIComponent(month);
+    const catCbs = document.querySelectorAll('#apiRoomDataCatCbs input[type="checkbox"]:checked');
+    if (catCbs.length > 0) {
+      const cats = Array.from(catCbs).map(cb => cb.value).join(',');
+      url += '&category=' + encodeURIComponent(cats);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // aggregate_room_monthly 模式特殊处理（房间+年→每月，多类别）
+  if (qt === 'aggregate_room_monthly') {
+    if (room) url += '&room=' + encodeURIComponent(room);
+    const year = document.getElementById('apiYear').value;
+    if (year) url += '&year=' + encodeURIComponent(year);
+    const catCbs = document.querySelectorAll('#apiRoomDataCatCbs input[type="checkbox"]:checked');
+    if (catCbs.length > 0) {
+      const cats = Array.from(catCbs).map(cb => cb.value).join(',');
+      url += '&category=' + encodeURIComponent(cats);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // aggregate_room_yearly_daily 模式特殊处理（房间+年→每日，多类别）
+  if (qt === 'aggregate_room_yearly_daily') {
+    if (room) url += '&room=' + encodeURIComponent(room);
+    const year = document.getElementById('apiYear').value;
+    if (year) url += '&year=' + encodeURIComponent(year);
+    const catCbs = document.querySelectorAll('#apiRoomDataCatCbs input[type="checkbox"]:checked');
+    if (catCbs.length > 0) {
+      const cats = Array.from(catCbs).map(cb => cb.value).join(',');
+      url += '&category=' + encodeURIComponent(cats);
+    }
     document.getElementById('apiUrlOutput').value = url;
     return;
   }
@@ -5108,6 +5478,13 @@ function generateApiUrl() {
 
 function toggleApiMetrics() {
   const cbs = document.querySelectorAll('#apiMetricsCbs input[type="checkbox"]');
+  const allChecked = cbs.length > 0 && Array.from(cbs).every(c => c.checked);
+  cbs.forEach(c => c.checked = !allChecked);
+  generateApiUrl();
+}
+
+function toggleApiRoomDataCat() {
+  const cbs = document.querySelectorAll('#apiRoomDataCatCbs input[type="checkbox"]');
   const allChecked = cbs.length > 0 && Array.from(cbs).every(c => c.checked);
   cbs.forEach(c => c.checked = !allChecked);
   generateApiUrl();
