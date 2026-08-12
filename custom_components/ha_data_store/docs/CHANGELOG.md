@@ -1,5 +1,160 @@
 # 更新日志
 
+## 2026-06-27 — v2.5.1 小爱对话采集修复（LLM 连续对话 + other 字段）
+
+### 🐛 Bug 修复
+
+#### 1. `type: LLM` 连续对话未采集
+- **现象**：小爱连续对话（大模型回复）的 AI 回复文本丢失，`ai_text` 为空，`type` 也未记录
+- **根因**：`handle_state_changed_sync` 的 answers 遍历逻辑只处理 `type=="TTS"` 的项取 `tts.text`。当小爱返回 `type: LLM`（连续对话/大模型回复）时，回复文本在 `llm.text` 而非 `tts.text`，且该对话没有 TTS 类型的 answer，导致 `ai_text` 取不到，连续对话内容丢失
+- **修复**：answers 遍历新增 `elif ans_type == "LLM"` 分支，从 `ans.get("llm").get("text")` 取 AI 回复文本。优先级：TTS > LLM（`not ai_text` 判断保证不覆盖已取到的 TTS 文本）。同时 LLM 也会作为 `conv_type` 事件类型记录
+- **修复后采集效果**：
+  - `user_text`：用户说的话（如"打开主卧灯和空调"）
+  - `ai_text`：大模型回复（如"没问题。好的，先帮你打开主卧吸顶灯啦。"，来自 `answers[0].llm.text`）
+  - `type`：`LLM`
+
+#### 2. `other` 字段未存储 attributes JSON
+- **现象**：`other` 字段本应存储完整 attributes 的 JSON 对象，但实际为空字符串
+- **根因**：`json.dumps(attrs, ensure_ascii=False)` 在 attributes 包含不可 JSON 序列化的对象（如 `datetime`、自定义对象等）时抛 `TypeError`，被 `except` 捕获后 `other_text = ""`，导致 other 字段存空字符串。HA 实体的 attributes 可能包含各种不可序列化对象
+- **修复**：`json.dumps` 增加 `default=str` 参数，任何不可序列化的对象都会被 `str()` 转成字符串，确保完整 attributes JSON 不丢失地存入 other 字段
+
+### 依赖文件
+
+| 文件 | 改动 |
+|------|------|
+| `xiaoai.py` | `handle_state_changed_sync` 新增 LLM 类型分支取 `llm.text`；`json.dumps` 增加 `default=str` 兜底；文件头注释同步更新 |
+
+---
+
+## 2026-06-26 — v2.5.0 音乐播放列表元数据探测（标签/封面/歌词）
+
+### ✨ 新功能
+
+#### 1. 播放列表子表化重构（`media_songs`）
+- 原 `media_playlists.songs` JSON 列拆分为独立子表 `media_songs`，每首歌独立一行
+- 子表字段：`id, playlist_id, sort_order, media_content_id, media_type, title, artist, album, duration, has_cover, has_lyrics, lyrics, extra, created_at, updated_at`
+- 启动时自动迁移旧 `songs` JSON 数据到子表，迁移后删除旧列（SQLite 3.35+，旧版本保留空列）
+- 删除播放列表时手动级联删除子表歌曲（SQLite 默认未开启外键约束）
+
+#### 2. 音乐元数据探测（`media_meta.py` 新模块）
+- `resolve_media_path(hass, media_content_id)`：解析 `media-source://` 路径到本地文件
+- `probe_media_meta(full_path)`：用 mutagen 读取标签（title/artist/album）、时长、封面标志位、歌词
+  - 歌词来源：同名 `.lrc` 文件优先（UTF-8/GB18030/GBK 自动探测编码），ID3 内嵌 USLT 兜底
+  - 标签支持：MP3(ID3)、FLAC、M4A/MP4、OGG 多格式统一
+- `extract_cover(full_path)`：提取内嵌封面图二进制（APIC/pictures/covr）
+
+#### 3. RESTful 媒体 API（9 个接口）
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/media/playlists?user=xxx` | 列出播放列表（含歌曲元数据，不含歌词） |
+| POST | `/media/playlists` | 新建播放列表 |
+| GET | `/media/playlists/{id}` | 获取播放列表详情 |
+| PUT | `/media/playlists/{id}` | 重命名 |
+| PUT | `/media/playlists/{id}?refresh_meta=1` | 整列刷新元数据（读文件） |
+| DELETE | `/media/playlists/{id}` | 删除播放列表 |
+| POST | `/media/playlists/{id}/songs` | 添加歌曲 |
+| PUT | `/media/songs/{id}?refresh_meta=1` | 单首刷新元数据 |
+| PUT | `/media/songs/{id}` | 调序 |
+| DELETE | `/media/songs/{id}` | 删除歌曲 |
+| GET | `/media/songs/{id}/lyrics` | 获取歌词文本 |
+| GET | `/media/songs/{id}/cover` | 获取封面图（二进制，带 HTTP 缓存） |
+
+- 保存播放列表/添加歌曲不触发探测，元数据刷新为显式操作
+- GET 列表不带 `lyrics` 列（轻量化），前端播放时按需拉取歌词
+
+#### 4. db_viewer 适配
+- 播放列表管理页：表格增加歌曲数列、刷新元数据按钮
+- API 工具新增「🎵 音乐媒体」分组，含 11 个接口 URL 生成器
+
+---
+
+## 2026-06-26 — v2.4.2 房间聚合查询 + 小爱采集白名单修复
+
+### ✨ 新功能
+
+#### 1. 房间聚合查询 API（3 个新查询类型）
+- 新增 `aggregate_room_daily`：按 **房间 + 月份 + 数据类别（可多选）** 返回每日用电量/时长/条数汇总
+- 新增 `aggregate_room_monthly`：按 **房间 + 年份 + 数据类别（可多选）** 返回每月用电量/时长/条数汇总
+- 新增 `aggregate_room_yearly_daily`：按 **房间 + 年份 + 数据类别（可多选）** 返回每日汇总（一年 365 条）
+- `category` 支持逗号分隔多选（`device,environment,attribute`），不填默认 `device`
+- 各类别聚合字段：
+  - `device`：`on_count` + `total_energy`（用电量）+ `total_duration`（时长秒）
+  - `environment`：按 metric 分别聚合 `on_count` + `total_value`
+  - `attribute`：按 attr_type 分别聚合 `on_count`（字段不固定不盲目求和）
+- 返回按类别分组的 `summaries` 结构
+- db_viewer「API工具」的「聚合查询」分组新增 3 个选项，复用复选框组（设备类/传感器类/属性提取）
+
+**调用示例：**
+```
+GET /api/ha_data_store/query?type=aggregate_room_daily&room=客厅&month=2026-06&category=device,environment&key=xxx
+GET /api/ha_data_store/query?type=aggregate_room_monthly&room=客厅&year=2026&category=device&key=xxx
+GET /api/ha_data_store/query?type=aggregate_room_yearly_daily&room=客厅&year=2026&category=device,environment,attribute&key=xxx
+```
+
+### 🐛 Bug 修复
+
+#### 1. 小爱对话运行时新增配置不生效
+- **现象**：通过 db_viewer 配置小爱对话实体后，不重启 HA 则无任何对话记录采集，且日志无任何 `[xiaoai]` 输出
+- **根因**：`XiaoaiConfigView.post` / `delete` 写入数据库后未调用 `_refresh_monitored`，导致内存白名单（`monitored_entities` + `xiaoai_entities` 两个集合）未刷新；`state_changed` 事件在 `_internal_state_listener` 关卡1 被 `entity_id not in monitored` 静默拦截，到不了采集函数
+- **修复**：`post` 和 `delete` 成功后均补 `await _refresh_monitored(hass, self._db_path)`，与 `http_api.py` 中其他 6 处配置增删改保持一致，使运行时新增/删除配置立即生效
+- **验证**：重启 HA 后采集成功，日志输出 `[xiaoai] 采集对话 entity_id=... conv_time=... user='...' ai='...'`
+
+#### 2. 小爱闹钟/特殊事件 AI 回复采集不全
+- **现象**：小爱定闹钟等含 `ALERT` 事件的对话，`ai_text` 始终为空，AI 回复文本丢失
+- **根因**：`handle_state_changed_sync` 写死只取 `answers[0].tts.text`；而闹钟场景 `answers` 结构为 `[{type:ALERT, alert:{...}}, {type:TTS, tts:{text:...}}]`，`answers[0]` 是 ALERT 无 `tts` 字段，导致取空
+- **修复**：改为遍历 `answers` 列表 —— 找 `type=="TTS"` 的项取 `tts.text`（普通对话 `answers[0]` 即 TTS 不受影响，闹钟场景能正确命中 `answers[1]`）
+- **新增字段**：`xiaoai_conversations` 表新增两列（`ALTER TABLE` 迁移，老数据留空兼容）
+  - `type`：事件类型键值。遍历 `answers` 取第一个 `type!="TTS"` 的项（如 `ALERT`）；全为 TTS 则存空，表示普通对话。前端可用映射表（如 `{ALERT:"闹钟"}`）解析为中文
+  - `other`：完整 `attributes` 的 JSON（`ensure_ascii=False`），含 `answers` 详情（闹钟 datetime/circle、AI 原文）、`history`、`timestamp` 等，信息不丢失，便于后期追溯丢失内容
+- **影响范围**：`handle_state_changed_sync` 采集逻辑、`INSERT ... ON CONFLICT DO UPDATE`（同时更新 ai_text/type/other）、两处 `SELECT` 查询（`query_history_sync` + `XiaoaiHistoryView._query`）
+- **不做**：不回填老数据（answers 早已不在 HA 状态中，无法还原）；本次不改前端美化（仅保证新字段在 API 返回中出现）
+
+### 依赖文件
+
+| 文件 | 改动 |
+|------|------|
+| `http_api.py` | 新增 `_aggregate_room_by_period` 通用聚合方法 + 3 个查询方法 + type 列表/分发分支扩展 |
+| `xiaoai.py` | `XiaoaiConfigView.post` / `delete` 补调 `_refresh_monitored`；`handle_state_changed_sync` 改为遍历 answers 取 TTS + 新增 type/other 字段；建表迁移补两列；两处 SELECT 加字段 |
+| `db_viewer.html` | 「聚合查询」分组新增 3 个 option + 显示分支 + URL 构造 + 说明表格 + 参数文档 |
+| `manifest.json` | 版本 2.4.1 → 2.4.2 |
+
+---
+
+## 2026-06-26 — v2.4.1 房间数据日历查询 + 桥接启动阻塞修复
+
+### ✨ 新功能
+
+#### 1. `room_data_dates` API — 房间指定月有数据日期查询
+- 新增万能查询类型 `room_data_dates`，按 **房间 + 月份 + 数据类别（可多选）** 查询哪些日期有数据
+- `category` 支持逗号分隔多选（`device,environment,attribute`），由用户勾选决定查哪几类
+- 自动检测日期字段：设备类用 `on_time`，环境/属性类用 `datetime`；也可通过 `date_field` 自定义
+- 返回合并去重后的日期列表，便于前端日历标记
+- db_viewer「API工具」新增「房间数据日历」分组，含复选框（可多选）+ 全选按钮
+
+**调用示例：**
+```
+GET /api/ha_data_store/query?type=room_data_dates&room=主卧&month=2026-05&category=device,environment&key=xxx
+```
+
+### 🐛 Bug 修复
+
+#### 1. 桥接连接阻塞 HA 启动
+- **现象**：HA 启动时报警告 `Something is blocking Home Assistant from wrapping up the start up phase`，等待 `BridgeConnection.run()` 任务
+- **根因**：`bridge.py` 的 `BridgeConnection.start()` 使用 `hass.async_create_task()` 创建 WebSocket 长连接任务，而 `run()` 是无限循环，HA 启动流程会等待该任务完成
+- **修复**：改用 `hass.async_create_background_task()`，后台任务不会被启动流程等待，与项目中其他长期任务（虚拟设备恢复、桥接延迟启动）保持一致
+
+### 依赖文件
+
+| 文件 | 改动 |
+|------|------|
+| `http_api.py` | 新增 `room_data_dates` 查询分支 + `_query_room_data_dates` 方法 |
+| `db_viewer.html` | API工具新增「房间数据日历」分组、复选框组、全选函数、URL生成、参数文档 |
+| `bridge.py` | `BridgeConnection.start()` 改用 `async_create_background_task` |
+| `manifest.json` | 版本 2.4.0 → 2.4.1 |
+| `README.md` | 查询类型表格新增 `room_data_dates` 行 + curl 示例 |
+
+---
+
 ## 2026-06-21 — v2.3.0 固定功率计算用电量 + 前端SQL执行
 
 ### ✨ 新功能

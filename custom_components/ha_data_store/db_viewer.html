@@ -318,6 +318,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('virtual')">🔮 虚拟设备<span class="sub-tab-badge" id="badge-virtual"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('media')">🎵 媒体播放列表<span class="sub-tab-badge" id="badge-media"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('xiaoai')">💬 小爱对话<span class="sub-tab-badge" id="badge-xiaoai"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('printer')">🖨️ 打印机配置<span class="sub-tab-badge" id="badge-printer"></span></button>
   </div>
 
   <!-- 子面板: 设备类 -->
@@ -845,6 +846,32 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 打印机配置 -->
+  <div id="sub-printer" class="sub-panel">
+    <div id="printerConfigList"></div>
+    <div class="section">
+      <h3>🖨️ 添加打印机配置</h3>
+      <div class="hint">配置打印机数据采集的两个实体：<strong>统计数据实体</strong>（状态为当前日期，<code>daylist</code> 属性为每日汇总）、<strong>当日详细数据实体</strong>（状态为当日作业总数，<code>print/scan/copy/fax/jam_printer</code> 属性为当日作业明细）。实体 <code>last_changed</code> 变化时自动写入，保存配置时会主动采集一次当前数据。支持配置多台打印机。</div>
+      <div class="form-grid" style="grid-template-columns:2fr 2fr 1fr auto">
+        <div>
+          <label>打印机名称</label>
+          <input type="text" id="printerName" placeholder="HP Printer" style="width:100%">
+        </div>
+        <div>
+          <label>统计数据实体</label>
+          <input type="text" id="printerStatsEntity" placeholder="sensor.hp_printer_yong_liang_tong_ji" style="width:100%">
+        </div>
+        <div>
+          <label>当日详细数据实体</label>
+          <input type="text" id="printerDetailEntity" placeholder="sensor.hp_printer_jin_ri_zuo_ye" style="width:100%">
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:6px">
+          <button class="btn-green" onclick="addPrinterConfig()">➕ 添加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="sub-apisrc" class="sub-panel">
     <div id="apiSrcList"></div>
     <div class="section">
@@ -968,6 +995,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </optgroup>
         <optgroup label="房间数据日历">
           <option value="room_data_dates">📅 房间指定月有数据日期</option>
+          <option value="all_rooms_data_dates">📅 全屋指定月有数据日期</option>
         </optgroup>
         <optgroup label="排行榜查询">
           <option value="ranking_daily">日排行榜</option>
@@ -985,6 +1013,14 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </optgroup>
         <optgroup label="小爱对话">
           <option value="xiaoai_history">小爱对话记录</option>
+        </optgroup>
+        <optgroup label="🖨️ 打印数据查询">
+          <option value="printer_years">打印机有哪些年数据</option>
+          <option value="printer_month_dates">指定月哪些日期有数据</option>
+          <option value="printer_total">打印机合计数据</option>
+          <option value="printer_monthly_total">📅 按年月统计合计数据</option>
+          <option value="printer_daily_range">指定日期区间数据</option>
+          <option value="printer_detail">指定日期详细数据</option>
         </optgroup>
         <optgroup label="🎵 音乐媒体">
           <option value="media_playlists_list">列出播放列表</option>
@@ -1199,6 +1235,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">entities</td><td>实体列表 · category/room</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entity_data_dates</td><td>设备有数据的月份查询 · entity_id/month/date_field · 返回指定月份哪些日期有数据</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">room_data_dates</td><td>房间指定月有数据日期 · room/month/category(可多选)/date_field · 返回该房间该月勾选类别哪些日期有数据</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">all_rooms_data_dates</td><td>全屋指定月有数据日期 · month/category(可多选)/date_field · 不按房间过滤，返回全屋该月勾选类别哪些日期有数据</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">aggregate_daily</td><td>指定月每日汇总 · entity_id/month/date_field · 返回每日 duration/energy_consumed 汇总</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">aggregate_monthly</td><td>指定年每月汇总 · entity_id/year/date_field · 返回每月 duration/energy_consumed 汇总</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">aggregate_yearly</td><td>所有年年度汇总 · entity_id/date_field · 返回每年 duration/energy_consumed 汇总</td></tr>
@@ -1239,6 +1276,12 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div><code style="color:var(--green)">category=device,environment</code> <span style="color:var(--text2)">— 数据类别（必填，可多选，逗号分隔：device/environment/attribute）</span></div>
       <div><code style="color:var(--green)">date_field=on_time</code> <span style="color:var(--text2)">— 日期字段名（可选，不填则按表自动检测：设备用 on_time，环境/属性用 datetime）</span></div>
       <div style="color:var(--text2);margin-top:4px">返回格式：{"dates":["2025-01-01",...],"count":N,"month":"2025-01","room":"客厅","categories":["device","environment"]}</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">all_rooms_data_dates 参数</div>
+      <div><code style="color:var(--green)">month=2025-01</code> <span style="color:var(--text2)">— 月份 YYYY-MM（必填）</span></div>
+      <div><code style="color:var(--green)">category=device,environment</code> <span style="color:var(--text2)">— 数据类别（必填，可多选，逗号分隔：device/environment/attribute）</span></div>
+      <div><code style="color:var(--green)">date_field=on_time</code> <span style="color:var(--text2)">— 日期字段名（可选，不填则按表自动检测：设备用 on_time，环境/属性用 datetime）</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回格式：{"dates":["2025-01-01",...],"count":N,"month":"2025-01","categories":["device","environment"]}</div>
 
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">electricity_standard 参数</div>
       <div><code style="color:var(--green)">entity_id=...</code> <span style="color:var(--text2)">— 实体 ID（必填）</span></div>
@@ -1401,7 +1444,8 @@ function isUserTable(name) {
   return name.startsWith('attr_') || name === 'device_history' || name.startsWith('env_')
       || name === 'health_records'
       || name === 'media_playlists' || name === 'media_songs' || name === 'media_queue' || name === 'media_now_playing'
-      || name === 'xiaoai_conversations';
+      || name === 'xiaoai_conversations'
+      || name === 'printer_daily' || name === 'printer_configs';
 }
 
 function populateTableSelect() {
@@ -2249,7 +2293,8 @@ async function loadMonitor() {
       makeCard('push_target','🌐 实体→网络') +
       '<div class="summary-card c-online" id="bridgeCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🌉 桥接设备</div></div>' +
       '<div class="summary-card c-online" id="virtualCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🔮 虚拟设备</div></div>' +
-      '<div class="summary-card c-online" id="xiaoaiCard"><div class="health-dot ' + (healthCls[(types.xiaoai||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.xiaoai||{}).count||0) + '</div><div class="lbl">💬 小爱对话</div></div>';
+      '<div class="summary-card c-online" id="xiaoaiCard"><div class="health-dot ' + (healthCls[(types.xiaoai||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.xiaoai||{}).count||0) + '</div><div class="lbl">💬 小爱对话</div></div>' +
+      '<div class="summary-card c-online" id="printerCard"><div class="health-dot ' + (healthCls[(types.printer||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.printer||{}).count||0) + '</div><div class="lbl">🖨️ 打印机</div></div>';
 
     // 更新 sub-tab 角标
     setSubTabBadge('device', (types.device||{}).count||0);
@@ -2260,6 +2305,7 @@ async function loadMonitor() {
     setSubTabBadge('apisrc', (types.api_source||{}).count||0);
     setSubTabBadge('push', (types.push_target||{}).count||0);
     setSubTabBadge('xiaoai', (types.xiaoai||{}).count||0);
+    setSubTabBadge('printer', (types.printer||{}).count||0);
 
     document.getElementById('monitorInfo').textContent = '刷新: ' + new Date().toLocaleTimeString();
 
@@ -2401,6 +2447,33 @@ async function loadMonitor() {
     // -- 虚拟设备 --
     html += '<h4 class="section-head title-good">🔮 虚拟设备 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="virtualStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="virtualTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
+
+    // -- 打印机监控 --
+    let printerList = d.printer || [];
+    let printerH = (types.printer||{}).health||'good';
+    html += '<h4 class="section-head ' + (tc[printerH]||'title-good') + '">🖨️ 打印机监控 ' + healthBadge(printerH) +
+      '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.printer||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.printer||{}).bad||0)+'</span></h4>';
+    html += '<div class="section-content collapsed">';
+    if (printerList.length === 0) { html += '<div class="empty" style="padding:8px">暂无打印机配置</div>'; }
+    else {
+      html += '<div class="table-wrap"><table><thead><tr>';
+      html += '<th>名称</th><th>状态</th><th>墨量(K/C/M/Y)</th><th>当日(P/S/C/F/J)</th><th>累计(P/S/C/F/J)</th><th>统计实体</th><th>详细实体</th>';
+      html += '</tr></thead><tbody>';
+      printerList.forEach(p => {
+        let scls = p.status==='在线'?'badge-online':'badge-unavail';
+        html += '<tr>';
+        html += '<td><strong>' + escHtml(p.name||'-') + '</strong></td>';
+        html += '<td><span class="badge ' + scls + '">' + p.status + '</span></td>';
+        html += '<td style="font-size:12px">' + escHtml(p.ink_black||'-') + ' / ' + escHtml(p.ink_cyan||'-') + ' / ' + escHtml(p.ink_magenta||'-') + ' / ' + escHtml(p.ink_yellow||'-') + '</td>';
+        html += '<td style="font-size:12px">' + (p.day_print||0) + ' / ' + (p.day_scan||0) + ' / ' + (p.day_copy||0) + ' / ' + (p.day_fax||0) + ' / ' + (p.day_jam||0) + '</td>';
+        html += '<td style="font-size:12px">' + (p.total_print||0) + ' / ' + (p.total_scan||0) + ' / ' + (p.total_copy||0) + ' / ' + (p.total_fax||0) + ' / ' + (p.total_jam||0) + '</td>';
+        html += '<td style="font-size:12px;color:var(--text2)">' + escHtml(p.stats_entity||'-') + '</td>';
+        html += '<td style="font-size:12px;color:var(--text2)">' + escHtml(p.detail_entity||'-') + '</td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
 
     content.innerHTML = html;
 
@@ -2803,6 +2876,7 @@ function switchSubTab(name) {
   if (name === 'attr') { loadAttrTypes(); }
   if (name === 'xiaoai') { loadXiaoaiConfigs(); }
   if (name === 'media') { loadMediaPlaylists(); }
+  if (name === 'printer') { loadPrinterConfigs(); }
 }
 
 async function loadAttrTypes() {
@@ -4638,6 +4712,89 @@ async function delXiaoaiConfig(id, entityId) {
 }
 
 // =========================================================================
+// 打印机配置
+// =========================================================================
+const PRINTER_API = '/api/ha_data_store/printer/configs';
+
+async function loadPrinterConfigs() {
+  var div = document.getElementById('printerConfigList');
+  try {
+    var resp = await fetch(PRINTER_API);
+    var json = await resp.json();
+    if (!json.success) { div.innerHTML = '<div class="hint">加载失败: ' + escHtml(json.error || '') + '</div>'; return; }
+    var configs = json.data || [];
+    setSubTabBadge('printer', configs.length);
+    if (!configs.length) {
+      div.innerHTML = '<div class="hint">暂无打印机配置，请使用下方表单添加。</div>';
+      return;
+    }
+    var html = '<div class="section"><h3>已配置的打印机 (' + configs.length + '台)</h3>';
+    html += '<div class="table-wrap"><table><thead><tr>';
+    html += '<th>ID</th><th>名称</th><th>统计数据实体</th><th>当日详细实体</th><th>启用</th><th>创建时间</th><th style="width:140px">操作</th>';
+    html += '</tr></thead><tbody>';
+    configs.forEach(function(c) {
+      var enabledHtml = c.enabled
+        ? '<span style="color:var(--green)">✓ 启用</span>'
+        : '<span style="color:var(--text2)">✗ 停用</span>';
+      html += '<tr>';
+      html += '<td>' + c.id + '</td>';
+      html += '<td><strong>' + escHtml(c.name || '-') + '</strong></td>';
+      html += '<td>' + (c.stats_entity ? '<strong>' + escHtml(c.stats_entity) + '</strong>' : '<span style="color:var(--text2)">-</span>') + '</td>';
+      html += '<td>' + (c.detail_entity ? escHtml(c.detail_entity) : '<span style="color:var(--text2)">-</span>') + '</td>';
+      html += '<td>' + enabledHtml + '</td>';
+      html += '<td style="font-size:12px;color:var(--text2)">' + escHtml(c.created_at || '') + '</td>';
+      html += '<td>';
+      html += '<button class="btn-accent" onclick="recollectPrinter(\'' + escAttr(c.name || '') + '\')">重采</button> ';
+      html += '<button class="btn-del" onclick="delPrinterConfig(' + c.id + ', \'' + escAttr(c.name || '') + '\')">删除</button>';
+      html += '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+    div.innerHTML = html;
+  } catch(e) { div.innerHTML = '<div class="hint">加载失败: ' + e + '</div>'; }
+}
+
+async function addPrinterConfig() {
+  var name = document.getElementById('printerName').value.trim();
+  var stats_entity = document.getElementById('printerStatsEntity').value.trim();
+  var detail_entity = document.getElementById('printerDetailEntity').value.trim();
+  if (!stats_entity && !detail_entity) { showToast('至少填写一个实体（统计数据实体或当日详细实体）', false); return; }
+  try {
+    var resp = await fetch(PRINTER_API, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, stats_entity: stats_entity, detail_entity: detail_entity, enabled: true}),
+    });
+    var json = await resp.json();
+    showToast(json.message || '已添加', json.success);
+    if (json.success) {
+      document.getElementById('printerName').value = '';
+      document.getElementById('printerStatsEntity').value = '';
+      document.getElementById('printerDetailEntity').value = '';
+      loadPrinterConfigs();
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function delPrinterConfig(id, name) {
+  if (!confirm('确定删除打印机配置？\n' + (name || ('ID:' + id)) + '\n\n注意：仅删除配置并停止采集，历史数据保留。')) return;
+  try {
+    var resp = await fetch(PRINTER_API + '?id=' + id, { method: 'DELETE' });
+    var json = await resp.json();
+    showToast(json.message || '已删除', json.success);
+    if (json.success) loadPrinterConfigs();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function recollectPrinter(name) {
+  try {
+    var resp = await fetch(PRINTER_API + '/recollect?name=' + encodeURIComponent(name), { method: 'POST' });
+    var json = await resp.json();
+    showToast(json.message || '已触发重采', json.success);
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// =========================================================================
 const BASE_PATH = window.location.origin;
 const BASE_URL = '/api/ha_data_store/query';
 let apiEntitiesData = [];
@@ -4746,6 +4903,7 @@ function onApiTypeChange() {
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
   const isEntityDataDates = qt === 'entity_data_dates';
   const isRoomDataDates = qt === 'room_data_dates';
+  const isAllRoomsDataDates = qt === 'all_rooms_data_dates';
   const isAggregateDaily = qt === 'aggregate_daily';
   const isAggregateMonthly = qt === 'aggregate_monthly';
   const isAggregateYearly = qt === 'aggregate_yearly';
@@ -4761,6 +4919,12 @@ function onApiTypeChange() {
   const isHealth = isHealthHistory || isHealthLatest;
   const isAttrDaily = qt === 'attr_daily';
   const isXiaoaiHistory = qt === 'xiaoai_history';
+  const isPrinterQuery = qt === 'printer_years' || qt === 'printer_month_dates' ||
+    qt === 'printer_total' || qt === 'printer_monthly_total' ||
+    qt === 'printer_daily_range' || qt === 'printer_detail';
+  const isPrinterMonth = qt === 'printer_month_dates';
+  const isPrinterRange = qt === 'printer_daily_range';
+  const isPrinterDetail = qt === 'printer_detail';
   const isMediaApi = qt.startsWith('media_');
 
   // 电费专属字段：默认隐藏，仅 electricity_standard 时显示
@@ -4771,17 +4935,17 @@ function onApiTypeChange() {
   document.getElementById('apiEleMonthLimitRow').style.display = isElectricityStandard ? '' : 'none';
   document.getElementById('apiEleYearLimitRow').style.display = isElectricityStandard ? '' : 'none';
   document.getElementById('apiEleTranslatedFieldRow').style.display = isElectricityStandard ? '' : 'none';
-  // room_data_dates 专用类别行：仅该模式显示
-  document.getElementById('apiRoomDataCatRow').style.display = isRoomDataDates ? 'block' : 'none';
+  // room_data_dates / all_rooms_data_dates 专用类别行：仅这两种模式显示
+  document.getElementById('apiRoomDataCatRow').style.display = (isRoomDataDates || isAllRoomsDataDates) ? 'block' : 'none';
 
   document.getElementById('apiCategoryRow').style.display = isRoomsDaily ? 'block' : 'none';
   document.getElementById('apiMetricsRow').style.display = isRoomsMultiMetric ? 'block' : 'none';
-  // 月份行：entity_data_dates / room_data_dates 或 aggregate_daily 时显示
-  document.getElementById('apiMonthRow').style.display = (isEntityDataDates || isRoomDataDates || isAggregateDaily) ? 'block' : 'none';
+  // 月份行：entity_data_dates / room_data_dates / all_rooms_data_dates 或 aggregate_daily 时显示
+  document.getElementById('apiMonthRow').style.display = (isEntityDataDates || isRoomDataDates || isAllRoomsDataDates || isAggregateDaily) ? 'block' : 'none';
   // 年份行：aggregate_monthly 时显示
   document.getElementById('apiYearRow').style.display = isAggregateMonthly ? 'block' : 'none';
-  // 日期字段行：entity_data_dates / room_data_dates 或聚合查询时显示（恢复为下拉选择）
-  if (isEntityDataDates || isRoomDataDates || isAggregate) {
+  // 日期字段行：entity_data_dates / room_data_dates / all_rooms_data_dates 或聚合查询时显示（恢复为下拉选择）
+  if (isEntityDataDates || isRoomDataDates || isAllRoomsDataDates || isAggregate) {
     document.getElementById('apiDateFieldRow').style.display = 'block';
     restoreDateFieldSelect();
   } else {
@@ -4845,6 +5009,21 @@ function onApiTypeChange() {
     // 房间日期查询：只显示 room、category、month、date_field
     document.getElementById('apiEntityId').parentNode.style.display = 'none';
     document.getElementById('apiRoom').parentNode.style.display = '';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    loadApiEntitiesAndRooms();
+  } else if (isAllRoomsDataDates) {
+    // 全屋日期查询：只显示 category、month、date_field（不按房间过滤，不显示 room）
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
     document.getElementById('apiTableRow').style.display = 'none';
     document.getElementById('apiLimit').parentNode.style.display = 'none';
     document.getElementById('apiOffset').parentNode.style.display = 'none';
@@ -4984,6 +5163,37 @@ function onApiTypeChange() {
     document.getElementById('apiDateMode').value = 'none';
     onDateModeChange();
     loadXiaoaiEntitiesForApi();
+  } else if (isPrinterQuery) {
+    // 打印数据查询：显示打印机统计实体下拉、月份(指定月)/日期模式(区间或单日期)
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiEleDayTableRow').style.display = 'none';
+    document.getElementById('apiEleMonthTableRow').style.display = 'none';
+    document.getElementById('apiEleYearTableRow').style.display = 'none';
+    document.getElementById('apiEleDayLimitRow').style.display = 'none';
+    document.getElementById('apiEleMonthLimitRow').style.display = 'none';
+    document.getElementById('apiEleYearLimitRow').style.display = 'none';
+    document.getElementById('apiEleTranslatedFieldRow').style.display = 'none';
+    document.getElementById('apiHealthNameRow').style.display = 'none';
+    document.getElementById('apiHealthTypeRow').style.display = 'none';
+    document.getElementById('apiAttrDailyRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = isPrinterMonth ? 'block' : 'none';
+    document.getElementById('apiDateMode').parentNode.style.display =
+      (isPrinterRange || isPrinterDetail) ? '' : 'none';
+    if (isPrinterRange || isPrinterDetail) {
+      document.getElementById('apiDateMode').value = isPrinterRange ? 'range' : 'single';
+      onDateModeChange();
+    }
+    loadPrinterEntitiesForApi();
   } else if (isAttrDaily) {
     document.getElementById('apiEntityId').parentNode.style.display = '';
     document.getElementById('apiRoom').parentNode.style.display = 'none';
@@ -5128,6 +5338,21 @@ async function loadXiaoaiEntitiesForApi() {
     (json.data||[]).forEach(c => {
       const label = c.name ? c.entity_id + ' (' + c.name + ')' : c.entity_id;
       sel.innerHTML += '<option value="' + escAttr(c.entity_id) + '">' + escHtml(label) + '</option>';
+    });
+  } catch(e) {}
+  generateApiUrl();
+}
+
+async function loadPrinterEntitiesForApi() {
+  const sel = document.getElementById('apiEntityId');
+  sel.innerHTML = '<option value="">-- 请选择 --</option>';
+  try {
+    const resp = await fetch(PRINTER_API);
+    const json = await resp.json();
+    (json.data||[]).forEach(c => {
+      if (!c.stats_entity) return;
+      const label = c.name ? c.stats_entity + ' (' + c.name + ')' : c.stats_entity;
+      sel.innerHTML += '<option value="' + escAttr(c.stats_entity) + '">' + escHtml(label) + '</option>';
     });
   } catch(e) {}
   generateApiUrl();
@@ -5281,6 +5506,21 @@ function generateApiUrl() {
     return;
   }
 
+  // all_rooms_data_dates 模式特殊处理（全屋，不传 room）
+  if (qt === 'all_rooms_data_dates') {
+    const catCbs = document.querySelectorAll('#apiRoomDataCatCbs input[type="checkbox"]:checked');
+    if (catCbs.length > 0) {
+      const cats = Array.from(catCbs).map(cb => cb.value).join(',');
+      url += '&category=' + encodeURIComponent(cats);
+    }
+    const month = document.getElementById('apiMonth').value;
+    if (month) url += '&month=' + encodeURIComponent(month);
+    const dateField = document.getElementById('apiDateField').value;
+    if (dateField) url += '&date_field=' + encodeURIComponent(dateField);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
   // aggregate_daily 模式特殊处理
   if (qt === 'aggregate_daily') {
     if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
@@ -5414,6 +5654,27 @@ function generateApiUrl() {
       if (de) url += '&end=' + encodeURIComponent(de);
     }
     if (limit) url += '&limit=' + encodeURIComponent(limit);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 打印数据查询模式特殊处理
+  if (qt === 'printer_years' || qt === 'printer_month_dates' || qt === 'printer_total' ||
+      qt === 'printer_monthly_total' ||
+      qt === 'printer_daily_range' || qt === 'printer_detail') {
+    if (entityId) url += '&stats_entity=' + encodeURIComponent(entityId);
+    if (qt === 'printer_month_dates') {
+      const m = document.getElementById('apiMonth').value;
+      if (m) url += '&month=' + encodeURIComponent(m);
+    } else if (qt === 'printer_daily_range') {
+      const ds = document.getElementById('apiDateStart').value;
+      const de = document.getElementById('apiDateEnd').value;
+      if (ds) url += '&start=' + encodeURIComponent(ds);
+      if (de) url += '&end=' + encodeURIComponent(de);
+    } else if (qt === 'printer_detail') {
+      const d = document.getElementById('apiDate').value;
+      if (d) url += '&date=' + encodeURIComponent(d);
+    }
     document.getElementById('apiUrlOutput').value = url;
     return;
   }

@@ -78,6 +78,11 @@ async def _refresh_monitored(hass: HomeAssistant, db_path: str) -> None:
     hass.data[DOMAIN]["xiaoai_entities"] = await hass.async_add_executor_job(
         _xiaoai_get_monitored, db_path,
     )
+    # 同步刷新打印机实体映射（独立配置表）
+    from .printer import get_printer_entities as _printer_get_entities
+    hass.data[DOMAIN]["printer_entities"] = await hass.async_add_executor_job(
+        _printer_get_entities, db_path,
+    )
     _LOGGER.info("[HDS] 受监控实体白名单已刷新 count=%d entities=%s",
                  len(monitored), sorted(monitored))
     from .logger import get_logger as _lg
@@ -751,7 +756,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail"},
                 status_code=400,
             )
 
@@ -787,6 +792,8 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_entity_data_dates, db_path, request)
             elif query_type == "room_data_dates":
                 result = await self._exec_in_executor(hass, self._query_room_data_dates, db_path, request)
+            elif query_type == "all_rooms_data_dates":
+                result = await self._exec_in_executor(hass, self._query_all_rooms_data_dates, db_path, request)
             elif query_type == "aggregate_daily":
                 result = await self._exec_in_executor(hass, self._query_aggregate_daily, db_path, request)
             elif query_type == "aggregate_monthly":
@@ -811,6 +818,9 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_health_latest, db_path, request)
             elif query_type == "xiaoai_history":
                 result = await self._exec_in_executor(hass, self._query_xiaoai_history, db_path, request)
+            elif query_type in ("printer_years", "printer_month_dates", "printer_total",
+                                "printer_monthly_total", "printer_daily_range", "printer_detail"):
+                result = await self._exec_in_executor(hass, self._query_printer, db_path, request)
             else:
                 return self.json(
                     {"success": False, "error": f"未知的 type '{query_type}'"},
@@ -1427,6 +1437,98 @@ class QueryView(_BaseDBView):
                 "count": len(dates),
                 "month": month,
                 "room": room,
+                "categories": categories,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  all_rooms_data_dates：全屋指定月哪些日期有数据（不按房间过滤）          #
+    # ------------------------------------------------------------------ #
+    def _query_all_rooms_data_dates(self, db_path: str, request: web.Request) -> dict:
+        """返回全屋（所有房间）在指定月份内指定类别的哪些日期有数据。
+
+        参数：
+          - month:      YYYY-MM（必填）
+          - category:   必填，逗号分隔，可多选 device/environment/attribute
+          - date_field: 可选，自定义日期字段；不填则按表自动检测（设备用 on_time，其余用 datetime）
+        """
+        params = self._extract_params(request)
+        month = params["month"]
+
+        if not month:
+            raise ValueError("all_rooms_data_dates 需要 month 参数（格式：YYYY-MM）")
+
+        import re
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            raise ValueError("month 参数格式错误，应为 YYYY-MM")
+
+        category_raw = params["category"].lower() if params["category"] else ""
+        date_field = request.query.get("date_field", "").strip()
+
+        categories = [c.strip() for c in category_raw.split(",") if c.strip()]
+        if not categories:
+            raise ValueError("all_rooms_data_dates 需要 category 参数（device/environment/attribute，可多选，逗号分隔）")
+        invalid = [c for c in categories if c not in ("device", "environment", "attribute")]
+        if invalid:
+            raise ValueError(f"category 参数无效: {', '.join(invalid)}，可选: device, environment, attribute")
+
+        pattern = f"{month}-%"
+
+        conn = sqlite3.connect(db_path)
+        try:
+            # 按类别收集 (表名, 日期字段) 列表
+            tables_to_query: list[tuple[str, str]] = []
+
+            for category in categories:
+                if category == "device":
+                    dfield = date_field or "on_time"
+                    tables_to_query.append((TABLE_DEVICE_HISTORY, dfield))
+                elif category == "environment":
+                    dfield = date_field or "datetime"
+                    for metric in VALID_METRICS:
+                        tables_to_query.append((get_env_table_name(metric), dfield))
+                elif category == "attribute":
+                    dfield = date_field or "datetime"
+                    cursor = conn.execute(f"SELECT type_name FROM {TABLE_ATTR_TYPE_DEFS}")
+                    for arow in cursor.fetchall():
+                        tables_to_query.append((get_attr_table_name(arow[0]), dfield))
+
+            all_dates: set = set()
+
+            for tbl, dfield in tables_to_query:
+                # 检查表是否存在
+                try:
+                    conn.execute(f"SELECT 1 FROM {tbl} LIMIT 1")
+                except Exception:
+                    continue
+                # 检查日期字段是否存在（全屋模式不要求 room 列）
+                try:
+                    col_info = conn.execute(f"PRAGMA table_info({tbl})").fetchall()
+                    col_names = [c[1] for c in col_info]
+                    if dfield not in col_names:
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    cursor = conn.execute(
+                        f"SELECT DISTINCT SUBSTR({dfield}, 1, 10) AS date "
+                        f"FROM {tbl} "
+                        f"WHERE {dfield} LIKE ?",
+                        (pattern,),
+                    )
+                    for row in cursor.fetchall():
+                        if row[0]:
+                            all_dates.add(row[0])
+                except sqlite3.OperationalError as exc:
+                    _LOGGER.warning("[all_rooms_data_dates] 查询 %s 失败: %s", tbl, exc)
+
+            dates = sorted(all_dates)
+            return {
+                "dates": dates,
+                "count": len(dates),
+                "month": month,
                 "categories": categories,
             }
         finally:
@@ -3520,6 +3622,60 @@ class QueryView(_BaseDBView):
             limit = 500
         return query_history_sync(db_path, entity_id, start, end, limit)
 
+    def _query_printer(self, db_path: str, request: web.Request) -> dict:
+        """打印数据查询。参数: stats_entity(必填), month, date, start, end。
+
+        以统计数据实体 stats_entity 定位打印机配置；调用 printer.py 中对应查询函数。
+        """
+        from .printer import (
+            TABLE_PRINTER_CONFIGS,
+            query_printer_years,
+            query_printer_month_dates,
+            query_printer_total,
+            query_printer_monthly_total,
+            query_printer_daily_range,
+            query_printer_detail,
+        )
+        query_type = request.query.get("type", "").strip().lower()
+        stats_entity = request.query.get("stats_entity", "").strip()
+        if not stats_entity:
+            raise ValueError("printer_* 查询需要 stats_entity 参数（打印机统计数据实体）")
+
+        # 根据统计实体定位打印机名称 name
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                f"SELECT name FROM {TABLE_PRINTER_CONFIGS} WHERE stats_entity = ?",
+                (stats_entity,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            raise ValueError(f"未找到打印机配置: {stats_entity}")
+        name = row[0]
+
+        if query_type == "printer_years":
+            return query_printer_years(db_path, name)
+        if query_type == "printer_month_dates":
+            return query_printer_month_dates(
+                db_path, name, request.query.get("month", "").strip()
+            )
+        if query_type == "printer_total":
+            return query_printer_total(db_path, name)
+        if query_type == "printer_monthly_total":
+            return query_printer_monthly_total(db_path, name)
+        if query_type == "printer_daily_range":
+            return query_printer_daily_range(
+                db_path, name,
+                request.query.get("start", "").strip(),
+                request.query.get("end", "").strip(),
+            )
+        if query_type == "printer_detail":
+            return query_printer_detail(
+                db_path, name, request.query.get("date", "").strip()
+            )
+        raise ValueError(f"未知的打印机查询类型: {query_type}")
+
 
 # ========================================================================== #
 #  7. ★ 数据库浏览器 — DBViewerDataView (数据API) ★                            #
@@ -4579,10 +4735,78 @@ class EntityMonitorView(_BaseDBView):
                 health="good" if len(xiaoai_info)==0 or x_bad==0 else ("warn" if x_bad<len(xiaoai_info) else "bad"),
             )
 
+            # -- 打印机监控 --
+            printer_info = []
+            try:
+                from .printer import TABLE_PRINTER_CONFIGS, TABLE_PRINTER_DAILY
+                conn3 = sqlite3.connect(db_path)
+                conn3.row_factory = sqlite3.Row
+                p_rows = conn3.execute(
+                    f"SELECT * FROM {TABLE_PRINTER_CONFIGS} WHERE enabled = 1 ORDER BY id"
+                ).fetchall()
+                today = datetime.now().strftime("%Y-%m-%d")
+                for row in p_rows:
+                    r = dict(row)
+                    pname = r.get("name", "")
+                    stats_entity = r.get("stats_entity", "")
+                    detail_entity = r.get("detail_entity", "")
+                    st = self._hass.states.get(stats_entity) if stats_entity else None
+                    dt = self._hass.states.get(detail_entity) if detail_entity else None
+                    status = "在线" if (st and st.state not in ("unavailable", "unknown")) else "不可用"
+                    # 当日 + 累计：从 printer_daily 统计
+                    today_row = None
+                    total_row = None
+                    try:
+                        today_row = conn3.execute(
+                            f"SELECT * FROM {TABLE_PRINTER_DAILY} WHERE name = ? AND day = ?",
+                            (pname, today),
+                        ).fetchone()
+                        total_row = conn3.execute(
+                            f"SELECT COALESCE(SUM(print),0) p, COALESCE(SUM(scan),0) s, "
+                            f"COALESCE(SUM(copy),0) c, COALESCE(SUM(fax),0) f, "
+                            f"COALESCE(SUM(jam_printer),0) j FROM {TABLE_PRINTER_DAILY} WHERE name = ?",
+                            (pname,),
+                        ).fetchone()
+                    except Exception:
+                        pass
+                    td = dict(today_row) if today_row else {}
+                    printer_info.append(dict(
+                        name=pname,
+                        status=status,
+                        stats_entity=stats_entity,
+                        detail_entity=detail_entity,
+                        stats_state=(st.state if st else "N/A")[:20],
+                        detail_state=(dt.state if dt else "N/A")[:20],
+                        ink_black=td.get("ink_black", ""),
+                        ink_cyan=td.get("ink_cyan", ""),
+                        ink_magenta=td.get("ink_magenta", ""),
+                        ink_yellow=td.get("ink_yellow", ""),
+                        day_print=td.get("print", 0), day_scan=td.get("scan", 0),
+                        day_copy=td.get("copy", 0), day_fax=td.get("fax", 0),
+                        day_jam=td.get("jam_printer", 0),
+                        total_print=total_row[0] if total_row else 0,
+                        total_scan=total_row[1] if total_row else 0,
+                        total_copy=total_row[2] if total_row else 0,
+                        total_fax=total_row[3] if total_row else 0,
+                        total_jam=total_row[4] if total_row else 0,
+                        updated_at=r.get("updated_at", ""),
+                    ))
+                conn3.close()
+            except Exception:
+                pass
+            types["printer"] = dict(
+                count=len(printer_info),
+                ok=sum(1 for p in printer_info if p["status"] == "在线"),
+                bad=sum(1 for p in printer_info if p["status"] != "在线"),
+                health="good" if len(printer_info)==0 or all(p["status"]=="在线" for p in printer_info)
+                        else "warn",
+            )
+
             return {"entities": entities, "summary": summary,
                     "exports": exports, "file_sources": file_sources, "api_sources": api_sources,
                     "push_targets": push_targets,
                     "xiaoai": xiaoai_info,
+                    "printer": printer_info,
                     "types": types}
 
         try:

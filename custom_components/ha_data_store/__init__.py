@@ -118,6 +118,9 @@ def _refresh_monitored_set_sync(db_path: str) -> set[str]:
     # 4. 小爱对话类：entity_id（独立配置表，并入总白名单）
     from .xiaoai import get_monitored_entities as _xiaoai_get_monitored
     monitored |= _xiaoai_get_monitored(db_path)
+    # 5. 打印机类：stats_entity + detail_entity（独立配置表，并入总白名单）
+    from .printer import get_monitored_entities as _printer_get_monitored
+    monitored |= _printer_get_monitored(db_path)
     return monitored
 
 
@@ -3313,6 +3316,29 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
                 local_logger.exception("[xiaoai] 采集异常 entity_id=%s", entity_id)
         return  # 小爱实体不走后续 device/attr/vacuum 流程
 
+    # 打印机：独立采集分支。统计实体 state 已改为五项累计值合计（每次打印都变化），
+    # 详细实体 state 为当日作业总数（每次打印变化），因此以状态值变化作为触发判定。
+    printer_entities = hass.data.get(DOMAIN, {}).get("printer_entities")
+    if printer_entities and entity_id in printer_entities:
+        old_val = getattr(old_state, "state", None)
+        new_val = getattr(new_state, "state", None)
+        if old_val != new_val:
+            from .printer import handle_state_changed_sync as _printer_handle
+            meta = printer_entities[entity_id]
+            # detail 实体触发时，传入配套统计数据实体的当前状态，用于提取当日墨量(ink_*)
+            partner_state = None
+            if meta.get("type") == "detail" and meta.get("stats_entity"):
+                partner_state = hass.states.get(meta["stats_entity"])
+            try:
+                await hass.async_add_executor_job(
+                    _printer_handle, db_path, entity_id, new_state, meta, partner_state,
+                )
+            except Exception:
+                local_logger = get_logger()
+                if local_logger:
+                    local_logger.exception("[printer] 采集异常 entity_id=%s", entity_id)
+        return  # 打印机实体不走后续 device/attr/vacuum 流程
+
     try:
         info = await hass.async_add_executor_job(_get_entity_info, db_path, entity_id)
     except RuntimeError as exc:
@@ -3908,6 +3934,10 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     from .xiaoai import register_api_views as _xiaoai_register_api_views
     _xiaoai_register_api_views(hass, db_path)
 
+    # 打印机 API（独立模块）
+    from .printer import register_api_views as _printer_register_api_views
+    _printer_register_api_views(hass, db_path)
+
 
 # =========================================================================== #
 #  Config Entry 入口                                                           #
@@ -3932,6 +3962,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 小爱对话模块：独立建表（独立连接，不污染 _init_database）
     from .xiaoai import init_database as _xiaoai_init_database
     await hass.async_add_executor_job(_xiaoai_init_database, db_path)
+
+    # 打印机模块：独立建表
+    from .printer import init_database as _printer_init_database
+    await hass.async_add_executor_job(_printer_init_database, db_path)
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["entry_id"] = entry.entry_id
@@ -4184,6 +4218,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .xiaoai import get_monitored_entities as _xiaoai_get_monitored
     hass.data[DOMAIN]["xiaoai_entities"] = await hass.async_add_executor_job(
         _xiaoai_get_monitored, db_path,
+    )
+
+    # 打印机：单独维护 {entity_id: {printer_id, type}} 映射，供 _async_state_changed 快速识别
+    from .printer import get_printer_entities as _printer_get_entities
+    hass.data[DOMAIN]["printer_entities"] = await hass.async_add_executor_job(
+        _printer_get_entities, db_path,
     )
 
     # 设备类：监听 state_changed 事件（仅处理用户配置过的实体）
