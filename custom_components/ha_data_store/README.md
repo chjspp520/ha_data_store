@@ -19,6 +19,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
   - [API源 → 实体](#7-api源--实体)
   - [虚拟设备](#8-虚拟设备)
   - [实体导出为JSON](#9-实体导出为json)
+  - [打印机数据采集](#10-打印机数据采集)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -44,6 +45,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 🩺 **健康数据** | 存储血压、体温、身高、体重等健康记录，支持按人员查询 |
 | 🔗 **设备桥接** | 通过 WebSocket 连接远程 HA，将远程实体的状态和控制在本地无缝映射（开关/灯光/气候/窗帘/风扇/门锁/数值/选择/传感器/二进制传感器） |
 | 🖥️ **虚拟设备** | 动态创建自定义实体，支持多种设备类型和自定义属性 |
+| 🖨️ **打印机数据采集** | 采集打印机统计数据与当日作业明细，支持多台、配置管理、数据查询与系统监控 |
 | 📁 **文件源 → 实体** | 监听本地 JSON 文件变化，自动将数据映射为 HA 实体 |
 | 🌐 **API源 → 实体** | 定时请求外部 HTTP API，将 JSON 响应解析并映射为 HA 实体 |
 | 📄 **实体→ JSON** | 将 HA 实体状态实时导出为 JSON 文件，供外部系统消费 |
@@ -386,6 +388,49 @@ POST /api/ha_data_store/export
 
 ---
 
+### 10. 打印机数据采集
+
+采集打印机统计数据与当日作业明细，支持多台打印机、配置管理、数据查询与系统监控。
+
+**配置两个实体（通过"系统配置 → 打印机配置"）：**
+
+| 实体类型 | 数据来源 | 说明 |
+|---|---|---|
+| **统计数据实体** | `attributes.daylist` | 每日汇总（print/scan/copy/fax/jam_printer）+ 墨量（ink_*） |
+| **当日详细数据实体** | `attributes` 各类型明细数组 | 当日各类型作业明细 |
+
+**采集时机：**
+- 以实体**状态值变化**判定触发（统计实体 state 为五项累计合计、详细实体为当日作业总数，每次打印都变化）
+- 当日多次打印时，每次变化都会覆盖更新当日记录（汇总 + 墨量 + 明细），保证始终为最新
+- 保存配置时主动采集一次当前数据
+
+**数据存储（单张主记录表 `printer_daily`，每天一条）：**
+- `name`：打印机名称（用户设置）
+- `day`：日期
+- `print/scan/copy/fax/jam_printer`：当日汇总计数
+- `ink_black/ink_cyan/ink_magenta/ink_yellow`：墨量
+- `printer_jobs`：当日作业明细（JSON，含各类型作业数组 + total + date）
+
+**配置接口：**
+```bash
+GET    /api/ha_data_store/printer/configs                     # 配置列表
+POST   /api/ha_data_store/printer/configs                     # 新增/修改配置
+DELETE /api/ha_data_store/printer/configs?id=xxx              # 删除配置
+POST   /api/ha_data_store/printer/configs/recollect?name=xxx  # 主动重采
+```
+
+**数据查询（详见下方"数据查询接口"的 `printer_*` 类型）：**
+| 查询类型 | 功能 |
+|---|---|
+| `printer_years` | 打印机有哪些年数据 |
+| `printer_month_dates` | 指定月哪些日期有数据 |
+| `printer_total` | 打印机合计数据 |
+| `printer_monthly_total` | 按年月统计合计数据 |
+| `printer_daily_range` | 指定日期区间数据 |
+| `printer_detail` | 指定日期详细数据 |
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -438,6 +483,13 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `health_latest` | 最新健康数据 | name(可选) |
 | `entity_data_dates` | 实体有数据的所有日期 | entity_id |
 | `room_data_dates` | 房间指定月有数据日期（按 device/environment/attribute 多选查询） | room, month, category |
+| `xiaoai_history` | 小爱对话记录 | entity_id |
+| `printer_years` | 打印机有哪些年数据 | stats_entity |
+| `printer_month_dates` | 打印机指定月哪些日期有数据 | stats_entity, month |
+| `printer_total` | 打印机合计数据 | stats_entity |
+| `printer_monthly_total` | 打印机按年月统计合计数据 | stats_entity |
+| `printer_daily_range` | 打印机指定日期区间数据 | stats_entity, start/end |
+| `printer_detail` | 打印机指定日期详细数据 | stats_entity, date |
 
 **查询示例：**
 
@@ -485,6 +537,26 @@ GET  /api/ha_data_store/routes         → 获取所有自定义路由
 POST /api/ha_data_store/routes         → 新增/修改自定义路由
 GET  /api/ha_data_store/attr_types     → 获取所有属性类型定义
 GET  /api/ha_data_store/entity_state?entity_id=xxx → 获取实体状态+属性树
+```
+
+**打印机配置接口：**
+
+```
+GET    /api/ha_data_store/printer/configs                      → 配置列表
+POST   /api/ha_data_store/printer/configs                      → 新增/修改配置
+DELETE /api/ha_data_store/printer/configs?id=xxx               → 删除配置
+POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采指定打印机
+```
+
+**打印机配置 POST 请求体示例：**
+
+```json
+{
+  "name": "HP Printer",
+  "stats_entity": "sensor.hp_printer_yong_liang_tong_ji",
+  "detail_entity": "sensor.hp_printer_jin_ri_zuo_ye",
+  "enabled": true
+}
 ```
 
 ### 管理接口（仅局域网）
@@ -657,6 +729,8 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `vacuum_history` | 扫地机器人轨迹 |
 | `health_records` | 健康记录（血压/体温/体重等） |
 | `virtual_devices` | 虚拟设备持久化 |
+| `printer_configs` | 打印机配置（支持多台，name 唯一） |
+| `printer_daily` | 打印机每日记录（汇总 + 墨量 + 当日明细 JSON） |
 
 ---
 
@@ -752,6 +826,33 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v2.6.0 打印机数据采集
+
+#### 新增功能
+
+- **打印机数据采集** — 新增独立模块 `printer.py`，采集打印机统计数据与当日作业明细
+  - 支持多台打印机，通过"系统配置 → 打印机配置"添加
+  - 采集触发：以实体**状态值变化**判断（统计实体 state 为五项累计合计、详细实体为当日作业总数）
+  - 当日多次打印时，每次变化都覆盖更新当日记录（汇总 + 墨量 + 明细），保证始终为最新
+  - 保存配置时主动采集一次当前数据
+
+- **数据查询** — API 工具新增"打印数据查询"分组，提供 6 种查询：
+  - `printer_years` 有哪些年数据 / `printer_month_dates` 指定月日期 / `printer_total` 合计
+  - `printer_monthly_total` 按年月统计合计 / `printer_daily_range` 日期区间 / `printer_detail` 指定日明细
+
+- **系统监控** — 新增"🖨️ 打印机监控"统计卡片与折叠区块，展示每台打印机状态、墨量、当日/累计数据
+
+#### 涉及文件
+
+| 文件 | 说明 |
+|------|------|
+| `printer.py` | 新增：建表、采集、配置 CRUD、数据查询、主动重采 |
+| `__init__.py` | 采集接入、实体白名单、API 注册、打印机独立采集分支 |
+| `http_api.py` | 万能查询 `printer_*` 分发、`/monitor` 返回打印机监控数据 |
+| `db_viewer.html` | 系统配置打印机子页面、API 打印数据查询分组、系统监控打印机卡片与区块 |
+| `const.py` | 版本号更新为 `2.6.0` |
+| `manifest.json` | 版本号更新为 `2.6.0` |
 
 ### v2.0.1
 

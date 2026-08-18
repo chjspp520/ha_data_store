@@ -45,6 +45,7 @@ from .const import (
     TABLE_BRIDGE_CONNECTIONS,
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
+    TABLE_REPORT_ENTITIES,
     TABLE_MEDIA_PLAYLISTS,
     TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
@@ -463,6 +464,22 @@ def _init_database(db_path: str) -> None:
         )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_health_name_time ON {TABLE_HEALTH_RECORDS} (name, date_time);"
+        )
+        # 前端卡片实体上报表（从 room-elves-card 等前端卡片提取上报）
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_REPORT_ENTITIES} (
+                entity_id       TEXT PRIMARY KEY,
+                name            TEXT NOT NULL DEFAULT '',
+                icon            TEXT NOT NULL DEFAULT '',
+                room_name       TEXT NOT NULL DEFAULT '',
+                source          TEXT NOT NULL DEFAULT 'room_elves',
+                last_report_time TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_report_entities_room ON {TABLE_REPORT_ENTITIES} (room_name);"
         )
         # 14) 媒体播放列表表
         conn.execute(
@@ -3882,6 +3899,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         MediaQueueView,
         MediaNowPlayingView,
         TableColumnsView,
+        ReportEntitiesView,
     )
     hass.http.register_view(EntityConfigView(db_path))
     hass.http.register_view(EntityConfigListView(db_path))
@@ -3929,6 +3947,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(MediaQueueView(db_path))
     hass.http.register_view(MediaNowPlayingView(db_path))
     hass.http.register_view(TableColumnsView(db_path))
+    hass.http.register_view(ReportEntitiesView(db_path))
 
     # 小爱对话 API（独立模块）
     from .xiaoai import register_api_views as _xiaoai_register_api_views

@@ -1,5 +1,116 @@
 # 更新日志
 
+## 2026-08-17 — v2.7.0 前端卡片实体健康监控
+
+### ✨ 新功能
+新增**前端卡片实体上报监控**：配合 room-elves-card 前端卡片，点击卡片上的 `report` 按钮即可将该卡片配置中涉及的全部实体一键上报后端，后端**全量重置存储**（只保留最新数据），并生成一个健康监控传感器，实时统计"前端涉及实体中掉线（unavailable/unknown）的个数"。
+
+### 🔗 完整链路
+```
+room-elves-card 前端（report 按钮，多卡片共用同一按钮）
+  → 点击一次，聚合所有 room-elves-card 实例的实体（entity_id/name/icon/room_name）
+  → POST /api/ha_data_store/report（后端清空整表后写入全部实体）
+  → 写入 report_entities 表（全量重置，只保留最新数据）
+  → 新传感器 sensor.reported_entities_health 每 30 秒刷新
+      状态值 = 掉线实体个数；属性 = 每个实体明细（entity_id/name/icon/room_name/status/state）
+```
+
+### 🗄️ 数据库结构
+新增单表 **`report_entities`**（前端卡片上报实体表）：
+- 字段：`entity_id(主键), name, icon, room_name, source, last_report_time`
+- 已加入数据库浏览器的"用户表"（始终显示）
+- 按 `room_name` 建索引
+
+### 🖥️ HTTP API
+新增 `ReportEntitiesView`：
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/api/ha_data_store/report` | 接收前端全量上报，**清空整表后写入全部实体**（只保留最新数据） |
+| GET | `/api/ha_data_store/report` | 查询全部上报实体 |
+
+- key 作为 query 参数鉴权（`?key=xxx`），与现有 API 一致
+
+### 🧭 房间名归属与全量重置
+- 每张 room-elves-card 是一个房间，实体归属顶层 `room_name`；`head: true`（头部/全屋总览卡片）时房间名固定为 `"头部"`
+- **多张卡片共用同一个 report 按钮**：点击一次 → 前端聚合所有 room-elves-card 实例的实体 → 单次请求上报后端
+- 后端收到上报后**清空整表再写入全部实体**（全量重置，只保留最新数据，无历史残留）
+
+### 🎛️ 前端适配（room-elves-card）
+- 新增配置项 `report: 按钮实体`（如 `input_button.report`）
+- 点击按钮触发上报：递归扫描配置提取所有实体，name 优先（配置 name > friendly_name > entity_id），icon 仅保留字符串（动态图标对象置空）
+- 支持 `input_button`/`button` 域（按 state 或 `last_triggered` 变化触发）与开关类（off→on 触发）
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | 新增 `TABLE_REPORT_ENTITIES`；`VERSION` 升级 2.6.0 → 2.7.0 |
+| `__init__.py` | 建 `report_entities` 表；注册 `ReportEntitiesView` |
+| `http_api.py` | 新增 `ReportEntitiesView`（POST 全量重置 / GET 查询） |
+| `sensor.py` | 新增 `ReportedEntitiesHealthSensor`（前端卡片实体健康，30 秒刷新） |
+| `db_viewer.html` | `isUserTable` 加入 `report_entities`（用户表始终显示） |
+| `translations/*.json` | 新增 `reported_entities_health` 实体名称翻译 |
+| `manifest.json` | 版本 2.6.0 → 2.7.0 |
+
+---
+
+## 2026-08-13 — v2.6.0 打印机数据采集功能
+
+### ✨ 新增模块
+新增打印机数据采集模块 `printer.py`（独立模块，遵循 `xiaoai.py` 架构），采集 HP 打印机统计数据与当日作业明细，并提供配置管理、数据查询和系统监控。
+
+### 🗄️ 数据库结构
+新增两张表：
+
+**`printer_configs`**（配置表，支持多台打印机）
+- 字段：`id, name(唯一), stats_entity, detail_entity, enabled, created_at, updated_at`
+
+**`printer_daily`**（单张主记录表，每天一条）
+- 字段：`name(打印机名称), day(日期), print/scan/copy/fax/jam_printer(当日汇总), ink_black/ink_cyan/ink_magenta/ink_yellow(墨量), printer_jobs(当日明细JSON), created_at, updated_at`
+
+### 📥 数据采集（两个实体 → 单张主记录表）
+| 实体 | 数据来源 | 更新内容 |
+|---|---|---|
+| 统计数据实体 | `attributes.daylist` | 每日汇总 + 墨量 |
+| 当日详细数据实体 | `attributes` 各类型明细数组 | 当日汇总（各类型 count 求和）+ 墨量 + `printer_jobs` JSON |
+
+- **当日数据实时更新**：当日多次打印时，详细实体每次变化都会覆盖更新当日记录（汇总 + 墨量 + 明细），保证始终为最新
+- **触发判定**：以实体**状态值变化**判断（统计实体 state 为五项累计合计，详细实体为当日作业总数，每次打印都变化）
+- **保存配置时主动采集一次**，避免空窗期
+
+### 🖥️ 配置管理（系统配置 → 打印机配置）
+- 支持多台打印机，配置项：名称、统计数据实体、当日详细数据实体
+- 支持增删、主动重采（`/api/ha_data_store/printer/configs/recollect?name=xxx`）
+
+### 📊 数据查询（API工具 → 打印数据查询分组）
+| 查询类型 | 功能 |
+|---|---|
+| `printer_years` | 打印机有哪些年数据 |
+| `printer_month_dates` | 指定月哪些日期有数据 |
+| `printer_total` | 打印机合计数据（数据库 daylist 求和） |
+| `printer_monthly_total` | 按年月统计合计数据 |
+| `printer_daily_range` | 指定日期区间数据（含墨量 + 当日明细） |
+| `printer_detail` | 指定日期详细数据 |
+
+### 📈 系统监控（新增打印机监控）
+- 统计卡片："🖨️ 打印机"（含健康状态点）
+- 折叠区块：展示每台打印机的状态、墨量（K/C/M/Y）、当日/累计五项计数、统计与详细实体
+- 随 `loadMonitor()` 自动刷新（含 15 秒自动刷新）
+
+### 🔄 数据库迁移
+- 自动为旧 `printer_daily` 表补充 `printer_jobs`/`updated_at` 列
+- 自动迁移 `printer_id` → `name` 结构（重建配置表与主表）
+- 自动删除旧版独立的 `printer_jobs` 明细表
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `printer.py` | 新增：建表、采集（状态值触发）、配置 CRUD、数据查询、主动重采 |
+| `__init__.py` | 采集接入、实体白名单、API 注册、`_async_state_changed` 打印机独立分支 |
+| `http_api.py` | 万能查询 `printer_*` 分发、`/monitor` 返回打印机监控数据 |
+| `db_viewer.html` | 系统配置打印机子页面、API 打印数据查询分组、系统监控打印机卡片与区块 |
+
+---
+
 ## 2026-06-27 — v2.5.1 小爱对话采集修复（LLM 连续对话 + other 字段）
 
 ### 🐛 Bug 修复

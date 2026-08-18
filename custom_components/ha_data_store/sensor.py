@@ -14,7 +14,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
-    TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, CATEGORY_ATTRIBUTE)
+    TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
+    CATEGORY_ATTRIBUTE)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -91,6 +92,77 @@ class MonitoredEntitiesSensor(SensorEntity):
         self._attr_extra_state_attributes = data; self.async_write_ha_state()
 
 
+class ReportedEntitiesHealthSensor(SensorEntity):
+    """前端卡片上报实体的健康监控传感器。
+
+    状态值 = 掉线（unavailable/unknown）的实体个数
+    状态属性 = 每个上报实体的明细（entity_id/name/icon/room_name/status/state）
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "reported_entities_health"
+    _attr_icon = "mdi:monitor-cellphone"
+    _attr_native_unit_of_measurement = "个"
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_reported_entities_health"
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+
+    def _load_data(self):
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        if not db_path:
+            return {"total": 0, "offline": 0, "entities": []}
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT entity_id, name, icon, room_name FROM {TABLE_REPORT_ENTITIES} "
+                    f"ORDER BY room_name, entity_id"
+                ).fetchall()]
+            finally:
+                conn.close()
+
+            entity_list = []
+            offline = 0
+            for r in rows:
+                eid = r["entity_id"]
+                st = self._hass.states.get(eid)
+                state_val = st.state if st else "unavailable"
+                if state_val in ("unavailable", "unknown"):
+                    status = "offline"
+                    offline += 1
+                else:
+                    status = "online"
+                entity_list.append({
+                    "entity_id": eid,
+                    "name": r["name"],
+                    "icon": r["icon"],
+                    "room_name": r["room_name"],
+                    "status": status,
+                    "state": state_val[:30],
+                })
+
+            return {
+                "total": len(entity_list),
+                "offline": offline,
+                "online": len(entity_list) - offline,
+                "entities": entity_list,
+            }
+        except Exception as e:
+            _LOGGER.error("[HDS] 上报实体健康传感器加载失败: %s", e)
+            return {"total": 0, "offline": 0, "entities": []}
+
+    async def _async_refresh(self, now=None):
+        data = await self._hass.async_add_executor_job(self._load_data)
+        self._attr_native_value = data.get("offline", 0)
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     # 存储回调
     hass.data.setdefault(DOMAIN, {})["async_add_sensor"] = async_add_entities
@@ -98,7 +170,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     device_info = DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)}, name="HA数据统一存储系统", manufacturer="HA数据统一存储系统")
     sensor = MonitoredEntitiesSensor(hass, device_info)
-    entities = [sensor]
+    report_sensor = ReportedEntitiesHealthSensor(hass, device_info)
+    entities = [sensor, report_sensor]
 
     bdi = get_bridge_device_info(entry.entry_id)
     try:
@@ -117,3 +190,4 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     async_add_entities(entities)
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
+    async_track_time_interval(hass, report_sensor._async_refresh, timedelta(seconds=30))

@@ -44,6 +44,7 @@ from .const import (
     TABLE_BRIDGE_CONNECTIONS,
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
+    TABLE_REPORT_ENTITIES,
     TABLE_MEDIA_PLAYLISTS,
     TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
@@ -7853,3 +7854,99 @@ async def _load_db_viewer_html(hass: HomeAssistant) -> str:
         lambda: html_path.read_text(encoding="utf-8")
     )
     return _DB_VIEWER_HTML_CACHE
+
+
+# =========================================================================== #
+#  前端卡片实体上报 API — ReportEntitiesView                                    #
+#  用途：接收 room-elves-card 等前端卡片提取的实体（entity_id/name/icon/room）， #
+#        按 entity_id 去重存储；多房间共用实体时保留 name/icon 数据最全的一份。   #
+# =========================================================================== #
+class ReportEntitiesView(_BaseDBView):
+    """前端卡片实体上报与查询。
+
+    POST /api/ha_data_store/report  Body: { key, room_name, entities:[{entity_id,name,icon}] }
+      → 按 entity_id 去重 upsert（保留 name/icon 数据最全的）
+    GET  /api/ha_data_store/report?key=xxx
+      → 返回全部上报实体
+    """
+
+    url = "/api/ha_data_store/report"
+    name = "api:ha_data_store:report_entities"
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+
+        raw_entities = body.get("entities")
+        if not isinstance(raw_entities, list) or not raw_entities:
+            return self.json({"success": False, "error": "entities 数组为空"}, status_code=400)
+
+        db_path = self._db_path
+
+        def _reset() -> dict:
+            """全量重置：清空整表，再插入本次上报的全部实体（只保留最新数据）。"""
+            now = _get_local_iso(DEFAULT_TIMEZONE)
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(f"DELETE FROM {TABLE_REPORT_ENTITIES}")
+                # 前端聚合后同一 entity_id 可能在不同房间重复出现，
+                # 用 INSERT OR REPLACE 防御性处理（entity_id 为主键，重复则替换）
+                inserted = 0
+                for item in raw_entities:
+                    if not isinstance(item, dict):
+                        continue
+                    eid = (item.get("entity_id") or "").strip()
+                    if not eid or "." not in eid:
+                        continue
+                    name = (item.get("name") or "").strip()
+                    icon = (item.get("icon") or "").strip() if isinstance(item.get("icon"), str) else ""
+                    room_name = (item.get("room_name") or "").strip()
+                    conn.execute(
+                        f"INSERT OR REPLACE INTO {TABLE_REPORT_ENTITIES} "
+                        f"(entity_id, name, icon, room_name, source, last_report_time) "
+                        f"VALUES (?, ?, ?, ?, 'room_elves', ?)",
+                        (eid, name, icon, room_name, now),
+                    )
+                    inserted += 1
+                conn.commit()
+                total = conn.execute(f"SELECT COUNT(*) FROM {TABLE_REPORT_ENTITIES}").fetchone()[0]
+                return {"inserted": inserted, "total": total}
+            finally:
+                conn.close()
+
+        try:
+            result = await self._exec_in_executor(hass, _reset)
+            return self.json({"success": True, "data": result})
+        except Exception as exc:
+            _LOGGER.exception("[report] 全量重置失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+
+        def _load() -> list[dict]:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    f"SELECT entity_id, name, icon, room_name, source, last_report_time "
+                    f"FROM {TABLE_REPORT_ENTITIES} ORDER BY room_name, entity_id"
+                )
+                return [dict(r) for r in cursor.fetchall()]
+            finally:
+                conn.close()
+
+        try:
+            rows = await self._exec_in_executor(hass, _load)
+            return self.json({"success": True, "data": rows})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)

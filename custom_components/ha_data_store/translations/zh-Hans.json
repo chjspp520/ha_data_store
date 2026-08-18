@@ -163,6 +163,9 @@
     "sensor": {
       "monitored_entities": {
         "name": "监控实体列表"
+      },
+      "reported_entities_health": {
+        "name": "前端卡片实体健康"
       }
     }
   }

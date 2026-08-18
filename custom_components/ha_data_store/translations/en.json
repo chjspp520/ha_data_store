@@ -118,6 +118,9 @@
     "sensor": {
       "monitored_entities": {
         "name": "Monitored Entities"
+      },
+      "reported_entities_health": {
+        "name": "Frontend Card Entities Health"
       }
     }
   }
