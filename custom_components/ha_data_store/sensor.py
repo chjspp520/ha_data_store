@@ -126,7 +126,11 @@ class ReportedEntitiesHealthSensor(SensorEntity):
             finally:
                 conn.close()
 
+            # 属性：保留所有上报行（含重复 entity_id，各自带 room_name）
             entity_list = []
+            # 掉线统计按"去重后的 entity_id"计算（同一实体多行只计一次）
+            seen = set()
+            total_unique = 0
             offline = 0
             for r in rows:
                 eid = r["entity_id"]
@@ -134,7 +138,6 @@ class ReportedEntitiesHealthSensor(SensorEntity):
                 state_val = st.state if st else "unavailable"
                 if state_val in ("unavailable", "unknown"):
                     status = "offline"
-                    offline += 1
                 else:
                     status = "online"
                 entity_list.append({
@@ -145,11 +148,17 @@ class ReportedEntitiesHealthSensor(SensorEntity):
                     "status": status,
                     "state": state_val[:30],
                 })
+                if eid not in seen:
+                    seen.add(eid)
+                    total_unique += 1
+                    if status == "offline":
+                        offline += 1
 
             return {
-                "total": len(entity_list),
-                "offline": offline,
-                "online": len(entity_list) - offline,
+                "total": total_unique,           # 去重后的实体总数
+                "offline": offline,              # 去重后的掉线数
+                "online": total_unique - offline,  # 去重后的在线数
+                "total_rows": len(entity_list),  # 原始上报行数（含重复）
                 "entities": entity_list,
             }
         except Exception as e:

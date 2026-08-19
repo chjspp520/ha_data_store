@@ -7890,13 +7890,15 @@ class ReportEntitiesView(_BaseDBView):
         db_path = self._db_path
 
         def _reset() -> dict:
-            """全量重置：清空整表，再插入本次上报的全部实体（只保留最新数据）。"""
+            """全量重置：清空整表，再插入本次上报的全部实体（不去重，允许 entity_id 重复）。
+
+            说明：entity_id 是否重复由前端决定（前端可去重可不去重），后端不做去重，
+            直接存储所有上报行；表主键为自增 id，同一 entity_id 可存在多行。
+            """
             now = _get_local_iso(DEFAULT_TIMEZONE)
             conn = sqlite3.connect(db_path)
             try:
                 conn.execute(f"DELETE FROM {TABLE_REPORT_ENTITIES}")
-                # 前端聚合后同一 entity_id 可能在不同房间重复出现，
-                # 用 INSERT OR REPLACE 防御性处理（entity_id 为主键，重复则替换）
                 inserted = 0
                 for item in raw_entities:
                     if not isinstance(item, dict):
@@ -7908,7 +7910,7 @@ class ReportEntitiesView(_BaseDBView):
                     icon = (item.get("icon") or "").strip() if isinstance(item.get("icon"), str) else ""
                     room_name = (item.get("room_name") or "").strip()
                     conn.execute(
-                        f"INSERT OR REPLACE INTO {TABLE_REPORT_ENTITIES} "
+                        f"INSERT INTO {TABLE_REPORT_ENTITIES} "
                         f"(entity_id, name, icon, room_name, source, last_report_time) "
                         f"VALUES (?, ?, ?, ?, 'room_elves', ?)",
                         (eid, name, icon, room_name, now),

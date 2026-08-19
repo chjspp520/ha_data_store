@@ -97,4 +97,4 @@ PENDING_JSON_FILENAME = "ha_data_store_pending.json"
 SHUTDOWN_THRESHOLD_SECONDS = 1800
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "2.7.0"
+VERSION = "2.8.0"

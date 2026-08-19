@@ -1,5 +1,34 @@
 # 更新日志
 
+## 2026-08-19 — v2.8.0 上报实体表结构调整（允许重复 entity_id）
+
+### 🔧 数据结构变更
+`report_entities` 表主键由 `entity_id` 改为自增 `id`，**允许同一 `entity_id` 重复存储**（不再唯一约束）。
+
+- 旧表（`entity_id` 主键）启动时自动检测并 DROP 重建（该表每次全量重置，数据可安全丢弃）
+- 新增 `entity_id` 索引（`idx_report_entities_eid`）加速按实体查询
+
+### 🖥️ 后端行为
+- `POST /api/ha_data_store/report`：仍为**全量重置**（清空整表重写），但**不做去重**——前端上报多少行就存多少行，同一 `entity_id` 多行直接插入（改为普通 `INSERT`，不再 `INSERT OR REPLACE`）
+- 前端是否去重由前端/用户控制，后端不干预，直接存储
+
+### 🧭 健康传感器统计口径
+`sensor.reported_entities_health`（前端卡片实体健康）：
+- **状态值（掉线数）按"去重后的 entity_id"统计**——同一实体出现多行时，掉线只计一次
+- 属性新增 `total_rows`（原始上报行数，含重复）
+- 属性 `entities` 保留所有行（含重复，各自带 room_name/status/state）
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | `VERSION` 2.7.0 → 2.8.0 |
+| `manifest.json` | 版本 2.7.0 → 2.8.0 |
+| `__init__.py` | `report_entities` 建表改自增 id 主键；加旧表迁移 DROP 重建；加 entity_id 索引 |
+| `http_api.py` | POST 全量重置改为普通 `INSERT`（不再去重/`INSERT OR REPLACE`） |
+| `sensor.py` | 健康传感器按去重 entity_id 统计掉线数，新增 `total_rows` 属性 |
+
+---
+
 ## 2026-08-17 — v2.7.0 前端卡片实体健康监控
 
 ### ✨ 新功能

@@ -466,10 +466,18 @@ def _init_database(db_path: str) -> None:
             f"CREATE INDEX IF NOT EXISTS idx_health_name_time ON {TABLE_HEALTH_RECORDS} (name, date_time);"
         )
         # 前端卡片实体上报表（从 room-elves-card 等前端卡片提取上报）
+        # 迁移：旧表以 entity_id 为主键（不允许重复）；新表改为自增 id 主键、entity_id 允许重复。
+        # 检测到旧结构（无 id 列）时 DROP 重建（该表每次全量重置，数据可安全丢弃）。
+        _has_id_col = conn.execute(
+            f"SELECT COUNT(*) FROM pragma_table_info('{TABLE_REPORT_ENTITIES}') WHERE name = 'id'"
+        ).fetchone()[0]
+        if _has_id_col == 0:
+            conn.execute(f"DROP TABLE IF EXISTS {TABLE_REPORT_ENTITIES}")
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_REPORT_ENTITIES} (
-                entity_id       TEXT PRIMARY KEY,
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id       TEXT NOT NULL DEFAULT '',
                 name            TEXT NOT NULL DEFAULT '',
                 icon            TEXT NOT NULL DEFAULT '',
                 room_name       TEXT NOT NULL DEFAULT '',
@@ -480,6 +488,9 @@ def _init_database(db_path: str) -> None:
         )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_report_entities_room ON {TABLE_REPORT_ENTITIES} (room_name);"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_report_entities_eid ON {TABLE_REPORT_ENTITIES} (entity_id);"
         )
         # 14) 媒体播放列表表
         conn.execute(
