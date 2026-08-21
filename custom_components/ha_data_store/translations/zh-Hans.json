@@ -166,6 +166,14 @@
       },
       "reported_entities_health": {
         "name": "前端卡片实体健康"
+      },
+      "today_family_status": {
+        "name": "今日家庭状态"
+      }
+    },
+    "button": {
+      "daily_summary_trigger": {
+        "name": "生成今日家庭状态"
       }
     }
   }

@@ -1,5 +1,80 @@
 # 更新日志
 
+## 2026-08-21 — v2.10.0 今日家庭状态总结
+
+### 🏠 今日家庭状态总结（按需生成）
+基于数据库历史表聚合今日事实，渲染为精简中文段落，为 0 的项自动跳过：
+
+- **新增传感器** `sensor.today_family_status`：
+  - 状态值 = 精简段落（人读）
+  - `attributes.summary` = 同一段落；`sections` = 完整结构化分节（environment/devices/vacuum/health/xiaoai，供自动化精确读取）；`overall` = normal | warning；`alerts` = 异常提醒列表
+- **新增按钮** `button.ha_data_store_daily_summary`：仪表盘放置按钮卡片，点击立即触发分析
+- **新增服务** `ha_data_store.generate_daily_summary`（可选参数 `date`，默认今天，供自动化/NR 调用）
+- **自动刷新**：HA 启动后 1 分钟自动生成一次；之后每 30 分钟（整 30 分钟）自动更新
+
+### 📊 聚合维度
+| 节 | 数据源 | 内容 |
+|----|--------|------|
+| 环境 | env_temperature/humidity/pm25/co2 | 今日最高/最低/平均 + 房间明细（温差≥2°C 时补充） |
+| 设备 | device_history | N 台/总时长 + 运行最久 1~3 台亮点；完整逐台明细进 sections（含单台用电 kWh） |
+| 用电 | env_power | 当日自增读数最后一条 = 今日总用电（kWh，非加法）+ 昨日 + 环比 |
+| 家庭事件 | vacuum_history / health_records / xiaoai_conversations | 扫地机次数、健康记录条数、小爱对话条数及时段 |
+| 人在/门 | device_history（name=人在/入户门） | on_time 非空且 off_time 空=该房间有人/门开；否则家中无人/门关 |
+| 离线实体 | report_entities + 实时 states | 三态判定，unavailable 算离线、unknown 不算；有离线时提醒"还有 x 台设备离线" |
+
+### ⚠️ 异常提醒（阈值写死）
+- 高温 ≥30°C、低温 ≤5°C
+- 单台连续运行 >6 小时
+- 用电环比波动 >20%
+- 有离线实体（report_entities 中 unavailable 的个数）
+- 存在任一提醒时 `overall=warning`，段落末尾追加"提醒：..."
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `daily_summary.py` | 新增：聚合 + 渲染 |
+| `button.py` | 新增：按钮平台 |
+| `sensor.py` | 新增 TodayFamilyStatusSensor |
+| `__init__.py` | PLATFORMS 加 button + 注册 generate_daily_summary 服务 |
+| `const.py` | VERSION 2.9.0 → 2.10.0 |
+| `manifest.json` | 版本 2.10.0 |
+| `translations/*.json` | sensor/button 翻译 key |
+
+---
+
+## 2026-08-21 — v2.9.0 实体健康三态判定（offline/unknown/online）
+
+### 🧭 健康传感器判定口径变更
+`sensor.reported_entities_health`（前端卡片实体健康）离线判定改为**三态**：
+
+- `offline`：实体状态为 `unavailable`（集成未加载/实体被删除/设备无响应，真离线）
+- `unknown`：实体状态为 `unknown`（**不计离线**，如未被点击过的 `button`/`input_button` 等无状态实体，属正常）
+- `online`：其余正常状态
+
+### 🖥️ 后端行为
+- 状态值（掉线数）仍统计 `offline`（unavailable）个数，`unknown` 不再计入
+- `attributes` 新增 `unknown` 字段（去重后的未知状态实体数）
+- `online = total - unknown - offline`
+- `entities[]` 每项 `status` 取值变为 `online | unknown | offline`
+- 空数据返回结构同步补充 `unknown: 0`
+
+### 🎨 前端（room-elves-card）
+- 顶部统计新增"未知"卡片（黄色，`mdi:help-circle`），点击弹出未知实体气泡
+- 户型图房间配色三态：红（有离线）/ 黄（有未知无离线）/ 绿（正常）/ 灰（无数据）；角标显示"在线x · 未知y · 离线z"（0 值段省略）
+- 房间气泡改为三选项卡（在线/未知/离线），默认优先显示有问题的选项卡
+- ECharts 堆叠柱状图新增"未知"系列（黄色），顺序 在线→未知→离线
+- 按状态列表排序：离线 → 未知 → 在线；未知行淡黄底色、黄色状态点/图标
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | `VERSION` 2.8.0 → 2.9.0 |
+| `manifest.json` | 版本 2.9.0（保持） |
+| `sensor.py` | 健康传感器三态判定，新增 `unknown` 计数 |
+| `docs/CHANGELOG.md` | 本条目 |
+
+---
+
 ## 2026-08-19 — v2.8.0 上报实体表结构调整（允许重复 entity_id）
 
 ### 🔧 数据结构变更

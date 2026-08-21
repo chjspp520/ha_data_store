@@ -73,7 +73,7 @@ from .logger import get_logger
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[str] = [
-    "switch", "sensor",
+    "switch", "sensor", "button",
     "light", "climate", "cover", "fan", "lock",
     "number", "select", "binary_sensor", "vacuum",
     "media_player",
@@ -4011,6 +4011,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _register_api_views(hass, db_path)
 
+    # ── 服务：今日家庭状态总结（按需生成） ──
+    from homeassistant.helpers import config_validation as cv
+    from homeassistant.helpers.service import ServiceCall
+    import voluptuous as vol
+
+    async def _async_generate_daily_summary(call: ServiceCall) -> None:
+        """按需生成今日家庭状态总结并刷新传感器。"""
+        try:
+            date_str = call.data.get("date") or None
+            sensor = hass.data.get(DOMAIN, {}).get("today_family_sensor")
+            if sensor is None:
+                _LOGGER.warning("[HDS] 今日总结传感器未初始化，无法生成")
+                return
+            await sensor.async_trigger_refresh(date_str)
+        except Exception as e:
+            _LOGGER.exception("[HDS] 生成今日家庭状态总结失败: %s", e)
+
+    hass.services.async_register(
+        DOMAIN,
+        "generate_daily_summary",
+        _async_generate_daily_summary,
+        schema=vol.Schema({
+            vol.Optional("date", default=""): cv.string,
+        }),
+    )
+    hass.data.setdefault(DOMAIN, {})["async_generate_daily_summary"] = _async_generate_daily_summary
+
     # ── 媒体播放队列：后端自动切歌 ──
     import json as _json
     _mq_logger = get_logger()
@@ -4454,7 +4481,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if bridge_manager:
         await bridge_manager.stop_all()
 
-    for key in ("cancel_bus_listener", "cancel_env_poll", "cancel_attr_poll", "cancel_file_src", "cancel_api_src", "cancel_midnight_split", "cancel_correction_scan"):
+    for key in ("cancel_bus_listener", "cancel_env_poll", "cancel_attr_poll", "cancel_file_src", "cancel_api_src", "cancel_midnight_split", "cancel_correction_scan", "cancel_daily_summary"):
         cancel = hass.data.get(DOMAIN, {}).get(key)
         if cancel:
             cancel()

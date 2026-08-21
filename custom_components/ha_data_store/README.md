@@ -10,6 +10,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [功能详解](#功能详解)
+  - [今日家庭状态总结](#0-今日家庭状态总结)
   - [设备类数据采集](#1-设备类数据采集)
   - [传感器类数据采集](#2-传感器类数据采集)
   - [属性提取](#3-属性提取)
@@ -56,6 +57,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 📋 **内置数据库浏览器** | 管理页面直接浏览、编辑数据库，无需 SQL 工具 |
 | 🔗 **自定义路由** | 通过 GUI 或 API 定义自定义 HTTP 路由，绑定任意 SQL 查询 |
 | 🗂️ **统一泛域名动态路由** | 万能路由 `/api/ha_data_store/custom/{tail}` 运行时查库执行任意自定义 SQL |
+| 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发 |
 
 ---
 
@@ -118,6 +120,84 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 ---
 
 ## 功能详解
+
+### 0. 今日家庭状态总结
+
+基于数据库各历史表，聚合**今日**家庭事实，渲染为精简中文段落（为 0 的项自动跳过）。
+
+**新增实体：**
+| 实体 | 类型 | 说明 |
+|------|------|------|
+| `sensor.today_family_status` | sensor | **状态值**=极简一句（家中有人/无人 + 门状态 + 提醒数，≤255字符）；`attributes.summary`=完整段落；`attributes.sections`=完整结构化分节；`attributes.overall`=normal/warning；`attributes.alerts`=异常提醒列表 |
+| `button.ha_data_store_daily_summary` | button | 仪表盘放置按钮卡片，点击立即触发分析 |
+
+**新增服务：** `ha_data_store.generate_daily_summary`
+- 参数 `date`（可选，默认今天，格式 `yyyy-mm-dd`）
+- 供自动化 / Node-RED 按需调用
+
+**自动刷新：**
+- HA 启动后 **1 分钟** 自动生成一次
+- 之后每 **30 分钟**（整 30 分钟，即 00 分/30 分）自动更新
+- 也可手动按钮 / 服务触发
+
+**聚合维度与提醒阈值：**
+| 节 | 数据源 | 内容 |
+|----|--------|------|
+| 环境 | env_temperature/humidity/pm25/co2 | 今日最高/最低/平均，房间温差≥2°C 时补充房间明细 |
+| 设备 | device_history | 共 N 台/总时长 + 运行最久亮点 + **用电 TOP3 + 开关频次 TOP3**（完整逐台明细在 sections） |
+| 用电 | env_power | 当日自增读数（最后一条 = 今日总用电，kWh）+ 昨日用电 + 环比 |
+| 家庭事件 | vacuum_history / health_records / xiaoai_conversations | 扫地机次数、健康记录条数、小爱对话条数及时段 |
+| 人在/门 | device_history（name=人在/入户门） | on_time 非空且 off_time 空=该房间有人/门开；否则家中无人/门关 |
+| 灯光 | device_history（name 含"灯"） | 每盏灯取最新一条，on_time 非空且 off_time 空=该灯开着，统计"开着 x 盏灯" |
+| 离线实体 | report_entities + 实时 states | 三态判定，unavailable 算离线、unknown 不算；有离线时 summary 末尾显示"离线设备 x 台" |
+
+异常提醒（阈值写死）：高温 ≥30°C、低温 ≤5°C、单台连续运行 >6 小时、用电环比波动 >20%；存在任一提醒时 `overall=warning`，提醒文字放 `alert_text` 字段（`alerts` 为提醒列表），`summary` 段落末尾单独显示"离线设备 x 台"。
+
+**工作原理：**
+
+```
+用户触发 ──► 聚合(查库) ──► 渲染(拼段落) ──► 刷新传感器(状态值 + attributes)
+
+┌──────────────────────────────────────────────────────────────┐
+│ 触发层                                                       │
+│  按钮 button.ha_data_store_daily_summary                     │
+│  服务 ha_data_store.generate_daily_summary(可选 date)        │
+└───────────────────────────────┬──────────────────────────────┘
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 聚合层 build_daily_summary_sync()                            │
+│  查今日数据（datetime LIKE 'yyyy-mm-dd%'）                   │
+│  环境env_* / 设备device_history / 扫地vacuum_history          │
+│  健康health_records / 小爱xiaoai_conversations               │
+│  + 异常提醒(高温/低温/运行>6h/用电环比>20%)                    │
+└───────────────────────────────┬──────────────────────────────┘
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 渲染层 render_summary()                                      │
+│  精简中文段落（为 0 的项整段跳过）                            │
+└───────────────────────────────┬──────────────────────────────┘
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 输出层 sensor.today_family_status                            │
+│  状态值=一段话；attributes={summary, sections, overall,      │
+│          alerts, date, generated_at}                         │
+│  async_trigger_refresh() 主动刷新（无30s轮询）                │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**核心 SQL：**
+- 环境：`SELECT value, room, datetime FROM env_temperature WHERE datetime LIKE '2026-08-21%'`
+- 设备（今日，含单台用电）：`SELECT entity_id, name, duration, energy_consumed, on_power, now_kwh FROM device_history WHERE on_time LIKE '2026-08-21%'`
+  - 单台用电（kWh）：已关闭直接用 `energy_consumed`；正在运行（`energy_consumed` 空且 `now_kwh` 非空）用 `now_kwh - on_power`
+- 家庭总用电（今日，kWh）：`SELECT entity_id, datetime, value FROM env_power WHERE datetime LIKE '2026-08-21%'` —— `value` 为**当日自增**读数，按 `entity_id` 各取**最后一条**（当日累计 = 当日消耗）
+- 家庭总用电（昨日，环比基准）：同上取 `'2026-08-20%'` 最后一条
+  - 用电环比：`(今日总用电 - 昨日用电) / 昨日用电 × 100%`
+- 扫地机：`SELECT DISTINCT datetime FROM vacuum_history WHERE datetime LIKE '2026-08-21%'`
+- 健康记录：`SELECT name FROM health_records WHERE date_time LIKE '2026-08-21%'`
+- 小爱对话：`SELECT conv_time FROM xiaoai_conversations WHERE conv_time LIKE '2026-08-21%'`
+- 人在/门：`SELECT id, name, room, on_time, off_time FROM device_history WHERE name IN ('人在','入户门')` —— 人在：`on_time` 非空且 `off_time` 空=该房间有人；入户门：最新一条（id 最大）`off_time` 空=门开，否则门关
+
+> 说明：家庭总用电取自 `env_power`（电表当日自增读数，最后一条即当日用电，**不做加法累加**）；`device_history.energy_consumed` 的单位为 **kWh**，仅用于单台设备明细，不参与总用电求和。
 
 ### 1. 设备类数据采集
 

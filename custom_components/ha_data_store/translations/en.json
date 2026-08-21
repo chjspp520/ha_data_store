@@ -121,6 +121,14 @@
       },
       "reported_entities_health": {
         "name": "Frontend Card Entities Health"
+      },
+      "today_family_status": {
+        "name": "Today Family Status"
+      }
+    },
+    "button": {
+      "daily_summary_trigger": {
+        "name": "Generate Today Family Status"
       }
     }
   }
