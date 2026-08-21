@@ -10,6 +10,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [功能详解](#功能详解)
+  - [今日家庭状态总结](#0-今日家庭状态总结)
   - [设备类数据采集](#1-设备类数据采集)
   - [传感器类数据采集](#2-传感器类数据采集)
   - [属性提取](#3-属性提取)
@@ -19,6 +20,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
   - [API源 → 实体](#7-api源--实体)
   - [虚拟设备](#8-虚拟设备)
   - [实体导出为JSON](#9-实体导出为json)
+  - [打印机数据采集](#10-打印机数据采集)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -29,6 +31,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 - [安全架构](#安全架构)
 - [数据库表结构](#数据库表结构)
 - [常见问题](#常见问题)
+- [更新日志](#更新日志)
 
 ---
 
@@ -43,6 +46,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 🩺 **健康数据** | 存储血压、体温、身高、体重等健康记录，支持按人员查询 |
 | 🔗 **设备桥接** | 通过 WebSocket 连接远程 HA，将远程实体的状态和控制在本地无缝映射（开关/灯光/气候/窗帘/风扇/门锁/数值/选择/传感器/二进制传感器） |
 | 🖥️ **虚拟设备** | 动态创建自定义实体，支持多种设备类型和自定义属性 |
+| 🖨️ **打印机数据采集** | 采集打印机统计数据与当日作业明细，支持多台、配置管理、数据查询与系统监控 |
 | 📁 **文件源 → 实体** | 监听本地 JSON 文件变化，自动将数据映射为 HA 实体 |
 | 🌐 **API源 → 实体** | 定时请求外部 HTTP API，将 JSON 响应解析并映射为 HA 实体 |
 | 📄 **实体→ JSON** | 将 HA 实体状态实时导出为 JSON 文件，供外部系统消费 |
@@ -53,6 +57,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 📋 **内置数据库浏览器** | 管理页面直接浏览、编辑数据库，无需 SQL 工具 |
 | 🔗 **自定义路由** | 通过 GUI 或 API 定义自定义 HTTP 路由，绑定任意 SQL 查询 |
 | 🗂️ **统一泛域名动态路由** | 万能路由 `/api/ha_data_store/custom/{tail}` 运行时查库执行任意自定义 SQL |
+| 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发 |
 
 ---
 
@@ -61,18 +66,23 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 ### 方式一：通过 HACS 安装（推荐）
 
 1. 确保已安装 [HACS](https://hacs.xyz/)
-2. 在 HACS 的「集成」页面中，点击右上角的「⋮」按钮，选择「自定义存储库」
-3. 输入以下信息：
-    存储库: https://github.com/chjspp520/ha_data_store   
-    类别: 集成   
-4. 点击「添加」。
-5. 在 HACS 的「集成」页面中搜索 ha_data_store，然后点击「下载」。
-6. 下载完成后，重启 Home Assistant。
+2. 将本仓库添加为自定义仓库
+3. 搜索 "HA数据统一存储系统" 并安装
+4. 重启 Home Assistant
 
 ### 方式二：手动安装
 
-1. 将 `ha_data_store` 文件夹复制到 Home Assistant 的 `custom_components` 目录：
-2. 重启 Home Assistant。
+将 `ha_data_store` 文件夹复制到 Home Assistant 的 `custom_components` 目录：
+
+```bash
+# Linux / macOS
+cp -r ha_data_store /path/to/config/custom_components/
+
+# Windows
+# 将 ha_data_store 文件夹复制到 %CONFIG_DIR%/custom_components/
+```
+
+重启 Home Assistant。
 
 ---
 
@@ -110,6 +120,92 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 ---
 
 ## 功能详解
+
+### 0. 今日家庭状态总结
+
+基于数据库各历史表，聚合**今日**家庭事实，渲染为精简中文段落（为 0 的项自动跳过）。
+
+**新增实体：**
+| 实体 | 类型 | 说明 |
+|------|------|------|
+| `sensor.today_family_status` | sensor | **状态值**=极简一句（家中有人/无人 + 开着几盏灯 + 入户门状态及时长，≤255字符）；`attributes.summary`=完整段落；`attributes.sections`=完整结构化分节；`attributes.overall`=normal/warning；`attributes.alerts`=异常提醒列表；`attributes.alert_text`=提醒文字；`attributes.offline`=离线设备数 |
+| `button.ha_data_store_daily_summary` | button | 仪表盘放置按钮卡片，点击立即触发分析 |
+
+**新增服务：** `ha_data_store.generate_daily_summary`
+- 参数 `date`（可选，默认今天，格式 `yyyy-mm-dd`）
+- 供自动化 / Node-RED 按需调用
+
+**自动刷新：**
+- HA 启动后 **1 分钟** 自动生成一次
+- 之后每 **30 分钟**（整 30 分钟，即 00 分/30 分）自动更新
+- 也可手动按钮 / 服务触发
+
+**聚合维度与提醒阈值：**
+| 节 | 数据源 | 内容 |
+|----|--------|------|
+| 环境 | env_temperature/humidity/pm25/co2 | 今日最高/最低/平均，房间温差≥2°C 时补充房间明细 |
+| 设备 | device_history | 共 N 台/总时长 + 运行最久亮点 + **用电 TOP3 + 开关频次 TOP3**（完整逐台明细在 sections） |
+| 用电 | env_power | 当日自增读数（最后一条 = 今日总用电，kWh）+ 昨日用电 + 环比 |
+| 家庭事件 | vacuum_history / health_records / xiaoai_conversations | 扫地机次数、健康记录条数、小爱对话条数及时段 |
+| 人在/门 | device_history（name=人在/入户门） | on_time 非空且 off_time 空=该房间有人/门开；否则家中无人/门关 |
+| 灯光 | device_history（name 含"灯"） | 每盏灯取最新一条，on_time 非空且 off_time 空=该灯开着，统计"开着 x 盏灯" |
+| 离线实体 | report_entities + 实时 states | 三态判定，unavailable 算离线、unknown 不算；有离线时 summary 末尾显示"离线设备 x 台" |
+
+**字段说明：**
+- `status_value`：极简状态值（`家中有人（客厅）、开着 5 盏灯、入户门开1小时8分钟`）
+- `summary`：完整段落（不含提醒，含"离线设备 x 台"）
+- `alert_text` / `alerts`：异常提醒（高温/运行超时/用电环比）
+- `sections.lights`：开灯房间去重（`开着 6 盏灯（主卧、儿童房、客厅等 5 个房间）`）
+- `sections.devices.times_top`：开关频次 TOP（`卫生间浴霸灯44 次`）
+
+**异常提醒（阈值写死）：** 高温 ≥30°C、低温 ≤5°C、单台连续运行 >6 小时、用电环比波动 >20%；存在任一提醒时 `overall=warning`，提醒文字放 `alert_text` 字段（`alerts` 为列表）；`summary` 段落末尾单独显示"离线设备 x 台"（离线不进 alerts）。
+
+**工作原理：**
+
+```
+用户触发 ──► 聚合(查库) ──► 渲染(拼段落) ──► 刷新传感器(状态值 + attributes)
+
+┌──────────────────────────────────────────────────────────────┐
+│ 触发层                                                       │
+│  按钮 button.ha_data_store_daily_summary                     │
+│  服务 ha_data_store.generate_daily_summary(可选 date)        │
+└───────────────────────────────┬──────────────────────────────┘
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 聚合层 build_daily_summary_sync()                            │
+│  查今日数据（datetime LIKE 'yyyy-mm-dd%'）                   │
+│  环境env_* / 设备device_history / 扫地vacuum_history          │
+│  健康health_records / 小爱xiaoai_conversations               │
+│  + 异常提醒(高温/低温/运行>6h/用电环比>20%)                    │
+└───────────────────────────────┬──────────────────────────────┘
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 渲染层 render_summary()                                      │
+│  精简中文段落（为 0 的项整段跳过）                            │
+└───────────────────────────────┬──────────────────────────────┘
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 输出层 sensor.today_family_status                            │
+│  状态值=极简一句；attributes={summary, sections, overall,     │
+│          alerts, alert_text, status_value, offline,          │
+│          presence, lights, date, generated_at}               │
+│  自动刷新：启动后1分钟 + 每30分钟（整30分钟）                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**核心 SQL：**
+- 环境：`SELECT value, room, datetime FROM env_temperature WHERE datetime LIKE '2026-08-21%'`
+- 设备（今日，含单台用电）：`SELECT entity_id, name, duration, energy_consumed, on_power, now_kwh FROM device_history WHERE on_time LIKE '2026-08-21%'`
+  - 单台用电（kWh）：已关闭直接用 `energy_consumed`；正在运行（`energy_consumed` 空且 `now_kwh` 非空）用 `now_kwh - on_power`
+- 家庭总用电（今日，kWh）：`SELECT entity_id, datetime, value FROM env_power WHERE datetime LIKE '2026-08-21%'` —— `value` 为**当日自增**读数，按 `entity_id` 各取**最后一条**（当日累计 = 当日消耗）
+- 家庭总用电（昨日，环比基准）：同上取 `'2026-08-20%'` 最后一条
+  - 用电环比：`(今日总用电 - 昨日用电) / 昨日用电 × 100%`
+- 扫地机：`SELECT DISTINCT datetime FROM vacuum_history WHERE datetime LIKE '2026-08-21%'`
+- 健康记录：`SELECT name FROM health_records WHERE date_time LIKE '2026-08-21%'`
+- 小爱对话：`SELECT conv_time FROM xiaoai_conversations WHERE conv_time LIKE '2026-08-21%'`
+- 人在/门：`SELECT id, name, room, on_time, off_time FROM device_history WHERE name IN ('人在','入户门')` —— 人在：`on_time` 非空且 `off_time` 空=该房间有人；入户门：最新一条（id 最大）`off_time` 空=门开，否则门关
+
+> 说明：家庭总用电取自 `env_power`（电表当日自增读数，最后一条即当日用电，**不做加法累加**）；`device_history.energy_consumed` 的单位为 **kWh**，仅用于单台设备明细，不参与总用电求和。
 
 ### 1. 设备类数据采集
 
@@ -380,6 +476,49 @@ POST /api/ha_data_store/export
 
 ---
 
+### 10. 打印机数据采集
+
+采集打印机统计数据与当日作业明细，支持多台打印机、配置管理、数据查询与系统监控。
+
+**配置两个实体（通过"系统配置 → 打印机配置"）：**
+
+| 实体类型 | 数据来源 | 说明 |
+|---|---|---|
+| **统计数据实体** | `attributes.daylist` | 每日汇总（print/scan/copy/fax/jam_printer）+ 墨量（ink_*） |
+| **当日详细数据实体** | `attributes` 各类型明细数组 | 当日各类型作业明细 |
+
+**采集时机：**
+- 以实体**状态值变化**判定触发（统计实体 state 为五项累计合计、详细实体为当日作业总数，每次打印都变化）
+- 当日多次打印时，每次变化都会覆盖更新当日记录（汇总 + 墨量 + 明细），保证始终为最新
+- 保存配置时主动采集一次当前数据
+
+**数据存储（单张主记录表 `printer_daily`，每天一条）：**
+- `name`：打印机名称（用户设置）
+- `day`：日期
+- `print/scan/copy/fax/jam_printer`：当日汇总计数
+- `ink_black/ink_cyan/ink_magenta/ink_yellow`：墨量
+- `printer_jobs`：当日作业明细（JSON，含各类型作业数组 + total + date）
+
+**配置接口：**
+```bash
+GET    /api/ha_data_store/printer/configs                     # 配置列表
+POST   /api/ha_data_store/printer/configs                     # 新增/修改配置
+DELETE /api/ha_data_store/printer/configs?id=xxx              # 删除配置
+POST   /api/ha_data_store/printer/configs/recollect?name=xxx  # 主动重采
+```
+
+**数据查询（详见下方"数据查询接口"的 `printer_*` 类型）：**
+| 查询类型 | 功能 |
+|---|---|
+| `printer_years` | 打印机有哪些年数据 |
+| `printer_month_dates` | 指定月哪些日期有数据 |
+| `printer_total` | 打印机合计数据 |
+| `printer_monthly_total` | 按年月统计合计数据 |
+| `printer_daily_range` | 指定日期区间数据 |
+| `printer_detail` | 指定日期详细数据 |
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -431,6 +570,14 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `health_history` | 健康数据历史 | name(可选) |
 | `health_latest` | 最新健康数据 | name(可选) |
 | `entity_data_dates` | 实体有数据的所有日期 | entity_id |
+| `room_data_dates` | 房间指定月有数据日期（按 device/environment/attribute 多选查询） | room, month, category |
+| `xiaoai_history` | 小爱对话记录 | entity_id |
+| `printer_years` | 打印机有哪些年数据 | stats_entity |
+| `printer_month_dates` | 打印机指定月哪些日期有数据 | stats_entity, month |
+| `printer_total` | 打印机合计数据 | stats_entity |
+| `printer_monthly_total` | 打印机按年月统计合计数据 | stats_entity |
+| `printer_daily_range` | 打印机指定日期区间数据 | stats_entity, start/end |
+| `printer_detail` | 打印机指定日期详细数据 | stats_entity, date |
 
 **查询示例：**
 
@@ -446,6 +593,9 @@ curl "http://ha:8123/api/ha_data_store/query?type=rooms_daily&date=2024-01-15&ke
 
 # 查询月排行榜
 curl "http://ha:8123/api/ha_data_store/query?type=ranking_monthly&month=2024-01&detail=true"
+
+# 查询客厅 2025-01 哪些日期有数据
+curl "http://ha:8123/api/ha_data_store/query?type=room_data_dates&room=客厅&month=2025-01&category=device&key=your_api_key"
 ```
 
 ### 配置管理接口
@@ -475,6 +625,26 @@ GET  /api/ha_data_store/routes         → 获取所有自定义路由
 POST /api/ha_data_store/routes         → 新增/修改自定义路由
 GET  /api/ha_data_store/attr_types     → 获取所有属性类型定义
 GET  /api/ha_data_store/entity_state?entity_id=xxx → 获取实体状态+属性树
+```
+
+**打印机配置接口：**
+
+```
+GET    /api/ha_data_store/printer/configs                      → 配置列表
+POST   /api/ha_data_store/printer/configs                      → 新增/修改配置
+DELETE /api/ha_data_store/printer/configs?id=xxx               → 删除配置
+POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采指定打印机
+```
+
+**打印机配置 POST 请求体示例：**
+
+```json
+{
+  "name": "HP Printer",
+  "stats_entity": "sensor.hp_printer_yong_liang_tong_ji",
+  "detail_entity": "sensor.hp_printer_jin_ri_zuo_ye",
+  "enabled": true
+}
 ```
 
 ### 管理接口（仅局域网）
@@ -561,6 +731,7 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `switch.ha_data_store_api` | API 访问 | OFF 时所有 API 请求返回 403 |
 | `switch.ha_data_store_db_browse` | 数据库浏览器 | OFF 时禁止查看数据内容 |
 | `switch.ha_data_store_db_modify` | 数据库修改 | OFF 时禁止写入操作 |
+| `switch.ha_data_store_remote_access` | 远程访问 | OFF 时仅允许同网段访问数据库浏览器；ON 时允许任意网段访问（默认关闭，重启后自动重置为关闭） |
 
 ---
 
@@ -571,7 +742,7 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
     │                         │
     │  query?key=xxx          │  db_viewer（管理页）
     │  ✅ 允许               │  ⚠️ 同网段+密码
-    │                         │
+    │                         │  （远程访问开关可放行跨网段）
     │  db_viewer              │  密钥管理 → 需密码
     │  ❌ 拒绝                │  修改密码 → 需旧密码
 ```
@@ -646,6 +817,8 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `vacuum_history` | 扫地机器人轨迹 |
 | `health_records` | 健康记录（血压/体温/体重等） |
 | `virtual_devices` | 虚拟设备持久化 |
+| `printer_configs` | 打印机配置（支持多台，name 唯一） |
+| `printer_daily` | 打印机每日记录（汇总 + 墨量 + 当日明细 JSON） |
 
 ---
 
@@ -737,3 +910,65 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 > **注意**：本集成是一个综合性数据平台，功能丰富但配置复杂度较高。建议先配置设备类和传感器类采集核心数据，再逐步探索属性提取、桥接等高级功能。
+
+---
+
+## 更新日志
+
+### v2.6.0 打印机数据采集
+
+#### 新增功能
+
+- **打印机数据采集** — 新增独立模块 `printer.py`，采集打印机统计数据与当日作业明细
+  - 支持多台打印机，通过"系统配置 → 打印机配置"添加
+  - 采集触发：以实体**状态值变化**判断（统计实体 state 为五项累计合计、详细实体为当日作业总数）
+  - 当日多次打印时，每次变化都覆盖更新当日记录（汇总 + 墨量 + 明细），保证始终为最新
+  - 保存配置时主动采集一次当前数据
+
+- **数据查询** — API 工具新增"打印数据查询"分组，提供 6 种查询：
+  - `printer_years` 有哪些年数据 / `printer_month_dates` 指定月日期 / `printer_total` 合计
+  - `printer_monthly_total` 按年月统计合计 / `printer_daily_range` 日期区间 / `printer_detail` 指定日明细
+
+- **系统监控** — 新增"🖨️ 打印机监控"统计卡片与折叠区块，展示每台打印机状态、墨量、当日/累计数据
+
+#### 涉及文件
+
+| 文件 | 说明 |
+|------|------|
+| `printer.py` | 新增：建表、采集、配置 CRUD、数据查询、主动重采 |
+| `__init__.py` | 采集接入、实体白名单、API 注册、打印机独立采集分支 |
+| `http_api.py` | 万能查询 `printer_*` 分发、`/monitor` 返回打印机监控数据 |
+| `db_viewer.html` | 系统配置打印机子页面、API 打印数据查询分组、系统监控打印机卡片与区块 |
+| `const.py` | 版本号更新为 `2.6.0` |
+| `manifest.json` | 版本号更新为 `2.6.0` |
+
+### v2.0.1
+
+#### 新增功能
+
+- **远程访问开关** — 数据库浏览器新增 `switch.ha_data_store_remote_access` 开关，控制是否允许非同网段（跨网段/外网）客户端访问管理页面
+  - 默认关闭状态（仅允许局域网 /24 同网段访问）
+  - 重启 Home Assistant 后自动重置为关闭状态，不保留上次开关状态
+  - 开启后仍需输入管理员密码登录，不影响现有安全机制
+
+#### Bug 修复
+
+- **移动端 403 下载问题** — 修复数据库浏览器在非同网段访问被拒时，移动端浏览器误触发下载 0kb 文件的问题（响应缺少 content-type 导致浏览器无法正确识别内容）
+
+#### 涉及文件
+
+| 文件 | 说明 |
+|------|------|
+| `switch.py` | 新增 `HaDataStoreRemoteAccessSwitch` 实体类 |
+| `__init__.py` | 初始化 `allow_remote_access = False` |
+| `http_api.py` | 同网段检查逻辑增加开关控制；403 响应补全 content-type |
+| `translations/zh-Hans.json` | 中文翻译：远程访问 |
+| `translations/en.json` | 英文翻译：Remote Access |
+| `strings.json` | 默认语言翻译 |
+
+#### 安全建议
+
+> 此开关仅影响数据库浏览器页面（db_viewer），API 接口不受影响。
+>
+> - 建议使用完毕后及时手动关闭
+> - 公网暴露场景下建议配合反向代理 + HTTPS + 强密码使用
