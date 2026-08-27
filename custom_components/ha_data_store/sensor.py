@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import json, logging, os, sqlite3
+import json, logging, os, sqlite3, time
 from datetime import timedelta
 from typing import Any
 
@@ -16,7 +16,7 @@ from homeassistant.helpers.event import async_track_time_interval, async_track_u
 
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
-    CATEGORY_ATTRIBUTE)
+    TABLE_USER_ACTIONS, CATEGORY_ATTRIBUTE)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 from .daily_summary import build_daily_summary_sync
 
@@ -94,6 +94,144 @@ class MonitoredEntitiesSensor(SensorEntity):
         self._attr_extra_state_attributes = data; self.async_write_ha_state()
 
 
+class UserActionsSensor(SensorEntity):
+    """前端操作记录统计传感器（常用设备分析）。
+
+    状态值 = 近 N 天有操作的不同设备面板数（按 action_snapshot 聚合）
+    状态属性 = 近 N 天按 action_snapshot 聚合的设备列表（含完整 tapAction 快照，
+              前端可直接据此还原设备控制面板），按使用次数降序。
+    """
+
+    _attr_has_entity_name = False
+    _attr_name = "近期使用设备"
+    _attr_icon = "mdi:chart-histogram"
+    _attr_native_unit_of_measurement = "个"
+
+    # 统计窗口（天），可整体调整
+    WINDOW_DAYS = 30
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_user_actions"
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+
+    def _load_data(self):
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        if not db_path:
+            return {"window_days": self.WINDOW_DAYS, "total_actions": 0, "total_devices": 0, "devices": []}
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                cutoff = int(time.time() * 1000) - self.WINDOW_DAYS * 24 * 3600 * 1000
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT user_name, entity_id, action, name, icon, room_name, "
+                    f"service, card_type, other, state_log, ts, ts_text, action_snapshot, config_id, device_type FROM {TABLE_USER_ACTIONS} "
+                    f"WHERE ts >= ? ORDER BY ts ASC", (cutoff,)
+                ).fetchall()]
+            finally:
+                conn.close()
+        except Exception as e:
+            _LOGGER.error("[HDS] user_actions 传感器加载失败: %s", e)
+            return {"window_days": self.WINDOW_DAYS, "total_actions": 0, "total_devices": 0, "devices": [], "error": str(e)}
+
+        # 按 action_snapshot 归一化聚合（同一设备面板多实体组合归为一条）
+        groups = {}
+        for r in rows:
+            snap = r.get("action_snapshot") or ""
+            key = self._normalize_snapshot_key(snap, r.get("entity_id"))
+            g = groups.get(key)
+            if g is None:
+                # config_id：优先取库中独立列，其次从 action_snapshot JSON 解析
+                config_id = (r.get("config_id") or "").strip()
+                if not config_id and snap:
+                    try:
+                        snap_obj = json.loads(snap)
+                        if isinstance(snap_obj, dict) and isinstance(snap_obj.get("config_id"), str):
+                            config_id = snap_obj["config_id"].strip()
+                    except Exception:
+                        pass
+                g = {
+                    "entity_id": r.get("entity_id") or "",
+                    "action": r.get("action") or "",
+                    "name": r.get("name") or "",
+                    "icon": r.get("icon") or "",
+                    "room_name": r.get("room_name") or "",
+                    "service": r.get("service") or "",
+                    "user_name": r.get("user_name") or "",
+                    "config_id": config_id,
+                    "device_type": (r.get("device_type") or "").strip(),
+                    "count": 0,
+                    "last_used": 0,
+                    "state_log": "",
+                    "action_snapshot": snap,
+                }
+                groups[key] = g
+            g["count"] += 1
+            # 记录最近一次的状态变化和用户（rows 按 ts 升序，最后覆盖的即最新）
+            cur_state = r.get("state_log") or ""
+            if cur_state:
+                g["state_log"] = cur_state
+            cur_user = r.get("user_name") or ""
+            if cur_user:
+                g["user_name"] = cur_user
+            if (r.get("ts") or 0) > g["last_used"]:
+                g["last_used"] = r.get("ts") or 0
+
+        devices = list(groups.values())
+        for d in devices:
+            # 增加人类可读的最近使用时间（本地时区），保留原始时间戳供程序使用
+            d["last_used_text"] = self._format_ts(d.get("last_used") or 0)
+        devices.sort(key=lambda d: (d["count"], d["last_used"]), reverse=True)
+        return {
+            "window_days": self.WINDOW_DAYS,
+            "total_actions": len(rows),
+            "total_devices": len(devices),
+            "devices": devices,
+        }
+
+    @staticmethod
+    def _format_ts(ts_ms):
+        """把毫秒时间戳格式化为本地可读时间字符串；非法值返回空串。"""
+        if not ts_ms:
+            return ""
+        try:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_ms / 1000.0))
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _normalize_snapshot_key(snapshot_json, entity_id):
+        """把 action_snapshot 归一化为稳定的聚合键。
+
+        策略：能解析为 JSON 对象时，剔除运行时动态字段（ts 等），按键名排序后
+        JSON 序列化作为键；解析失败则回退用 entity_id 作键（保证不塌缩）。
+        """
+        if not snapshot_json:
+            return f"eid:{entity_id}"
+        try:
+            obj = json.loads(snapshot_json)
+            if isinstance(obj, dict):
+                # 剔除明显属于运行时动态/实例相关的字段
+                for k in ("ts", "timestamp"):
+                    obj.pop(k, None)
+                try:
+                    return json.dumps(obj, sort_keys=True, ensure_ascii=False)
+                except Exception:
+                    return f"eid:{entity_id}"
+            return snapshot_json
+        except Exception:
+            return f"eid:{entity_id}"
+
+    async def _async_refresh(self, now=None):
+        data = await self._hass.async_add_executor_job(self._load_data)
+        self._attr_native_value = data.get("total_devices", 0)
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
+
+
 class ReportedEntitiesHealthSensor(SensorEntity):
     """前端卡片上报实体的健康监控传感器。
 
@@ -124,7 +262,7 @@ class ReportedEntitiesHealthSensor(SensorEntity):
             conn.row_factory = sqlite3.Row
             try:
                 rows = [dict(r) for r in conn.execute(
-                    f"SELECT entity_id, name, icon, room_name FROM {TABLE_REPORT_ENTITIES} "
+                    f"SELECT entity_id, name, icon, room_name, rooms FROM {TABLE_REPORT_ENTITIES} "
                     f"ORDER BY room_name, entity_id"
                 ).fetchall()]
             finally:
@@ -156,6 +294,7 @@ class ReportedEntitiesHealthSensor(SensorEntity):
                     "name": r["name"],
                     "icon": r["icon"],
                     "room_name": r["room_name"],
+                    "rooms": r.get("rooms") or "",
                     "status": status,
                     "state": state_val[:30],
                 })
@@ -247,9 +386,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     sensor = MonitoredEntitiesSensor(hass, device_info)
     report_sensor = ReportedEntitiesHealthSensor(hass, device_info)
     summary_sensor = TodayFamilyStatusSensor(hass, device_info)
+    user_actions_sensor = UserActionsSensor(hass, device_info)
     # 存引用，供按钮/服务触发按需刷新
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
-    entities = [sensor, report_sensor, summary_sensor]
+    hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
+    entities = [sensor, report_sensor, summary_sensor, user_actions_sensor]
 
     bdi = get_bridge_device_info(entry.entry_id)
     try:
@@ -269,6 +410,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(entities)
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, report_sensor._async_refresh, timedelta(seconds=30))
+    async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
 
     # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 分钟（整 30 分钟）更新 ──
     async def _delayed_first_refresh():

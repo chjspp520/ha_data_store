@@ -24,6 +24,7 @@ TABLE_BRIDGE_CONNECTIONS = "bridge_connections"
 TABLE_BRIDGE_ENTITIES = "bridge_entities"
 TABLE_HEALTH_RECORDS = "health_records"
 TABLE_REPORT_ENTITIES = "report_entities"
+TABLE_USER_ACTIONS = "user_actions"
 TABLE_MEDIA_PLAYLISTS = "media_playlists"
 TABLE_MEDIA_SONGS = "media_songs"
 TABLE_MEDIA_QUEUE = "media_queue"
@@ -97,4 +98,4 @@ PENDING_JSON_FILENAME = "ha_data_store_pending.json"
 SHUTDOWN_THRESHOLD_SECONDS = 1800
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "2.10.0"
+VERSION = "2.13.0"

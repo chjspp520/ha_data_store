@@ -46,6 +46,7 @@ from .const import (
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
     TABLE_REPORT_ENTITIES,
+    TABLE_USER_ACTIONS,
     TABLE_MEDIA_PLAYLISTS,
     TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
@@ -447,21 +448,28 @@ def _init_database(db_path: str) -> None:
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_HEALTH_RECORDS} (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                date_time TEXT NOT NULL DEFAULT '',
-                name      TEXT NOT NULL DEFAULT '',
-                dp        REAL,
-                sp        REAL,
-                pr        REAL,
-                height    REAL,
-                weight    REAL,
-                bmi       REAL,
-                temp      REAL,
-                type      TEXT NOT NULL DEFAULT '',
-                remark    TEXT NOT NULL DEFAULT ''
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_time   TEXT NOT NULL DEFAULT '',
+                name        TEXT NOT NULL DEFAULT '',
+                dp          REAL,
+                sp          REAL,
+                pr          REAL,
+                height      REAL,
+                weight      REAL,
+                bmi         REAL,
+                temp        REAL,
+                type        TEXT NOT NULL DEFAULT '',
+                remark      TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT ''
             );
             """
         )
+        # 迁移：旧表无 description 列时补充（备注 remark 已存在）
+        _has_desc_col = conn.execute(
+            f"SELECT COUNT(*) FROM pragma_table_info('{TABLE_HEALTH_RECORDS}') WHERE name = 'description'"
+        ).fetchone()[0]
+        if _has_desc_col == 0:
+            conn.execute(f"ALTER TABLE {TABLE_HEALTH_RECORDS} ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_health_name_time ON {TABLE_HEALTH_RECORDS} (name, date_time);"
         )
@@ -482,15 +490,65 @@ def _init_database(db_path: str) -> None:
                 icon            TEXT NOT NULL DEFAULT '',
                 room_name       TEXT NOT NULL DEFAULT '',
                 source          TEXT NOT NULL DEFAULT 'room_elves',
+                rooms           TEXT NOT NULL DEFAULT '',
                 last_report_time TEXT NOT NULL DEFAULT ''
             );
             """
         )
+        # 迁移：为已存在的旧表补充 rooms 列（前端去重后合并的"使用房间"列表，多房间逗号连接）
+        _has_rooms_col = conn.execute(
+            f"SELECT COUNT(*) FROM pragma_table_info('{TABLE_REPORT_ENTITIES}') WHERE name = 'rooms'"
+        ).fetchone()[0]
+        if _has_rooms_col == 0:
+            conn.execute(
+                f"ALTER TABLE {TABLE_REPORT_ENTITIES} ADD COLUMN rooms TEXT NOT NULL DEFAULT ''"
+            )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_report_entities_room ON {TABLE_REPORT_ENTITIES} (room_name);"
         )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_report_entities_eid ON {TABLE_REPORT_ENTITIES} (entity_id);"
+        )
+        # 13.5) 用户操作记录表（前端埋点上报，供分析使用习惯 + 还原设备面板）
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_USER_ACTIONS} (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_name       TEXT NOT NULL DEFAULT '',
+                entity_id       TEXT NOT NULL DEFAULT '',
+                action          TEXT NOT NULL DEFAULT '',
+                name            TEXT NOT NULL DEFAULT '',
+                icon            TEXT NOT NULL DEFAULT '',
+                room_name       TEXT NOT NULL DEFAULT '',
+                source          TEXT NOT NULL DEFAULT '',
+                service         TEXT NOT NULL DEFAULT '',
+                card_type       TEXT NOT NULL DEFAULT '',
+                other           TEXT NOT NULL DEFAULT '',
+                state_log       TEXT NOT NULL DEFAULT '',
+                ts              INTEGER NOT NULL DEFAULT 0,
+                ts_text         TEXT NOT NULL DEFAULT '',
+                action_snapshot TEXT NOT NULL DEFAULT '',
+                config_id       TEXT NOT NULL DEFAULT '',
+                device_type     TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        # 迁移：旧表可能缺少部分列（历史版本创建），此处逐个补列
+        _ALTER_COLS = ("ts_text", "card_type", "other", "state_log", "config_id", "device_type")
+        try:
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_USER_ACTIONS})").fetchall()}
+            for col in _ALTER_COLS:
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE {TABLE_USER_ACTIONS} ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+                    _LOGGER.info("已为 %s 表补充 %s 列", TABLE_USER_ACTIONS, col)
+        except Exception as exc:
+            _LOGGER.warning("迁移 %s 表列失败: %s", TABLE_USER_ACTIONS, exc)
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_user_actions_ts ON {TABLE_USER_ACTIONS} (ts);"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_user_actions_eid ON {TABLE_USER_ACTIONS} (entity_id);"
         )
         # 14) 媒体播放列表表
         conn.execute(
@@ -3911,6 +3969,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         MediaNowPlayingView,
         TableColumnsView,
         ReportEntitiesView,
+        ActionLogView,
     )
     hass.http.register_view(EntityConfigView(db_path))
     hass.http.register_view(EntityConfigListView(db_path))
@@ -3959,6 +4018,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(MediaNowPlayingView(db_path))
     hass.http.register_view(TableColumnsView(db_path))
     hass.http.register_view(ReportEntitiesView(db_path))
+    hass.http.register_view(ActionLogView(db_path))
 
     # 小爱对话 API（独立模块）
     from .xiaoai import register_api_views as _xiaoai_register_api_views

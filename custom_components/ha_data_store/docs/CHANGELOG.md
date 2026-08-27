@@ -1,33 +1,135 @@
 # 更新日志
 
+## 2026-08-26 — v2.13.0 操作记录新增设备类型 device_type
+
+### 🎯 操作记录新增设备类型字段
+- **`user_actions` 表新增 `device_type` 字段**：记录操作所属设备类型（如 light/socket/ac 等），**值由前端上报**（前端后续提交）。
+- **写入**：`ActionLogView.post` 接收前端 `item.device_type` 存入独立列，无则空串。
+- **自动迁移**：旧表缺 `device_type` 列时启动自动 `ALTER TABLE ADD COLUMN`。
+
+### 📊 近期使用设备传感器新增 device_type
+- `sensor.近期使用设备` 的 `attributes.devices[]` 每项新增独立 **`device_type`** 字段。
+- `GET /api/ha_data_store/action_log` 返回结果也包含 `device_type`。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.12.0 → 2.13.0 |
+| `__init__.py` | 建 `user_actions` 表加 `device_type` 列 + 迁移补列 |
+| `http_api.py` | `ActionLogView` POST 写入 device_type、GET 返回 device_type |
+| `sensor.py` | `UserActionsSensor` 查询含 device_type + devices 输出独立 device_type |
+| `manifest.json` | 版本 2.13.0 |
+
+---
+
+## 2026-08-26 — v2.12.0 用户操作记录新增弹窗 config_id
+
+### 🎯 操作记录支持弹窗 config_id（还原完整弹窗配置）
+- **`user_actions` 表新增 `config_id` 字段**：记录操作所属弹窗/选项卡/设备的 config_id（如 `diannao`、`shao_shui_hu`），用于定位并还原该操作的完整弹窗配置。
+- **写入来源**：`ActionLogView.post` 优先取前端显式上报的 `config_id`/`device_config_id` 字段，否则从 `action_snapshot` JSON 中解析 `config_id`（前端已将 config_id 注入 action_snapshot）。
+- **自动迁移**：旧表缺 `config_id` 列时启动自动 `ALTER TABLE ADD COLUMN`，不破坏存量数据。
+
+### 📊 近期使用设备传感器新增 config_id
+- `sensor.近期使用设备` 的 `attributes.devices[]` 每项新增独立 **`config_id`** 字段，便于直接识别该操作所属弹窗。
+- `GET /api/ha_data_store/action_log` 返回结果也包含 `config_id`。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.11.1 → 2.12.0 |
+| `__init__.py` | 建 `user_actions` 表加 `config_id` 列 + 迁移补列 |
+| `http_api.py` | `ActionLogView` POST 写入 config_id（含 action_snapshot 解析）、GET 返回 config_id |
+| `sensor.py` | `UserActionsSensor` 查询含 config_id + devices 输出独立 config_id |
+| `manifest.json` | 版本 2.12.0 |
+
+---
+
+## 2026-08-25 — v2.11.1 健康记录新增备注/说明字段
+
+### 🏥 健康记录表增加 2 个字段
+- **`health_records` 表**新增 `remark`（备注）、`description`（说明）两个字段：
+  - `remark`：备注（已有字段保留）
+  - `description`：说明（新增）
+- **自动迁移**：启动时检测旧表缺 `description` 列则 `ALTER TABLE ADD COLUMN`，历史数据 description 默认为空，不破坏存量
+- **API 显示**：`health_history` / `health_latest` 查询结果（`SELECT *`）自动包含 `remark` 与 `description`
+- **写入支持**：`POST /api/ha_data_store/health/add` 新增可选参数 `description`
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.11.0 → 2.11.1 |
+| `__init__.py` | 建表加 `description` 列 + 迁移补列 |
+| `http_api.py` | `HealthAddView` INSERT 加 `description` |
+| `manifest.json` | 版本 2.11.1 |
+
+---
+
+## 2026-08-24 — v2.11.0 用户操作记录与近期使用设备
+
+### 🎯 用户操作记录（前端埋点 → 后端存储）
+- **新增 `user_actions` 表**（追加式，不去重）：保存前端 room-elves-card 埋点上报的每次操作记录，字段含 `user_name / entity_id / action / name / icon / room_name / source / service / card_type / other / state_log / ts / ts_text / action_snapshot`。
+- **新增 `POST /api/ha_data_store/action_log`**：前端批量上报操作记录，写入成功后**实时刷新**近期使用设备 sensor。
+- **新增 `GET /api/ha_data_store/action_log?days=N`**：查询近 N 天原始操作记录（调试用）。
+- `action_snapshot`：完整 tap_action 快照（JSON），用于将来前端还原设备控制面板；`state_log`：操作前→操作后状态（如 `on→off`、`cool→heat`）；`ts_text`：人类可读时间；`user_name`：当前登录用户。
+
+### 📊 近期使用设备传感器
+- **新增 `sensor.近期使用设备`**（`sensor.ha_data_store_user_actions`）：
+  - **状态值** = 近 30 天有操作的不同设备面板数
+  - `attributes.devices` = 按 **action_snapshot 归一化聚合** 的设备列表（含完整 tapAction 快照可还原 + 使用次数 `count` + `last_used`/`last_used_text` + 最近一次 `state_log`），按使用次数降序
+  - 30 秒定时刷新 + 写入后实时刷新；统计窗口固定 30 天
+
+### 🧰 API 工具新增"用户动作查询组"
+内置数据库浏览器"API工具"页面新增 **🎯 用户动作查询** optgroup，支持 7 种查询：
+- `user_actions_daily`：指定日期操作记录（`date`）
+- `user_actions_range`：指定日期段操作记录（`start`/`end`）
+- `user_actions_month_dates`：指定月哪些日期有数据（`month`）
+- `user_actions_hour_dist`：数据点按小时分布（`entity_id` 可选，返回 00-23 各小时次数）
+- `user_actions_entity_summary`：实体操作次数排行
+- `user_actions_user_summary`：按用户汇总操作次数
+- `user_actions_entity_last_today`：指定实体当日最后一条记录（`entity_id` 必填）
+
+实体下拉支持自动填充可查询实体；表为空/加载失败时给出明确提示。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | 新增 `TABLE_USER_ACTIONS`；VERSION 2.10.0 → 2.11.0 |
+| `__init__.py` | 建 `user_actions` 表 + 迁移补列（ts_text/card_type/other/state_log）+ 注册 `ActionLogView` |
+| `http_api.py` | 新增 `ActionLogView`（POST/GET action_log）+ `_query_user_actions`（7 种子类型查询） |
+| `sensor.py` | 新增 `UserActionsSensor`（近期使用设备，30 天聚合 + 实时刷新） |
+| `db_viewer.html` | API 工具新增用户动作查询组 + 实体下拉自动填充 |
+| `manifest.json` | 版本 2.11.0 |
+
+---
+
 ## 2026-08-21 — v2.10.0 今日家庭状态总结
 
-### 🏠 今日家庭状态总结（按需生成）
+### 🏠 今日家庭状态总结（自动 + 手动触发）
 基于数据库历史表聚合今日事实，渲染为精简中文段落，为 0 的项自动跳过：
 
 - **新增传感器** `sensor.today_family_status`：
-  - 状态值 = 精简段落（人读）
-  - `attributes.summary` = 同一段落；`sections` = 完整结构化分节（environment/devices/vacuum/health/xiaoai，供自动化精确读取）；`overall` = normal | warning；`alerts` = 异常提醒列表
+  - **状态值** = 极简一句（家中有人/无人 + 开着几盏灯 + 入户门状态及时长，≤255字符）
+  - `attributes.summary` = 完整段落；`sections` = 完整结构化分节（environment/devices/power/vacuum/health/xiaoai/presence/lights/door）；`overall` = normal | warning；`alerts` = 异常提醒列表；`alert_text` = 提醒文字；`offline` = 离线设备数
 - **新增按钮** `button.ha_data_store_daily_summary`：仪表盘放置按钮卡片，点击立即触发分析
 - **新增服务** `ha_data_store.generate_daily_summary`（可选参数 `date`，默认今天，供自动化/NR 调用）
-- **自动刷新**：HA 启动后 1 分钟自动生成一次；之后每 30 分钟（整 30 分钟）自动更新
+- **自动刷新**：HA 启动后 1 分钟自动生成一次；之后每 30 分钟（整 30 分钟，即 00 分/30 分）自动更新
 
 ### 📊 聚合维度
 | 节 | 数据源 | 内容 |
 |----|--------|------|
 | 环境 | env_temperature/humidity/pm25/co2 | 今日最高/最低/平均 + 房间明细（温差≥2°C 时补充） |
-| 设备 | device_history | N 台/总时长 + 运行最久 1~3 台亮点；完整逐台明细进 sections（含单台用电 kWh） |
+| 设备 | device_history | N 台/总时长 + 运行最久亮点 + **用电 TOP3 + 开关频次 TOP3**（房间名+设备名）；完整逐台明细进 sections |
 | 用电 | env_power | 当日自增读数最后一条 = 今日总用电（kWh，非加法）+ 昨日 + 环比 |
 | 家庭事件 | vacuum_history / health_records / xiaoai_conversations | 扫地机次数、健康记录条数、小爱对话条数及时段 |
-| 人在/门 | device_history（name=人在/入户门） | on_time 非空且 off_time 空=该房间有人/门开；否则家中无人/门关 |
-| 离线实体 | report_entities + 实时 states | 三态判定，unavailable 算离线、unknown 不算；有离线时提醒"还有 x 台设备离线" |
+| 人在/门 | device_history（name=人在/入户门） | on_time 非空且 off_time 空=该房间有人/门开（显示开门时长）；否则家中无人/门关 |
+| 灯光 | device_history（name 含"灯"） | 每盏灯取最新一条，on_time 非空且 off_time 空=该灯开着，统计"开着 x 盏灯（房间）" |
+| 离线实体 | report_entities + 实时 states | 三态判定，unavailable 算离线、unknown 不算；有离线时 summary 末尾显示"离线设备 x 台" |
 
 ### ⚠️ 异常提醒（阈值写死）
 - 高温 ≥30°C、低温 ≤5°C
 - 单台连续运行 >6 小时
 - 用电环比波动 >20%
-- 有离线实体（report_entities 中 unavailable 的个数）
-- 存在任一提醒时 `overall=warning`，段落末尾追加"提醒：..."
+- 存在任一提醒时 `overall=warning`，提醒文字放 `alert_text` 字段（`alerts` 为列表）；`summary` 段落末尾单独显示"离线设备 x 台"（离线不进 alerts）
 
 ### 依赖文件
 | 文件 | 改动 |

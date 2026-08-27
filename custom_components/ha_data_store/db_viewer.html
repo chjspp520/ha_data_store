@@ -1035,6 +1035,15 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="media_song_lyrics">获取歌词</option>
           <option value="media_song_cover">获取封面</option>
         </optgroup>
+        <optgroup label="🎯 用户动作查询">
+          <option value="user_actions_daily">📅 指定日期操作记录</option>
+          <option value="user_actions_range">📆 指定日期段操作记录</option>
+          <option value="user_actions_month_dates">🗓 指定月有数据的日期</option>
+          <option value="user_actions_hour_dist">⏰ 数据点按小时分布（可指定实体）</option>
+          <option value="user_actions_entity_summary">🏆 实体操作次数排行</option>
+          <option value="user_actions_user_summary">👤 按用户汇总</option>
+          <option value="user_actions_entity_last_today">⚡ 实体当日最后一条记录</option>
+        </optgroup>
       </select>
     </div>
     <div id="apiTableRow">
@@ -1249,6 +1258,13 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">health_history</td><td>健康记录 · name/type/start/end/limit/offset/order_by · 返回健康记录列表</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">health_latest</td><td>健康最新 · name（必填） · 返回某人最新一条健康记录</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">xiaoai_history</td><td>小爱对话记录 · entity_id（必填）/start/end/limit · 返回对话列表（user_text=用户说话，ai_text=AI回复，conv_time=对话时间）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">user_actions_daily</td><td>用户动作·指定日期 · date=YYYY-MM-DD/entity_id(可选)/limit · 返回该日操作记录</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">user_actions_range</td><td>用户动作·日期段 · start/end=YYYY-MM-DD/entity_id(可选)/limit · 返回日期段操作记录</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">user_actions_month_dates</td><td>用户动作·指定月有数据日期 · month=YYYY-MM · 返回该月每天操作次数</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">user_actions_hour_dist</td><td>用户动作·数据点按小时分布 · entity_id(可选) · 返回 00-23 各小时操作次数</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">user_actions_entity_summary</td><td>用户动作·实体操作排行 · entity_id(可选)/limit · 返回各实体操作次数（含 name/last_used）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">user_actions_user_summary</td><td>用户动作·按用户汇总 · 返回各用户操作次数/实体数</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">user_actions_entity_last_today</td><td>用户动作·实体当日最后一条 · entity_id（必填）· 返回该实体当天最后一条操作记录</td></tr>
       </table>
 
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">rooms_multi_metric 参数（新增）</div>
@@ -1445,8 +1461,8 @@ function isUserTable(name) {
       || name === 'health_records'
       || name === 'media_playlists' || name === 'media_songs' || name === 'media_queue' || name === 'media_now_playing'
       || name === 'xiaoai_conversations'
-      || name === 'printer_daily' || name === 'printer_configs'
-      || name === 'report_entities';
+      || name === 'printer_daily'
+      || name === 'report_entities' || name === 'user_actions';
 }
 
 function populateTableSelect() {
@@ -4927,6 +4943,18 @@ function onApiTypeChange() {
   const isPrinterRange = qt === 'printer_daily_range';
   const isPrinterDetail = qt === 'printer_detail';
   const isMediaApi = qt.startsWith('media_');
+  // 用户动作查询组
+  const isUserActionDaily = qt === 'user_actions_daily';
+  const isUserActionRange = qt === 'user_actions_range';
+  const isUserActionMonthDates = qt === 'user_actions_month_dates';
+  const isUserActionHourDist = qt === 'user_actions_hour_dist';
+  const isUserActionEntitySummary = qt === 'user_actions_entity_summary';
+  const isUserActionUserSummary = qt === 'user_actions_user_summary';
+  const isUserActionEntityLastToday = qt === 'user_actions_entity_last_today';
+  const isUserAction = isUserActionDaily || isUserActionRange || isUserActionMonthDates ||
+    isUserActionHourDist || isUserActionEntitySummary || isUserActionUserSummary ||
+    isUserActionEntityLastToday;
+  const isUserActionHasEntity = isUserActionHourDist;
 
   // 电费专属字段：默认隐藏，仅 electricity_standard 时显示
   document.getElementById('apiEleDayTableRow').style.display = isElectricityStandard ? '' : 'none';
@@ -5220,6 +5248,27 @@ function onApiTypeChange() {
     // 音乐媒体：隐藏所有常规控件，只显示对应专用字段
     _hideAllApiFormRows();
     _showMediaApiRows(qt);
+  } else if (isUserAction) {
+    // 用户动作查询组：显示实体/日期/月份/limit，隐藏表格/offset/orderBy/fields
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display =
+      (isUserActionDaily || isUserActionRange || isUserActionEntitySummary) ? '' : 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = isUserActionMonthDates ? '' : 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    // 日期模式：daily=single、range=range、其余 none
+    document.getElementById('apiDateMode').parentNode.style.display =
+      (isUserActionDaily || isUserActionRange) ? '' : 'none';
+    document.getElementById('apiDateMode').value =
+      isUserActionDaily ? 'single' : (isUserActionRange ? 'range' : 'none');
+    onDateModeChange();
+    // 填充用户动作查询可用的实体列表
+    if (typeof loadUserActionEntitiesForApi === 'function') loadUserActionEntitiesForApi();
   } else {
     document.getElementById('apiEntityId').parentNode.style.display = '';
     document.getElementById('apiRoom').parentNode.style.display = '';
@@ -5356,6 +5405,39 @@ async function loadPrinterEntitiesForApi() {
       sel.innerHTML += '<option value="' + escAttr(c.stats_entity) + '">' + escHtml(label) + '</option>';
     });
   } catch(e) {}
+  generateApiUrl();
+}
+
+// 用户动作查询：填充可查询实体列表（来自 user_actions 表实体排行接口）
+async function loadUserActionEntitiesForApi() {
+  const sel = document.getElementById('apiEntityId');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">-- 全部 --</option>';
+  try {
+    const base = '/api/ha_data_store/query';
+    const sep = base.includes('?') ? '&' : '?';
+    const url = BASE_PATH + base + sep + 'type=user_actions_entity_summary' +
+      (selectedApiKey ? '&key=' + encodeURIComponent(selectedApiKey) : '') +
+      '&limit=500';
+    const resp = await fetch(url);
+    const json = await resp.json();
+    const devices = (json && json.data && json.data.devices) || [];
+    if (!devices.length) {
+      // 表为空：提示用户，避免误以为 bug
+      sel.innerHTML += '<option value="">（无操作记录，请确认前端已上报）</option>';
+      console.warn('[hds] user_actions 表无实体数据，接口返回：', json);
+    }
+    devices.forEach(d => {
+      if (!d.entity_id) return;
+      const label = d.name ? d.entity_id + ' (' + d.name + ')' : d.entity_id;
+      sel.innerHTML += '<option value="' + escAttr(d.entity_id) + '">' + escHtml(label) + '</option>';
+    });
+  } catch(e) {
+    sel.innerHTML += '<option value="">（实体加载失败：' + escHtml(String(e && e.message || e)) + '）</option>';
+    console.error('[hds] 加载用户动作实体失败：', e);
+  }
+  // 尽量保持之前选择
+  if (prev) sel.value = prev;
   generateApiUrl();
 }
 
@@ -5718,6 +5800,27 @@ function generateApiUrl() {
   }
 
   if (qt.startsWith('attr_')) { if (tables) url += '&attr_type=' + encodeURIComponent(tables); }
+  // 用户动作查询组专用
+  if (qt.startsWith('user_actions_')) {
+    if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
+    if (qt === 'user_actions_daily') {
+      const d = document.getElementById('apiDate').value;
+      if (d) url += '&date=' + encodeURIComponent(d);
+    } else if (qt === 'user_actions_range') {
+      const ds = document.getElementById('apiDateStart').value;
+      const de = document.getElementById('apiDateEnd').value;
+      if (ds) url += '&start=' + encodeURIComponent(ds);
+      if (de) url += '&end=' + encodeURIComponent(de);
+    } else if (qt === 'user_actions_month_dates') {
+      const m = document.getElementById('apiMonth').value;
+      if (m) url += '&month=' + encodeURIComponent(m);
+    }
+    if (limit && (qt === 'user_actions_daily' || qt === 'user_actions_range' || qt === 'user_actions_entity_summary')) {
+      url += '&limit=' + encodeURIComponent(limit);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
   else if (qt.startsWith('env_')) { if (tables) url += '&metric=' + encodeURIComponent(tables); }
   if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
   if (dateMode === 'single') {

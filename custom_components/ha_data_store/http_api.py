@@ -18,6 +18,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from .const import (
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
     TABLE_REPORT_ENTITIES,
+    TABLE_USER_ACTIONS,
     TABLE_MEDIA_PLAYLISTS,
     TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
@@ -102,6 +104,20 @@ _DANGEROUS_KEYWORDS = ("DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "CREATE", 
 def _get_local_iso(timezone_offset: int) -> str:
     """返回当前本地时间的 ISO 格式字符串。"""
     return (datetime.utcnow() + timedelta(hours=timezone_offset)).isoformat()
+
+
+def _format_ts_ms(ts_ms, timezone_offset: int) -> str:
+    """把毫秒时间戳格式化为本地可读时间字符串；非法/空值返回空串。
+
+    与 _get_local_iso 使用同一时区偏移（DEFAULT_TIMEZONE）保持一致。
+    """
+    if not ts_ms:
+        return ""
+    try:
+        dt = datetime.utcfromtimestamp(ts_ms / 1000.0) + timedelta(hours=timezone_offset)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
 
 
 def _get_client_ip(request: web.Request) -> str:
@@ -822,6 +838,10 @@ class QueryView(_BaseDBView):
             elif query_type in ("printer_years", "printer_month_dates", "printer_total",
                                 "printer_monthly_total", "printer_daily_range", "printer_detail"):
                 result = await self._exec_in_executor(hass, self._query_printer, db_path, request)
+            elif query_type in ("user_actions_daily", "user_actions_range", "user_actions_month_dates",
+                                "user_actions_hour_dist", "user_actions_entity_summary", "user_actions_user_summary",
+                                "user_actions_entity_last_today"):
+                result = await self._exec_in_executor(hass, self._query_user_actions, db_path, request)
             else:
                 return self.json(
                     {"success": False, "error": f"未知的 type '{query_type}'"},
@@ -3676,6 +3696,123 @@ class QueryView(_BaseDBView):
                 db_path, name, request.query.get("date", "").strip()
             )
         raise ValueError(f"未知的打印机查询类型: {query_type}")
+
+    def _query_user_actions(self, db_path: str, request: web.Request) -> dict:
+        """用户操作记录查询（user_actions 表）。
+
+        子类型（type 参数）：
+        - user_actions_daily      : date=YYYY-MM-DD            → 指定日期所有操作
+        - user_actions_range      : start/end=YYYY-MM-DD       → 日期段操作
+        - user_actions_month_dates: month=YYYY-MM              → 该月哪些日期有数据
+        - user_actions_hour_dist  : entity_id(可选)            → 数据点按小时分布（00-23）
+        - user_actions_entity_summary : (可选 limit)           → 各实体操作次数排行
+        - user_actions_user_summary   :                        → 按用户汇总操作次数
+        """
+        query_type = request.query.get("type", "").strip().lower()
+        entity_id = request.query.get("entity_id", "").strip()
+        date = request.query.get("date", "").strip()
+        start = request.query.get("start", "").strip()
+        end = request.query.get("end", "").strip()
+        month = request.query.get("month", "").strip()
+        try:
+            limit = int(request.query.get("limit", "200").strip())
+            if limit < 1:
+                limit = 200
+        except ValueError:
+            limit = 200
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            # 1) 指定日期
+            if query_type == "user_actions_daily":
+                if not date:
+                    raise ValueError("user_actions_daily 需要 date 参数 (YYYY-MM-DD)")
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {TABLE_USER_ACTIONS} "
+                    f"WHERE substr(ts_text,1,10) = ? ORDER BY ts ASC LIMIT ?",
+                    (date, limit),
+                ).fetchall()]
+                return {"date": date, "count": len(rows), "actions": rows}
+
+            # 2) 日期段
+            if query_type == "user_actions_range":
+                if not start or not end:
+                    raise ValueError("user_actions_range 需要 start/end 参数 (YYYY-MM-DD)")
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {TABLE_USER_ACTIONS} "
+                    f"WHERE substr(ts_text,1,10) >= ? AND substr(ts_text,1,10) <= ? "
+                    f"ORDER BY ts ASC LIMIT ?",
+                    (start, end, limit),
+                ).fetchall()]
+                return {"start": start, "end": end, "count": len(rows), "actions": rows}
+
+            # 3) 指定月哪些日期有数据
+            if query_type == "user_actions_month_dates":
+                if not month:
+                    raise ValueError("user_actions_month_dates 需要 month 参数 (YYYY-MM)")
+                dates = [dict(r) for r in conn.execute(
+                    f"SELECT substr(ts_text,1,10) AS day, COUNT(*) AS count "
+                    f"FROM {TABLE_USER_ACTIONS} WHERE substr(ts_text,1,7) = ? "
+                    f"GROUP BY substr(ts_text,1,10) ORDER BY day ASC",
+                    (month,),
+                ).fetchall()]
+                return {"month": month, "count": len(dates), "dates": dates}
+
+            # 4) 数据点按小时分布（可指定实体）
+            if query_type == "user_actions_hour_dist":
+                sql = (f"SELECT substr(ts_text,12,2) AS hour, COUNT(*) AS count "
+                       f"FROM {TABLE_USER_ACTIONS} ")
+                conds, params = [], []
+                if entity_id:
+                    conds.append("entity_id = ?")
+                    params.append(entity_id)
+                if conds:
+                    sql += " WHERE " + " AND ".join(conds)
+                sql += " GROUP BY substr(ts_text,12,2) ORDER BY hour ASC"
+                rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+                filled = {f"{h:02d}": 0 for h in range(24)}
+                for r in rows:
+                    filled[r["hour"]] = r["count"]
+                return {"entity_id": entity_id or "*", "hours": filled}
+
+            # 5) 各实体操作次数排行
+            if query_type == "user_actions_entity_summary":
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT entity_id, name, action, COUNT(*) AS count, MAX(ts_text) AS last_used "
+                    f"FROM {TABLE_USER_ACTIONS} GROUP BY entity_id ORDER BY count DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()]
+                return {"total": len(rows), "devices": rows}
+
+            # 6) 按用户汇总
+            if query_type == "user_actions_user_summary":
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT user_name, COUNT(*) AS count, COUNT(DISTINCT entity_id) AS entities "
+                    f"FROM {TABLE_USER_ACTIONS} GROUP BY user_name ORDER BY count DESC",
+                ).fetchall()]
+                return {"users": rows}
+
+            # 7) 指定实体当日的最后一条记录
+            if query_type == "user_actions_entity_last_today":
+                if not entity_id:
+                    raise ValueError("user_actions_entity_last_today 需要 entity_id 参数")
+                today = _get_local_iso(DEFAULT_TIMEZONE)[:10]
+                row = conn.execute(
+                    f"SELECT * FROM {TABLE_USER_ACTIONS} "
+                    f"WHERE entity_id = ? AND substr(ts_text,1,10) = ? "
+                    f"ORDER BY ts DESC LIMIT 1",
+                    (entity_id, today),
+                ).fetchone()
+                return {
+                    "entity_id": entity_id,
+                    "date": today,
+                    "record": dict(row) if row else None,
+                }
+
+            raise ValueError(f"未知的用户动作查询类型: {query_type}")
+        finally:
+            conn.close()
 
 
 # ========================================================================== #
@@ -6880,7 +7017,7 @@ class HealthAddView(_BaseDBView):
     """提交健康记录。
 
     POST /api/ha_data_store/health/add
-    Body: { name (必填), dp, sp, pr, height, weight, bmi, temp, type, date_time, remark }
+    Body: { name (必填), dp, sp, pr, height, weight, bmi, temp, type, date_time, remark, description }
     """
 
     url = "/api/ha_data_store/health/add"
@@ -6913,8 +7050,8 @@ class HealthAddView(_BaseDBView):
             try:
                 cursor = conn.execute(
                     f"""INSERT INTO {TABLE_HEALTH_RECORDS}
-                        (date_time, name, dp, sp, pr, height, weight, bmi, temp, type, remark)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (date_time, name, dp, sp, pr, height, weight, bmi, temp, type, remark, description)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         date_time,
                         name,
@@ -6927,6 +7064,7 @@ class HealthAddView(_BaseDBView):
                         _to_float_or_none(body.get("temp")),
                         (body.get("type") or "").strip(),
                         (body.get("remark") or "").strip(),
+                        (body.get("description") or "").strip(),
                     ),
                 )
                 conn.commit()
@@ -7909,11 +8047,15 @@ class ReportEntitiesView(_BaseDBView):
                     name = (item.get("name") or "").strip()
                     icon = (item.get("icon") or "").strip() if isinstance(item.get("icon"), str) else ""
                     room_name = (item.get("room_name") or "").strip()
+                    # source：上报来源标识，默认 room_elves；可被前端覆盖（兼容旧前端不传）
+                    source = (item.get("source") or "room_elves").strip() or "room_elves"
+                    # rooms：前端去重后合并的"使用房间"列表（多房间逗号连接），可为空
+                    rooms = (item.get("rooms") or "").strip()
                     conn.execute(
                         f"INSERT INTO {TABLE_REPORT_ENTITIES} "
-                        f"(entity_id, name, icon, room_name, source, last_report_time) "
-                        f"VALUES (?, ?, ?, ?, 'room_elves', ?)",
-                        (eid, name, icon, room_name, now),
+                        f"(entity_id, name, icon, room_name, source, rooms, last_report_time) "
+                        f"VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (eid, name, icon, room_name, source, rooms, now),
                     )
                     inserted += 1
                 conn.commit()
@@ -7940,7 +8082,7 @@ class ReportEntitiesView(_BaseDBView):
             try:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    f"SELECT entity_id, name, icon, room_name, source, last_report_time "
+                    f"SELECT entity_id, name, icon, room_name, source, rooms, last_report_time "
                     f"FROM {TABLE_REPORT_ENTITIES} ORDER BY room_name, entity_id"
                 )
                 return [dict(r) for r in cursor.fetchall()]
@@ -7950,5 +8092,149 @@ class ReportEntitiesView(_BaseDBView):
         try:
             rows = await self._exec_in_executor(hass, _load)
             return self.json({"success": True, "data": rows})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# =========================================================================== #
+#  前端操作记录上报 API — ActionLogView                                         #
+#  用途：接收 room-elves-card 前端埋点上报的操作记录（含完整 action_snapshot 快照），#
+#        追加写入 user_actions 表（不去重，保留每次操作以便统计使用习惯）。         #
+#        写入成功后立即触发 user_actions_sensor 实时刷新（近30天聚合）。           #
+# =========================================================================== #
+class ActionLogView(_BaseDBView):
+    """前端操作记录上报。
+
+    POST /api/ha_data_store/action_log  Body: { key, actions:[{...}] }
+      → 追加写入 user_actions（不去重），返回写入条数
+    GET  /api/ha_data_store/action_log?key=xxx&days=30
+      → 返回近 N 天按 action_snapshot 聚合的设备列表（与 sensor 属性一致，方便调试）
+    """
+
+    url = "/api/ha_data_store/action_log"
+    name = "api:ha_data_store:action_log"
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+
+        raw_actions = body.get("actions")
+        if not isinstance(raw_actions, list) or not raw_actions:
+            return self.json({"success": False, "error": "actions 数组为空"}, status_code=400)
+
+        db_path = self._db_path
+        now = _get_local_iso(DEFAULT_TIMEZONE)
+
+        def _insert() -> int:
+            conn = sqlite3.connect(db_path)
+            try:
+                inserted = 0
+                for item in raw_actions:
+                    if not isinstance(item, dict):
+                        continue
+                    eid = (item.get("entity_id") or "").strip()
+                    action = (item.get("action") or "").strip()
+                    ts = int(item.get("ts") or 0)
+                    ts_text = _format_ts_ms(ts, DEFAULT_TIMEZONE)
+                    if not action:
+                        continue
+                    # user_name 兼容两种字段名：后端规范为 user_name，前端旧版上报 user
+                    user_name = (item.get("user_name") or item.get("user") or "").strip()
+                    snap = (item.get("action_snapshot") or "")
+                    # config_id：优先取前端显式上报字段，其次从 action_snapshot JSON 中解析
+                    config_id = ""
+                    for ck in ("config_id", "device_config_id"):
+                        cv = item.get(ck)
+                        if isinstance(cv, str) and cv.strip():
+                            config_id = cv.strip()
+                            break
+                    if not config_id and snap:
+                        try:
+                            snap_obj = json.loads(snap)
+                            if isinstance(snap_obj, dict) and isinstance(snap_obj.get("config_id"), str):
+                                config_id = snap_obj["config_id"].strip()
+                        except Exception:
+                            pass
+                    # device_type：设备类型，由前端上报（如 light/socket/ac 等）
+                    device_type = (item.get("device_type") or "").strip() if isinstance(item.get("device_type"), str) else ""
+                    conn.execute(
+                        f"INSERT INTO {TABLE_USER_ACTIONS} "
+                        f"(user_name, entity_id, action, name, icon, room_name, source, service, "
+                        f"card_type, other, state_log, ts, ts_text, action_snapshot, config_id, device_type, created_at) "
+                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            user_name,
+                            eid,
+                            action,
+                            (item.get("name") or "").strip(),
+                            (item.get("icon") or "").strip() if isinstance(item.get("icon"), str) else "",
+                            (item.get("room_name") or "").strip(),
+                            (item.get("source") or "").strip(),
+                            (item.get("service") or "").strip() if isinstance(item.get("service"), str) else "",
+                            (item.get("card_type") or "").strip() if isinstance(item.get("card_type"), str) else "",
+                            (item.get("other") or "").strip() if isinstance(item.get("other"), str) else "",
+                            (item.get("state_log") or "").strip() if isinstance(item.get("state_log"), str) else "",
+                            ts,
+                            ts_text,
+                            snap,
+                            config_id,
+                            device_type,
+                            now,
+                        ),
+                    )
+                    inserted += 1
+                conn.commit()
+                return inserted
+            finally:
+                conn.close()
+
+        try:
+            inserted = await self._exec_in_executor(hass, _insert)
+        except Exception as exc:
+            _LOGGER.exception("[action_log] 写入失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        # 写入成功后实时刷新常用设备统计 sensor
+        try:
+            ua_sensor = hass.data.get(DOMAIN, {}).get("user_actions_sensor")
+            if ua_sensor is not None and hasattr(ua_sensor, "_async_refresh"):
+                await ua_sensor._async_refresh()
+        except Exception as exc:
+            _LOGGER.warning("[action_log] 刷新常用设备 sensor 失败: %s", exc)
+
+        return self.json({"success": True, "inserted": inserted})
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            days = max(1, min(365, int(request.query.get("days", 30))))
+        except Exception:
+            days = 30
+        db_path = self._db_path
+
+        def _load() -> list[dict]:
+            conn = sqlite3.connect(db_path)
+            try:
+                cutoff = int(time.time() * 1000) - days * 24 * 3600 * 1000
+                conn.row_factory = sqlite3.Row
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT user_name, entity_id, action, name, icon, room_name, "
+                    f"service, card_type, other, state_log, ts, ts_text, action_snapshot, config_id, device_type FROM {TABLE_USER_ACTIONS} "
+                    f"WHERE ts >= ? ORDER BY ts ASC", (cutoff,)
+                ).fetchall()]
+                return rows
+            finally:
+                conn.close()
+
+        try:
+            rows = await self._exec_in_executor(hass, _load)
+            return self.json({"success": True, "count": len(rows), "actions": rows})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)

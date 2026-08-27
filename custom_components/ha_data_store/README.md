@@ -21,6 +21,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
   - [虚拟设备](#8-虚拟设备)
   - [实体导出为JSON](#9-实体导出为json)
   - [打印机数据采集](#10-打印机数据采集)
+  - [用户操作记录](#11-用户操作记录)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -58,6 +59,7 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 🔗 **自定义路由** | 通过 GUI 或 API 定义自定义 HTTP 路由，绑定任意 SQL 查询 |
 | 🗂️ **统一泛域名动态路由** | 万能路由 `/api/ha_data_store/custom/{tail}` 运行时查库执行任意自定义 SQL |
 | 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发 |
+| 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot），`sensor.近期使用设备` 近30天聚合，API工具支持多维度查询 |
 
 ---
 
@@ -128,7 +130,7 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 **新增实体：**
 | 实体 | 类型 | 说明 |
 |------|------|------|
-| `sensor.today_family_status` | sensor | **状态值**=极简一句（家中有人/无人 + 门状态 + 提醒数，≤255字符）；`attributes.summary`=完整段落；`attributes.sections`=完整结构化分节；`attributes.overall`=normal/warning；`attributes.alerts`=异常提醒列表 |
+| `sensor.today_family_status` | sensor | **状态值**=极简一句（家中有人/无人 + 开着几盏灯 + 入户门状态及时长，≤255字符）；`attributes.summary`=完整段落；`attributes.sections`=完整结构化分节；`attributes.overall`=normal/warning；`attributes.alerts`=异常提醒列表；`attributes.alert_text`=提醒文字；`attributes.offline`=离线设备数 |
 | `button.ha_data_store_daily_summary` | button | 仪表盘放置按钮卡片，点击立即触发分析 |
 
 **新增服务：** `ha_data_store.generate_daily_summary`
@@ -151,7 +153,14 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 | 灯光 | device_history（name 含"灯"） | 每盏灯取最新一条，on_time 非空且 off_time 空=该灯开着，统计"开着 x 盏灯" |
 | 离线实体 | report_entities + 实时 states | 三态判定，unavailable 算离线、unknown 不算；有离线时 summary 末尾显示"离线设备 x 台" |
 
-异常提醒（阈值写死）：高温 ≥30°C、低温 ≤5°C、单台连续运行 >6 小时、用电环比波动 >20%；存在任一提醒时 `overall=warning`，提醒文字放 `alert_text` 字段（`alerts` 为提醒列表），`summary` 段落末尾单独显示"离线设备 x 台"。
+**字段说明：**
+- `status_value`：极简状态值（`家中有人（客厅）、开着 5 盏灯、入户门开1小时8分钟`）
+- `summary`：完整段落（不含提醒，含"离线设备 x 台"）
+- `alert_text` / `alerts`：异常提醒（高温/运行超时/用电环比）
+- `sections.lights`：开灯房间去重（`开着 6 盏灯（主卧、儿童房、客厅等 5 个房间）`）
+- `sections.devices.times_top`：开关频次 TOP（`卫生间浴霸灯44 次`）
+
+**异常提醒（阈值写死）：** 高温 ≥30°C、低温 ≤5°C、单台连续运行 >6 小时、用电环比波动 >20%；存在任一提醒时 `overall=warning`，提醒文字放 `alert_text` 字段（`alerts` 为列表）；`summary` 段落末尾单独显示"离线设备 x 台"（离线不进 alerts）。
 
 **工作原理：**
 
@@ -179,9 +188,10 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
                                 ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ 输出层 sensor.today_family_status                            │
-│  状态值=一段话；attributes={summary, sections, overall,      │
-│          alerts, date, generated_at}                         │
-│  async_trigger_refresh() 主动刷新（无30s轮询）                │
+│  状态值=极简一句；attributes={summary, sections, overall,     │
+│          alerts, alert_text, status_value, offline,          │
+│          presence, lights, date, generated_at}               │
+│  自动刷新：启动后1分钟 + 每30分钟（整30分钟）                 │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -511,6 +521,53 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx  # 主动重采
 
 ---
 
+## 11. 用户操作记录
+
+前端 room-elves-card 通过埋点记录用户每次操作（开关、调值、按钮、场景、自动化等），上报后端存储，用于**分析使用习惯**和**将来还原设备控制面板**。
+
+### 数据存储（`user_actions` 表）
+
+每条操作记录含：
+
+| 字段 | 说明 |
+|------|------|
+| `user_name` | 当前登录用户 |
+| `entity_id` | 操作实体 |
+| `action` | 动作类型（toggle/set_value/press/call-service 等） |
+| `name` / `icon` | 实体显示名 / 图标 |
+| `room_name` | 所在房间 |
+| `source` | 触发位置（head/room/standalone） |
+| `card_type` | 弹窗卡片类型（预留） |
+| `other` | 预留字段 |
+| `state_log` | 操作前后状态变化（如 `on→off`、`cool→heat`） |
+| `ts` / `ts_text` | 时间戳 / 人类可读时间 |
+| `action_snapshot` | 完整 tap_action 快照（JSON，用于还原设备面板） |
+
+### 近期使用设备传感器
+
+`user_actions` 写入后，`sensor.近期使用设备`（`sensor.ha_data_store_user_actions`）实时聚合近 30 天数据：
+
+- **状态值** = 近 30 天有操作的不同设备面板数
+- `attributes.devices` = 按 **action_snapshot 归一化聚合** 的设备列表，每项含：`entity_id / name / icon / room_name / count`（使用次数）/ `last_used` + `last_used_text`（最近使用）/ `state_log`（最近状态变化）/ `action_snapshot`（完整还原快照），按使用次数降序
+- 30 秒定时刷新 + 写入后实时刷新
+
+前端可直接订阅该 sensor，无需调 API 即可渲染"常用设备小卡片"，并凭 `action_snapshot` 还原设备控制面板。
+
+### 上报接口
+
+```
+POST /api/ha_data_store/action_log   Body: { actions: [ {user_name, entity_id, action, ..., action_snapshot} ] }
+GET  /api/ha_data_store/action_log?days=30   查询近 N 天原始记录
+```
+
+前端本地缓冲，满 20 条或 10 秒批量上报，成功推进游标、失败保留重试。
+
+### 查询（API 工具 → 🎯 用户动作查询组）
+
+见 [数据查询接口](#数据查询接口) 的 `user_actions_*` 系列类型。
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -570,6 +627,13 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `printer_monthly_total` | 打印机按年月统计合计数据 | stats_entity |
 | `printer_daily_range` | 打印机指定日期区间数据 | stats_entity, start/end |
 | `printer_detail` | 打印机指定日期详细数据 | stats_entity, date |
+| `user_actions_daily` | 用户动作·指定日期操作记录 | date |
+| `user_actions_range` | 用户动作·日期段操作记录 | start/end |
+| `user_actions_month_dates` | 用户动作·指定月哪些日期有数据 | month |
+| `user_actions_hour_dist` | 用户动作·数据点按小时分布 | entity_id(可选) |
+| `user_actions_entity_summary` | 用户动作·实体操作次数排行 | entity_id(可选) |
+| `user_actions_user_summary` | 用户动作·按用户汇总 | 无 |
+| `user_actions_entity_last_today` | 用户动作·实体当日最后一条记录 | entity_id |
 
 **查询示例：**
 
@@ -588,6 +652,15 @@ curl "http://ha:8123/api/ha_data_store/query?type=ranking_monthly&month=2024-01&
 
 # 查询客厅 2025-01 哪些日期有数据
 curl "http://ha:8123/api/ha_data_store/query?type=room_data_dates&room=客厅&month=2025-01&category=device&key=your_api_key"
+
+# 用户动作：指定日期操作记录
+curl "http://ha:8123/api/ha_data_store/query?type=user_actions_daily&date=2026-08-24&key=your_api_key"
+
+# 用户动作：数据点按小时分布（指定实体）
+curl "http://ha:8123/api/ha_data_store/query?type=user_actions_hour_dist&entity_id=light.living_room&key=your_api_key"
+
+# 用户动作：实体当日最后一条记录
+curl "http://ha:8123/api/ha_data_store/query?type=user_actions_entity_last_today&entity_id=light.living_room&key=your_api_key"
 ```
 
 ### 配置管理接口
@@ -668,7 +741,7 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
 | `/api/ha_data_store/bridge_entities` | GET/POST/DELETE | 桥接实体配置管理 |
 | `/api/ha_data_store/bridge_reload` | POST | 重新加载所有桥接连接 |
 | `/api/ha_data_store/virtual_device` | GET/POST/DELETE | 虚拟设备管理 |
-| `/api/ha_data_store/health_add` | POST | 添加健康记录 |
+| `/api/ha_data_store/health_add` | POST | 添加健康记录（body 可选 `remark` 备注 / `description` 说明） |
 | `/api/ha_data_store/health_types` | GET/POST/DELETE | 健康数据类型管理 |
 | `/api/ha_data_store/batch_entity_state` | POST | 批量写入实体状态 |
 | `/api/ha_data_store/db_maintain` | POST | 数据库维护（VACUUM/REINDEX） |
@@ -807,10 +880,11 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `vacuum_type_defs` | 扫地机器人类型定义 |
 | `vacuum_configs` | 扫地机器人配置 |
 | `vacuum_history` | 扫地机器人轨迹 |
-| `health_records` | 健康记录（血压/体温/体重等） |
+| `health_records` | 健康记录（血压/体温/体重等，含 `remark` 备注 / `description` 说明） |
 | `virtual_devices` | 虚拟设备持久化 |
 | `printer_configs` | 打印机配置（支持多台，name 唯一） |
 | `printer_daily` | 打印机每日记录（汇总 + 墨量 + 当日明细 JSON） |
+| `user_actions` | 用户操作记录（前端埋点上报，含 action_snapshot/state_log/ts_text 等） |
 
 ---
 
@@ -906,6 +980,14 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v2.11.0 用户操作记录与近期使用设备
+
+- **用户操作记录**：新增 `user_actions` 表，接收前端埋点上报的每次操作（含完整 `action_snapshot` 快照、`state_log` 前后状态、`ts_text` 可读时间、`user_name` 用户），追加式不去重
+- **`sensor.近期使用设备`**：近 30 天按 action_snapshot 聚合，`attributes.devices` 含设备使用次数/最近使用时间/最近状态变化/完整还原快照，写入后实时刷新
+- **上报接口**：`POST /api/ha_data_store/action_log`（批量上报）、`GET /api/ha_data_store/action_log?days=N`（查明细）
+- **API工具"用户动作查询组"**：新增 7 种查询（指定日期/日期段/月有数据日期/小时分布/实体排行/按用户汇总/实体当日最后一条），实体下拉自动填充
+- **数据库浏览器**：`user_actions` 表纳入用户表，实体加载失败给出明确提示
 
 ### v2.6.0 打印机数据采集
 
