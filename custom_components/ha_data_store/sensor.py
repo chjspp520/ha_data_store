@@ -97,9 +97,11 @@ class MonitoredEntitiesSensor(SensorEntity):
 class UserActionsSensor(SensorEntity):
     """前端操作记录统计传感器（常用设备分析）。
 
-    状态值 = 近 N 天有操作的不同设备面板数（按 action_snapshot 聚合）
-    状态属性 = 近 N 天按 action_snapshot 聚合的设备列表（含完整 tapAction 快照，
-              前端可直接据此还原设备控制面板），按使用次数降序。
+    状态值 = 近 N 天有操作的不同设备实体数（按 entity_id 去重，不随用户重复计算）
+    状态属性 = 近 N 天按 (用户, action_snapshot) 聚合的设备列表（含完整 tapAction 快照，
+              前端可直接据此还原设备控制面板），同一实体被不同用户操作时各自独立成条，
+              每条带独立 user_name / count / last_used，按使用次数降序。
+              额外字段：total_user_devices = 用户×设备 组合条数。
     """
 
     _attr_has_entity_name = False
@@ -137,11 +139,16 @@ class UserActionsSensor(SensorEntity):
             _LOGGER.error("[HDS] user_actions 传感器加载失败: %s", e)
             return {"window_days": self.WINDOW_DAYS, "total_actions": 0, "total_devices": 0, "devices": [], "error": str(e)}
 
-        # 按 action_snapshot 归一化聚合（同一设备面板多实体组合归为一条）
+        # 按 (用户, action_snapshot) 归一化聚合。
+        # 同一设备面板多实体组合归为一条；同一实体被不同用户操作时，各自独立成条
+        # （每条带独立 user_name / count / last_used），供前端按用户筛选与展示。
         groups = {}
         for r in rows:
             snap = r.get("action_snapshot") or ""
-            key = self._normalize_snapshot_key(snap, r.get("entity_id"))
+            skey = self._normalize_snapshot_key(snap, r.get("entity_id"))
+            user = (r.get("user_name") or "").strip()
+            # 用户 + 快照键 作为聚合键：不同用户操作同一实体拆分为独立记录
+            key = f"{user}\x00{skey}"
             g = groups.get(key)
             if g is None:
                 # config_id：优先取库中独立列，其次从 action_snapshot JSON 解析
@@ -160,7 +167,7 @@ class UserActionsSensor(SensorEntity):
                     "icon": r.get("icon") or "",
                     "room_name": r.get("room_name") or "",
                     "service": r.get("service") or "",
-                    "user_name": r.get("user_name") or "",
+                    "user_name": user,
                     "config_id": config_id,
                     "device_type": (r.get("device_type") or "").strip(),
                     "count": 0,
@@ -170,17 +177,16 @@ class UserActionsSensor(SensorEntity):
                 }
                 groups[key] = g
             g["count"] += 1
-            # 记录最近一次的状态变化和用户（rows 按 ts 升序，最后覆盖的即最新）
+            # 记录最近一次的状态变化（rows 按 ts 升序，最后覆盖的即最新）
             cur_state = r.get("state_log") or ""
             if cur_state:
                 g["state_log"] = cur_state
-            cur_user = r.get("user_name") or ""
-            if cur_user:
-                g["user_name"] = cur_user
             if (r.get("ts") or 0) > g["last_used"]:
                 g["last_used"] = r.get("ts") or 0
 
         devices = list(groups.values())
+        # total_devices 保持为去重实体数（不随用户重复计算）
+        dedup_entities = len({d["entity_id"] for d in devices if d["entity_id"]})
         for d in devices:
             # 增加人类可读的最近使用时间（本地时区），保留原始时间戳供程序使用
             d["last_used_text"] = self._format_ts(d.get("last_used") or 0)
@@ -188,7 +194,8 @@ class UserActionsSensor(SensorEntity):
         return {
             "window_days": self.WINDOW_DAYS,
             "total_actions": len(rows),
-            "total_devices": len(devices),
+            "total_devices": dedup_entities,
+            "total_user_devices": len(devices),
             "devices": devices,
         }
 

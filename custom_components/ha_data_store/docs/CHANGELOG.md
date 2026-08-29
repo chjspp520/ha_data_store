@@ -1,5 +1,21 @@
 # 更新日志
 
+## 2026-08-29 — v2.14.0 近期使用设备按用户分组统计
+
+### 📊 近期使用设备传感器按用户分组
+- **`sensor.近期使用设备` 的 `attributes.devices[]` 改为按 (用户, 操作快照) 聚合**：同一设备实体被多个用户操作时，各自独立成条，每条带独立 `user_name` / `count` / `last_used`，不再只保留最后一个用户的数据。
+- **`total_devices`（state 值）语义保持不变**：仍为去重后的设备实体数，不随用户重复计算。
+- **新增 `total_user_devices` 字段**：表示「用户×设备」的组合条数，供前端按用户统计/筛选使用。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.13.0 → 2.14.0 |
+| `sensor.py` | `UserActionsSensor._load_data` 聚合键加入 user_name，同一实体多用户拆分为独立记录；`total_devices` 按 entity_id 去重；新增 `total_user_devices` |
+| `manifest.json` | 版本 2.14.0 |
+
+---
+
 ## 2026-08-26 — v2.13.0 操作记录新增设备类型 device_type
 
 ### 🎯 操作记录新增设备类型字段
