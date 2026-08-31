@@ -293,7 +293,11 @@ def _init_database(db_path: str) -> None:
                 cross_day       INTEGER NOT NULL DEFAULT 0,
                 room            TEXT NOT NULL DEFAULT '',
                 state_attr      TEXT NOT NULL DEFAULT '',
-                now_kwh         REAL
+                now_kwh         REAL,
+                on_user         TEXT NOT NULL DEFAULT '',
+                off_user        TEXT NOT NULL DEFAULT '',
+                on_snapshot     TEXT NOT NULL DEFAULT '',
+                off_snapshot    TEXT NOT NULL DEFAULT ''
             );
             """
         )
@@ -308,6 +312,14 @@ def _init_database(db_path: str) -> None:
             conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN state_attr TEXT NOT NULL DEFAULT ''")
         if "now_kwh" not in existing_cols:
             conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN now_kwh REAL")
+        if "on_user" not in existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN on_user TEXT NOT NULL DEFAULT ''")
+        if "off_user" not in existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN off_user TEXT NOT NULL DEFAULT ''")
+        if "on_snapshot" not in existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN on_snapshot TEXT NOT NULL DEFAULT ''")
+        if "off_snapshot" not in existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN off_snapshot TEXT NOT NULL DEFAULT ''")
 
         # 3) 传感器数据表：每种指标独立建表（统一结构 id, entity_id, name, datetime, value）
         #    sensor 类型 value 为 TEXT（支持非数值），其余为 REAL
@@ -3949,6 +3961,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         VacuumConfigsView,
         AttrManualTriggerView,
         DbMaintainView,
+        DbAlterTableView,
         BatchEntityStateView,
         PushTargetsView,
         PushDataView,
@@ -3997,6 +4010,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(VacuumConfigsView(db_path))
     hass.http.register_view(AttrManualTriggerView(db_path))
     hass.http.register_view(DbMaintainView(db_path))
+    hass.http.register_view(DbAlterTableView(db_path))
     hass.http.register_view(BatchEntityStateView(db_path))
     hass.http.register_view(PushTargetsView(db_path))
     hass.http.register_view(PushDataView(db_path))

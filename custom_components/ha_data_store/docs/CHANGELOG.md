@@ -1,5 +1,128 @@
 # 更新日志
 
+## 2026-08-30 — v2.19.1 修复自定义路由访问 500
+
+### 🐛 修复动态路由访问 500（根因：视图方法缺 tail 参数）
+- **根因**：`DynamicRouterView` 的 url 含 `{tail}` 时，HA 会把它作为**关键字参数**传入视图方法，但 `get/post/put/delete` 只接收 `request`，导致 `TypeError: DynamicRouterView.get() got an unexpected keyword argument 'tail'` → 500。
+- **修复**：`get/post/put/delete` 方法签名加 `**kwargs`，吸收 `tail` 关键字参数。
+- **url 由 `{tail:.*}` 改为 `{tail}`**（单段路径足够，且能触发 match_info 的 tail）。
+- **新增 `_safe_dynamic` 兜底**：动态路由任何异常都返回明确错误 JSON 并记录日志，不再空白 500。
+- **扩展 SQL 异常捕获**：`sqlite3.ProgrammingError`/`DatabaseError` 也返回明确错误信息。
+- **修复无参数 SQL 报错**：排除鉴权参数 `key`/`auth`/`access_token` 进入 SQL 绑定，避免"无参数 SQL 却提供了绑定值"报 `Incorrect number of bindings`。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `http_api.py` | `DynamicRouterView` url 改 `{tail}`；新增 `_safe_dynamic`；扩展 SQL 异常捕获 |
+
+---
+
+## 2026-08-30 — v2.19.0 自定义路由支持删除
+
+### 🗑 自定义路由增加删除功能
+- **后端 `CustomRoutesView` 新增 `DELETE /api/ha_data_store/routes?route_path=xxx`**：按 `route_path` 删除自定义路由，鉴权与保存一致（依赖全局「数据库修改」开关）。
+- **前端自定义路由列表每行新增"🗑 删除"按钮**：点击二次确认后删除，删除成功后自动刷新列表和地址生成器下拉。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.18.0 → 2.19.0 |
+| `http_api.py` | `CustomRoutesView` 新增 `delete` 方法 |
+| `db_viewer.html` | 路由列表新增删除按钮 + `deleteCustomRoute` 函数 |
+| `manifest.json` | 版本 2.19.0 |
+
+---
+
+## 2026-08-30 — v2.18.0 自定义路由支持命名占位符并接入地址生成器
+
+### ⚡ 自定义路由支持命名占位符（:name）
+- **后端 `DynamicRouterView` 支持命名占位符**：SQL 里可用 `:name`（或 `@name` / `$name`），从 GET query 参数**按名**取值绑定；同时**兼容**传统 `?` 占位符（按参数字母序绑定，旧配置不受影响）。
+- **自定义路由表单**：提示推荐 `:name` 写法，placeholder 更新为命名占位符示例。
+
+### 🔗 自定义路由接入「API 地址生成器」
+- **地址生成器的查询类型新增"自定义路由"分组**：自动列出所有已保存的自定义路由，点选即可。
+- **选中自定义路由后自动解析 SQL 的 `:name` 生成参数输入框**，填好参数即自动生成调用 URL（`/api/ha_data_store/custom/{path}?参数=值`），无需手写。
+- 新建/编辑路由保存后，地址生成器下拉自动刷新。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.17.0 → 2.18.0 |
+| `http_api.py` | `DynamicRouterView` 参数绑定支持 `:name/@/$` 命名占位符，兼容 `?` |
+| `db_viewer.html` | apiQueryType 新增"自定义路由"分组；选中自定义路由解析 `:name` 生成参数框；自定义路由表单提示 `:name` 写法 |
+| `manifest.json` | 版本 2.18.0 |
+
+---
+
+## 2026-08-30 — v2.17.0 自定义路由管理与数据库字段编辑
+
+### 🛠 数据库浏览器新增「自定义路由管理」
+- **API 工具 tab 新增"自定义路由管理"子区域**：可新建/编辑/保存自定义查询接口（`route_path` + SELECT SQL + 描述），保存后通过 `GET /api/ha_data_store/custom/{route_path}?参数=值` 直接调用，**无需再改后端新增 type**。
+- 复用后端已有的 `custom_routes` 表与 `DynamicRouterView` 动态路由机制（参数按字母序绑定到 SQL 的 `?` 占位符，安全沙箱只允许 SELECT）。
+- 不改变现有查询接口。
+
+### 🧬 数据库浏览新增「字段管理」
+- **后端新增 `DbAlterTableView`**（`POST /api/ha_data_store/alter_table`）：支持 `ALTER TABLE ADD COLUMN`（增字段）/ `DROP COLUMN`（删字段）。
+  - 依赖全局「数据库修改」开关（`db_edit_enabled`），无需单独管理员密码。
+  - 字段类型白名单（TEXT/INTEGER/REAL/NUMERIC/BOOLEAN/BLOB）、标识符防注入校验。
+  - 保护核心表（`entity_configs`/`custom_routes`/`api_keys` 等）不可改字段；主键字段不可删；删字段要求 SQLite 3.35+。
+- **数据库浏览 tab 新增"🧬 字段管理"按钮**：弹窗查看当前表字段（列名+类型）、添加字段（字段名/类型/默认值）、删除字段。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.16.0 → 2.17.0 |
+| `http_api.py` | 新增 `DbAlterTableView`（alter_table 增删字段）+ `_sqlite_version_ge`；新增 `import re` |
+| `__init__.py` | 注册 `DbAlterTableView` 视图 |
+| `db_viewer.html` | API 工具新增自定义路由管理子区域；数据库浏览新增字段管理模态框与按钮 |
+| `manifest.json` | 版本 2.17.0 |
+
+---
+
+## 2026-08-30 — v2.16.0 设备历史新增用户维度查询 API
+
+### 📊 API 工具新增设备用户维度查询
+基于 `device_history` 表的 `on_user` / `off_user` / `on_snapshot` / `off_snapshot` 字段，新增 5 个查询 type（查 `/api/ha_data_store/query`，**不影响**原有 `device_history` / `device_summary` 等查询逻辑）：
+
+- **`device_users_list`**：设备操作用户列表（`on_user`∪`off_user` 去重），每个用户含开启次数/关闭次数/参与次数/涉及设备数。参数：`date/month/year/room/entity_id`。
+- **`device_user_history`**：按用户查设备使用记录（匹配 `on_user` 或 `off_user`）。参数：`user_name`(必填)、`direction=on|off|both`、`entity_id/date/room/limit`。每条记录带 `matched` 标注命中开启还是关闭。
+- **`device_user_summary`**：按用户汇总（开启次数/关闭次数/设备数/总能耗/总时长）。参数：`user_name`(可选)、`date/month/year/room`。
+- **`device_on_user_history`**：按开启用户维度查记录（`on_user` 非空）。参数：`user_name`(可选)、`entity_id/date/room/limit`。返回含该维度用户候选列表。
+- **`device_off_user_history`**：按关闭用户维度查记录（`off_user` 非空）。参数同上。
+
+**统计口径**：每条记录的 `on_user` 计 1 次开启、`off_user` 计 1 次关闭，开启/关闭分开计数。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.15.0 → 2.16.0 |
+| `http_api.py` | `QueryView` 新增 `device_users_list/device_user_history/device_user_summary/device_on_user_history/device_off_user_history` 5 个路由 + `_build_device_user_where` 辅助 + 5 个查询方法 |
+| `db_viewer.html` | API 工具"设备类"分组新增 5 个查询选项 + 用户/方向输入控件 + `onApiTypeChange`/`generateApiUrl`/`_hideAllApiFormRows` 处理 + 使用说明 |
+| `manifest.json` | 版本 2.16.0 |
+
+---
+
+## 2026-08-30 — v2.15.0 设备历史记录用户关联
+
+### 🕘 device_history 表新增操作用户字段
+- **`device_history` 表新增 4 个字段**：`on_user`（开启用户）、`off_user`（关闭用户）、`on_snapshot`（开启操作快照）、`off_snapshot`（关闭操作快照）。
+- **自动迁移**：启动时检测旧表缺列则 `ALTER TABLE ADD COLUMN`，不破坏存量数据。
+- **关联逻辑**：前端上报操作写入 `user_actions` 后，按 `entity_id` + 时间戳匹配回填到 `device_history`：
+  - `on_time == ts_text` → 该操作视为开启，回填 `on_user` / `on_snapshot`
+  - `off_time == ts_text` → 该操作视为关闭，回填 `off_user` / `off_snapshot`
+  - 同一条记录的开/关可分别由不同用户操作匹配，互不影响
+- **仅覆盖有值项**：用户或快照为空时不覆盖已有值，避免物理按键等无 user_actions 的操作清空历史。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION 2.14.0 → 2.15.0 |
+| `__init__.py` | `device_history` 建表新增 on_user/off_user/on_snapshot/off_snapshot 4列 + 迁移补列 |
+| `http_api.py` | `ActionLogView.post` 写入 user_actions 后新增 `_link_device_history_to_actions` 关联回填逻辑 |
+| `manifest.json` | 版本 2.15.0 |
+
+---
+
 ## 2026-08-29 — v2.14.0 近期使用设备按用户分组统计
 
 ### 📊 近期使用设备传感器按用户分组

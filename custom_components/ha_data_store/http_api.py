@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -636,16 +637,50 @@ class CustomRoutesView(_BaseDBView):
             _LOGGER.exception("保存自定义路由失败")
             return self.json({"success": False, "error": str(exc)}, status_code=500)
 
+    async def delete(self, request: web.Request) -> web.Response:
+        """删除指定 route_path 的自定义路由。"""
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+
+        route_path = (request.query.get("route_path") or "").strip()
+        if not route_path:
+            return self.json({"success": False, "error": "route_path 不能为空"}, status_code=400)
+
+        def _del() -> int:
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.execute(
+                    f"DELETE FROM {TABLE_CUSTOM_ROUTES} WHERE route_path = ?",
+                    (route_path,),
+                )
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+        try:
+            removed = await self._exec_in_executor(hass, _del)
+            if removed == 0:
+                return self.json({"success": False, "error": f"路由 '{route_path}' 不存在"}, status_code=404)
+            return self.json({"success": True, "message": f"路由 '{route_path}' 已删除"})
+        except Exception as exc:
+            _LOGGER.exception("删除自定义路由失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
 
 # ========================================================================== #
 #  5. ★ 核心万能动态路由 DynamicRouterView ★                                 #
-#     挂载路径: /api/device_energy/custom/{tail:.*}                          #
+#     挂载路径: /api/device_energy/custom/{tail}                             #
 #     运行时从 custom_routes 表实时检索 SQL 并执行                              #
 # ========================================================================== #
 class DynamicRouterView(_BaseDBView):
     """万能动态路由：拦截请求 → 提取尾缀 → 查库取 SQL → 安全校验 → 执行返回。"""
 
-    url = "/api/ha_data_store/custom/{tail:.*}"
+    url = "/api/ha_data_store/custom/{tail}"
     name = "api:ha_data_store:dynamic_router"
 
     def __init__(self, db_path: str, hass: HomeAssistant) -> None:
@@ -707,16 +742,24 @@ class DynamicRouterView(_BaseDBView):
 
         # 解析 GET Query 参数，构建安全参数绑定
         query_params = dict(request.query)
-        params: list[str] = []
-        if query_params:
-            for key in sorted(query_params.keys()):
-                params.append(query_params[key])
+        # 鉴权参数（key 等）不是 SQL 绑定参数，需排除
+        _NON_SQL_KEYS = {"key", "auth", "access_token"}
+        # 支持两种占位符：
+        #  1) 命名占位符（:name / @name / $name）→ 按名从 query 取值绑定（dict）
+        #  2) 传统 ? 占位符 → 按 query 参数字母序绑定（list，兼容旧配置）
+        named_hits = re.findall(r"[:@$]([A-Za-z_][A-Za-z0-9_]*)", sql_statement)
+        if named_hits:
+            bind_params: dict = {name: query_params.get(name, "") for name in named_hits}
+        else:
+            bind_params: list = [
+                query_params[k] for k in sorted(query_params.keys()) if k not in _NON_SQL_KEYS
+            ]
 
         def _execute_sql() -> list[dict]:
             conn = sqlite3.connect(db_path)
             try:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute(sql_statement, params)
+                cursor = conn.execute(sql_statement, bind_params)
                 rows = cursor.fetchall()
                 return [dict(row) for row in rows]
             finally:
@@ -725,24 +768,32 @@ class DynamicRouterView(_BaseDBView):
         try:
             result = await self._exec_in_executor(self._hass, _execute_sql)
             return self.json({"success": True, "data": result})
-        except sqlite3.OperationalError as exc:
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError) as exc:
             _LOGGER.warning("动态路由 SQL 执行错误 [%s]: %s", tail, exc)
             return self.json({"success": False, "error": f"SQL 执行错误: {exc}"}, status_code=400)
         except Exception as exc:
             _LOGGER.exception("动态路由未知异常 [%s]", tail)
             return self.json({"success": False, "error": f"服务器内部错误: {exc}"}, status_code=500)
 
-    async def get(self, request: web.Request) -> web.Response:
-        return await self._handle_dynamic(request)
+    async def get(self, request: web.Request, **kwargs) -> web.Response:
+        return await self._safe_dynamic(request)
 
-    async def post(self, request: web.Request) -> web.Response:
-        return await self._handle_dynamic(request)
+    async def post(self, request: web.Request, **kwargs) -> web.Response:
+        return await self._safe_dynamic(request)
 
-    async def put(self, request: web.Request) -> web.Response:
-        return await self._handle_dynamic(request)
+    async def put(self, request: web.Request, **kwargs) -> web.Response:
+        return await self._safe_dynamic(request)
 
-    async def delete(self, request: web.Request) -> web.Response:
-        return await self._handle_dynamic(request)
+    async def delete(self, request: web.Request, **kwargs) -> web.Response:
+        return await self._safe_dynamic(request)
+
+    async def _safe_dynamic(self, request: web.Request) -> web.Response:
+        """动态路由兜底：任何异常都返回明确错误并记录日志，避免 500 空白页。"""
+        try:
+            return await self._handle_dynamic(request)
+        except Exception as exc:
+            _LOGGER.exception("动态路由异常 [%s]", request.path)
+            return self.json({"success": False, "error": f"服务器内部错误: {exc}"}, status_code=500)
 
 
 # ========================================================================== #
@@ -773,7 +824,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail"},
                 status_code=400,
             )
 
@@ -787,6 +838,22 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_device_history, db_path, request)
             elif query_type == "device_summary":
                 result = await self._exec_in_executor(hass, self._query_device_summary, db_path, request)
+            elif query_type == "device_users_list":
+                result = await self._exec_in_executor(hass, self._query_device_users_list, db_path, request)
+            elif query_type == "device_user_history":
+                result = await self._exec_in_executor(hass, self._query_device_user_history, db_path, request)
+            elif query_type == "device_user_summary":
+                result = await self._exec_in_executor(hass, self._query_device_user_summary, db_path, request)
+            elif query_type == "device_on_user_history":
+                result = await self._exec_in_executor(hass, self._query_device_on_user_history, db_path, request)
+            elif query_type == "device_off_user_history":
+                result = await self._exec_in_executor(hass, self._query_device_off_user_history, db_path, request)
+            elif query_type == "device_user_by_date":
+                result = await self._exec_in_executor(hass, self._query_device_user_by_date, db_path, request)
+            elif query_type == "device_user_by_month":
+                result = await self._exec_in_executor(hass, self._query_device_user_by_month, db_path, request)
+            elif query_type == "device_user_month_dates":
+                result = await self._exec_in_executor(hass, self._query_device_user_month_dates, db_path, request)
             elif query_type == "env_history":
                 result = await self._exec_in_executor(hass, self._query_env_history, db_path, request)
             elif query_type == "env_latest":
@@ -1056,6 +1123,418 @@ class QueryView(_BaseDBView):
             where_clause = " AND ".join(conditions)
 
             return self._calc_device_summary_by_where(conn, where_clause, sql_params, pattern)
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  设备历史 - 用户维度查询                                              #
+    #  说明：基于 device_history 表新增的 on_user / off_user / on_snapshot /
+    #        off_snapshot 字段，提供"按用户 / 按开启 / 按关闭"维度的查询。
+    #        仅新增，不影响已有 device_history / device_summary 逻辑。        #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _build_device_user_where(params: dict, user_name: str, mode: str) -> tuple:
+        """构建设备用户维度的 WHERE 条件。
+
+        params: _extract_params 的结果（含 entity_id/room/date/month/year）
+        user_name: 用户过滤值（空串则不按用户过滤）
+        mode: 'on'/'off'/'both'/'none' —— 决定用户字段匹配方式
+        返回 (conditions, sql_params, pattern)
+        """
+        conditions: list = []
+        sql_params: list = []
+        if params.get("entity_id"):
+            conditions.append("entity_id = ?")
+            sql_params.append(params["entity_id"])
+        if params.get("room"):
+            conditions.append("room = ?")
+            sql_params.append(params["room"])
+        if user_name:
+            if mode == "on":
+                conditions.append("on_user = ?")
+                sql_params.append(user_name)
+            elif mode == "off":
+                conditions.append("off_user = ?")
+                sql_params.append(user_name)
+            elif mode == "both":
+                conditions.append("(on_user = ? OR off_user = ?)")
+                sql_params += [user_name, user_name]
+        if params.get("date"):
+            pattern = f'{params["date"]}%'
+        elif params.get("month"):
+            pattern = f'{params["month"]}-%'
+        elif params.get("year"):
+            pattern = f'{params["year"]}-%'
+        else:
+            pattern = "%"
+        return conditions, sql_params, pattern
+
+    def _query_device_users_list(self, db_path: str, request: web.Request) -> dict:
+        """列出所有操作过设备的用户（on_user ∪ off_user 去重）。
+        每个用户一行：on_count（开启次数）、off_count（关闭次数）、
+        total_count（参与次数=on+off）、entity_count（涉及设备数）。
+        支持可选 date/month/year/room 过滤。
+        """
+        params = self._extract_params(request)
+        conditions, sql_params, pattern = self._build_device_user_where(params, "", "none")
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT user, "
+                f"  SUM(on_cnt) AS on_count, "
+                f"  SUM(off_cnt) AS off_count, "
+                f"  SUM(on_cnt) + SUM(off_cnt) AS total_count, "
+                f"  COUNT(DISTINCT entity_id) AS entity_count "
+                f"FROM ( "
+                f"  SELECT on_user AS user, 1 AS on_cnt, 0 AS off_cnt, entity_id "
+                f"    FROM {TABLE_DEVICE_HISTORY} "
+                f"    WHERE {where_clause} AND on_time LIKE ? AND on_user != '' "
+                f"  UNION ALL "
+                f"  SELECT off_user AS user, 0 AS on_cnt, 1 AS off_cnt, entity_id "
+                f"    FROM {TABLE_DEVICE_HISTORY} "
+                f"    WHERE {where_clause} AND on_time LIKE ? AND off_user != '' "
+                f") "
+                f"GROUP BY user "
+                f"ORDER BY total_count DESC",
+                (*sql_params, pattern, *sql_params, pattern),
+            ).fetchall()
+            users = [dict(r) for r in rows]
+            total_users = len(users)
+            total_actions = sum((u["on_count"] or 0) + (u["off_count"] or 0) for u in users)
+            return {"users": users, "total_users": total_users, "total_actions": total_actions}
+        finally:
+            conn.close()
+
+    def _query_device_user_history(self, db_path: str, request: web.Request) -> dict:
+        """按用户查设备使用记录（匹配 on_user 或 off_user）。
+        参数：user_name（必填）、direction=on|off|both（默认 both）、
+             date/month/year/room/entity_id/limit。
+        每条记录标注 matched（on/off）指明匹配到开启还是关闭字段。
+        """
+        params = self._extract_params(request)
+        user_name = (request.query.get("user_name") or "").strip()
+        if not user_name:
+            raise ValueError("user_name 必填")
+        direction = (request.query.get("direction") or "both").strip().lower()
+        if direction not in ("on", "off", "both"):
+            direction = "both"
+        limit = params["limit"] or 200
+
+        conditions, sql_params, pattern = self._build_device_user_where(params, user_name, direction)
+        conditions.append("on_time LIKE ?")
+        sql_params.append(pattern)
+        where_clause = " AND ".join(conditions)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {where_clause} ORDER BY on_time DESC LIMIT ?",
+                (*sql_params, limit),
+            ).fetchall()
+            records = []
+            for row in rows:
+                d = dict(row)
+                # 标注该记录匹配到的用户方向
+                if direction == "on":
+                    d["matched"] = "on"
+                elif direction == "off":
+                    d["matched"] = "off"
+                else:
+                    d["matched"] = "on" if d.get("on_user") == user_name else "off"
+                records.append(d)
+            self._parse_records_state_attr(records)
+            return {"user_name": user_name, "direction": direction, "count": len(records), "records": records}
+        finally:
+            conn.close()
+
+    def _query_device_user_summary(self, db_path: str, request: web.Request) -> dict:
+        """按用户汇总（device_history 的 on_user/off_user）。
+        每个用户一行：on_count（开启次数）、off_count（关闭次数）、
+        total_count、entity_count、total_energy、total_duration。
+        支持可选 user_name 过滤、date/month/year/room 过滤。
+        """
+        params = self._extract_params(request)
+        user_name = (request.query.get("user_name") or "").strip()
+        conditions, sql_params, pattern = self._build_device_user_where(params, user_name, "both")
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT user, "
+                f"  SUM(on_cnt) AS on_count, "
+                f"  SUM(off_cnt) AS off_count, "
+                f"  SUM(on_cnt) + SUM(off_cnt) AS total_count, "
+                f"  COUNT(DISTINCT entity_id) AS entity_count, "
+                f"  COALESCE(SUM(energy), 0) AS total_energy, "
+                f"  COALESCE(SUM(duration), 0) AS total_duration "
+                f"FROM ( "
+                f"  SELECT on_user AS user, 1 AS on_cnt, 0 AS off_cnt, "
+                f"         entity_id, energy_consumed AS energy, duration "
+                f"    FROM {TABLE_DEVICE_HISTORY} "
+                f"    WHERE {where_clause} AND on_time LIKE ? AND on_user != '' "
+                f"  UNION ALL "
+                f"  SELECT off_user AS user, 0 AS on_cnt, 1 AS off_cnt, "
+                f"         entity_id, energy_consumed AS energy, duration "
+                f"    FROM {TABLE_DEVICE_HISTORY} "
+                f"    WHERE {where_clause} AND on_time LIKE ? AND off_user != '' "
+                f") "
+                f"GROUP BY user "
+                f"ORDER BY total_count DESC",
+                (*sql_params, pattern, *sql_params, pattern),
+            ).fetchall()
+            users = []
+            for r in rows:
+                d = dict(r)
+                d["total_energy"] = round(d.get("total_energy") or 0, 2)
+                d["total_duration"] = round(d.get("total_duration") or 0, 0)
+                users.append(d)
+            total_users = len(users)
+            total_actions = sum((u["on_count"] or 0) + (u["off_count"] or 0) for u in users)
+            return {"users": users, "total_users": total_users, "total_actions": total_actions}
+        finally:
+            conn.close()
+
+    def _query_device_on_user_history(self, db_path: str, request: web.Request) -> dict:
+        """只看开启用户维度：查 on_user 非空（或指定 user_name）的设备开启记录。"""
+        params = self._extract_params(request)
+        user_name = (request.query.get("user_name") or "").strip()
+        limit = params["limit"] or 200
+        conditions, sql_params, pattern = self._build_device_user_where(params, user_name, "on")
+        conditions.append("on_time LIKE ?")
+        sql_params.append(pattern)
+        where_clause = " AND ".join(conditions)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {where_clause} ORDER BY on_time DESC LIMIT ?",
+                (*sql_params, limit),
+            ).fetchall()
+            records = [dict(r) for r in rows]
+            self._parse_records_state_attr(records)
+            # 用户下拉候选：该维度下出现过的开启用户
+            user_conds, user_params, _p = self._build_device_user_where(params, "", "none")
+            user_where = " AND ".join(user_conds) if user_conds else "1=1"
+            users = [r["user"] for r in conn.execute(
+                f"SELECT DISTINCT on_user AS user FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {user_where} AND on_time LIKE ? AND on_user != '' ORDER BY user",
+                (*user_params, pattern),
+            ).fetchall()]
+            return {"user_name": user_name, "count": len(records), "users": users, "records": records}
+        finally:
+            conn.close()
+
+    def _query_device_off_user_history(self, db_path: str, request: web.Request) -> dict:
+        """只看关闭用户维度：查 off_user 非空（或指定 user_name）的设备关闭记录。"""
+        params = self._extract_params(request)
+        user_name = (request.query.get("user_name") or "").strip()
+        limit = params["limit"] or 200
+        conditions, sql_params, pattern = self._build_device_user_where(params, user_name, "off")
+        conditions.append("on_time LIKE ?")
+        sql_params.append(pattern)
+        where_clause = " AND ".join(conditions)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {where_clause} ORDER BY on_time DESC LIMIT ?",
+                (*sql_params, limit),
+            ).fetchall()
+            records = [dict(r) for r in rows]
+            self._parse_records_state_attr(records)
+            user_conds, user_params, _p = self._build_device_user_where(params, "", "none")
+            user_where = " AND ".join(user_conds) if user_conds else "1=1"
+            users = [r["user"] for r in conn.execute(
+                f"SELECT DISTINCT off_user AS user FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {user_where} AND on_time LIKE ? AND off_user != '' ORDER BY user",
+                (*user_params, pattern),
+            ).fetchall()]
+            return {"user_name": user_name, "count": len(records), "users": users, "records": records}
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  device_user_by_date：指定实体指定日期的用户操作记录                    #
+    #  查询 device_history 中指定实体或房间、指定日期（on_time 前缀匹配）且      #
+    #  on_user 或 off_user 非空（或匹配指定用户）的记录，返回 JSON。            #
+    #  参数：entity_id 或 room（至少一个）、date（YYYY-MM-DD，必填）、           #
+    #       user_name（可选）、limit                                            #
+    # ------------------------------------------------------------------ #
+    def _query_device_user_by_date(self, db_path: str, request: web.Request) -> dict:
+        params = self._extract_params(request)
+        entity_id = params["entity_id"]
+        room = params["room"]
+        date = params["date"]
+        if not entity_id and not room:
+            raise ValueError("entity_id 与 room 至少提供一个")
+        if not date:
+            raise ValueError("date 必填（格式 YYYY-MM-DD）")
+        user_name = (request.query.get("user_name") or "").strip()
+        limit = params["limit"] or 200
+
+        pattern = f"{date}%"
+        # 用户过滤：指定 user_name 时按 on_user/off_user 精确匹配；否则取任意非空用户
+        if user_name:
+            user_cond = "(on_user = ? OR off_user = ?)"
+            user_params = [user_name, user_name]
+        else:
+            user_cond = "(on_user != '' OR off_user != '')"
+            user_params = []
+        # entity_id 与 room 过滤（二选一，可同时传）
+        conds = []
+        cond_params = []
+        if entity_id:
+            conds.append("entity_id = ?")
+            cond_params.append(entity_id)
+        if room:
+            conds.append("room = ?")
+            cond_params.append(room)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {' AND '.join(conds)} AND on_time LIKE ? AND {user_cond} "
+                f"ORDER BY on_time ASC LIMIT ?",
+                (*cond_params, pattern, *user_params, limit),
+            ).fetchall()
+            records = [dict(r) for r in rows]
+            self._parse_records_state_attr(records)
+            return {
+                "entity_id": entity_id,
+                "room": room,
+                "date": date,
+                "user_name": user_name,
+                "count": len(records),
+                "records": records,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  device_user_by_month：指定实体指定月份的用户操作记录                    #
+    #  查询 device_history 中指定实体或房间、指定月份（on_time 前缀匹配 YYYY-MM） #
+    #  on_user 或 off_user 非空（或匹配指定用户）的记录，返回 JSON。            #
+    #  参数：entity_id 或 room（至少一个）、month（YYYY-MM，必填）、             #
+    #       user_name（可选）、limit                                            #
+    # ------------------------------------------------------------------ #
+    def _query_device_user_by_month(self, db_path: str, request: web.Request) -> dict:
+        params = self._extract_params(request)
+        entity_id = params["entity_id"]
+        room = params["room"]
+        month = params["month"]
+        if not entity_id and not room:
+            raise ValueError("entity_id 与 room 至少提供一个")
+        if not month:
+            raise ValueError("month 必填（格式 YYYY-MM）")
+        user_name = (request.query.get("user_name") or "").strip()
+        limit = params["limit"] or 500
+
+        pattern = f"{month}-%"
+        # 用户过滤：指定 user_name 时按 on_user/off_user 精确匹配；否则取任意非空用户
+        if user_name:
+            user_cond = "(on_user = ? OR off_user = ?)"
+            user_params = [user_name, user_name]
+        else:
+            user_cond = "(on_user != '' OR off_user != '')"
+            user_params = []
+        # entity_id 与 room 过滤（二选一，可同时传）
+        conds = []
+        cond_params = []
+        if entity_id:
+            conds.append("entity_id = ?")
+            cond_params.append(entity_id)
+        if room:
+            conds.append("room = ?")
+            cond_params.append(room)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {' AND '.join(conds)} AND on_time LIKE ? AND {user_cond} "
+                f"ORDER BY on_time ASC LIMIT ?",
+                (*cond_params, pattern, *user_params, limit),
+            ).fetchall()
+            records = [dict(r) for r in rows]
+            self._parse_records_state_attr(records)
+            return {
+                "entity_id": entity_id,
+                "room": room,
+                "month": month,
+                "user_name": user_name,
+                "count": len(records),
+                "records": records,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  device_user_month_dates：指定实体指定月份有用户操作的日期列表            #
+    #  查询 device_history 中指定实体、指定月份（on_time 前缀匹配 YYYY-MM）且    #
+    #  on_user 或 off_user 非空的记录，按日期去重，返回该月内有用户操作的日期。    #
+    #  参数：entity_id（必填）、month（YYYY-MM，必填）、user_name（可选）       #
+    # ------------------------------------------------------------------ #
+    def _query_device_user_month_dates(self, db_path: str, request: web.Request) -> dict:
+        params = self._extract_params(request)
+        entity_id = params["entity_id"]
+        room = params["room"]
+        month = params["month"]
+        if not entity_id and not room:
+            raise ValueError("entity_id 与 room 至少提供一个")
+        if not month:
+            raise ValueError("month 必填（格式 YYYY-MM）")
+        user_name = (request.query.get("user_name") or "").strip()
+
+        pattern = f"{month}-%"
+        # 用户过滤：指定 user_name 时按 on_user/off_user 精确匹配；否则取任意非空用户
+        if user_name:
+            user_cond = "(on_user = ? OR off_user = ?)"
+            user_params = [user_name, user_name]
+        else:
+            user_cond = "(on_user != '' OR off_user != '')"
+            user_params = []
+        # entity_id 与 room 过滤（二选一，可同时传）
+        conds = []
+        cond_params = []
+        if entity_id:
+            conds.append("entity_id = ?")
+            cond_params.append(entity_id)
+        if room:
+            conds.append("room = ?")
+            cond_params.append(room)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT SUBSTR(on_time, 1, 10) AS date, COUNT(*) AS count "
+                f"FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {' AND '.join(conds)} AND on_time LIKE ? AND {user_cond} "
+                f"GROUP BY SUBSTR(on_time, 1, 10) "
+                f"ORDER BY date",
+                (*cond_params, pattern, *user_params),
+            ).fetchall()
+            dates = [dict(r) for r in rows]
+            total = sum((d["count"] or 0) for d in dates)
+            return {
+                "entity_id": entity_id,
+                "room": room,
+                "month": month,
+                "user_name": user_name,
+                "day_count": len(dates),
+                "total": total,
+                "dates": dates,
+            }
         finally:
             conn.close()
 
@@ -6163,6 +6642,133 @@ def _verify_admin(db_path: str, password: str) -> bool:
 
 
 # ========================================================================== #
+#  数据库字段编辑 DbAlterTableView                                            #
+#  用途：为数据库浏览器提供"增加字段 / 删除字段"能力（ALTER TABLE）。            #
+#        依赖全局编辑开关 db_edit_enabled，无需单独管理员密码。                  #
+#        保护核心表，禁止增删核心表字段。                                       #
+# ========================================================================== #
+class DbAlterTableView(_BaseDBView):
+    """增加/删除数据库表字段（ALTER TABLE ADD/DROP COLUMN）。"""
+
+    url = "/api/ha_data_store/alter_table"
+    name = "api:ha_data_store:alter_table"
+
+    # 允许的 SQLite 字段类型白名单
+    _ALLOWED_TYPES = {
+        "TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC",
+        "BOOLEAN", "DATE", "DATETIME",
+    }
+
+    # 核心表：禁止增删字段
+    _PROTECTED = {
+        TABLE_ENTITY_CONFIGS, TABLE_CUSTOM_ROUTES,
+        TABLE_ATTR_TYPE_DEFS, TABLE_API_KEYS, TABLE_API_SETTINGS,
+        TABLE_EXPORT_CONFIGS, TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS,
+        TABLE_VACUUM_TYPE_DEFS, TABLE_VACUUM_CONFIGS,
+    }
+
+    @staticmethod
+    def _valid_identifier(name: str) -> bool:
+        """标识符白名单校验：字母/数字/下划线开头，防 SQL 注入。"""
+        if not name:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
+
+    def _list_columns(self, conn, table: str) -> list:
+        """返回表的所有列信息（PRAGMA table_info）。"""
+        return conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+
+    async def post(self, request: web.Request) -> web.Response:
+        """POST: 增加或删除字段。body: {table, action: 'add'|'drop', column, type?, default?}"""
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        table = (body.get("table") or "").strip()
+        action = (body.get("action") or "").strip().lower()
+        column = (body.get("column") or "").strip()
+        col_type = (body.get("type") or "").strip().upper()
+        default = body.get("default")
+
+        if not table:
+            return self.json({"success": False, "error": "table 不能为空"}, status_code=400)
+        if action not in ("add", "drop"):
+            return self.json({"success": False, "error": "action 必须为 add 或 drop"}, status_code=400)
+        if not self._valid_identifier(table):
+            return self.json({"success": False, "error": "表名非法"}, status_code=400)
+        if table in self._PROTECTED:
+            return self.json({"success": False, "error": f"核心表 '{table}' 不允许增删字段"}, status_code=400)
+        if not self._valid_identifier(column):
+            return self.json({"success": False, "error": "字段名非法"}, status_code=400)
+
+        def _alter() -> str:
+            conn = sqlite3.connect(db_path)
+            try:
+                info = self._list_columns(conn, table)
+                if not info:
+                    raise ValueError(f"表 '{table}' 不存在")
+                cols = {row[1] for row in info}
+                if action == "add":
+                    if column in cols:
+                        raise ValueError(f"字段 '{column}' 已存在")
+                    if not col_type:
+                        raise ValueError("新增字段必须指定类型")
+                    # 类型白名单校验
+                    base_type = col_type.split("(")[0].strip()
+                    if base_type not in self._ALLOWED_TYPES:
+                        raise ValueError(f"不允许的字段类型 '{col_type}'")
+                    ddl = f'ALTER TABLE "{table}" ADD COLUMN "{column}" {col_type}'
+                    if default is not None and default != "":
+                        ddl += f" DEFAULT {default}"
+                    conn.execute(ddl)
+                    conn.commit()
+                    return f"字段 '{column}' 已添加"
+                else:  # drop
+                    if column not in cols:
+                        raise ValueError(f"字段 '{column}' 不存在")
+                    # 主键列不可删除
+                    pk_cols = {row[1] for row in info if row[6] > 0}
+                    if column in pk_cols:
+                        raise ValueError(f"主键字段 '{column}' 不允许删除")
+                    # SQLite 版本检查（DROP COLUMN 需 3.35.0+）
+                    if not _sqlite_version_ge(3, 35, 0):
+                        raise ValueError("当前 SQLite 版本过低，不支持 DROP COLUMN")
+                    conn.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+                    conn.commit()
+                    return f"字段 '{column}' 已删除"
+            finally:
+                conn.close()
+
+        try:
+            message = await self._exec_in_executor(hass, _alter)
+            return self.json({"success": True, "message": message, "table": table, "action": action, "column": column})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+def _sqlite_version_ge(major: int, minor: int, patch: int) -> bool:
+    """检查 sqlite3 运行时版本是否 >= 指定版本。"""
+    parts = sqlite3.sqlite_version.split(".")
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return False
+    while len(nums) < 3:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2]) >= (major, minor, patch)
+
+
+# ========================================================================== #
 #  实体→网络：数据访问管理（自动生成唯一地址）                                     #
 # ========================================================================== #
 class PushTargetsView(_BaseDBView):
@@ -8102,6 +8708,67 @@ class ReportEntitiesView(_BaseDBView):
 #        追加写入 user_actions 表（不去重，保留每次操作以便统计使用习惯）。         #
 #        写入成功后立即触发 user_actions_sensor 实时刷新（近30天聚合）。           #
 # =========================================================================== #
+def _link_device_history_to_actions(db_path: str, items: list) -> None:
+    """把新写入 user_actions 的用户/快照关联回填到 device_history。
+
+    关联规则：device_history.entity_id == user_actions.entity_id 且
+      on_time  == ts_text → 该操作视为开启，回填 on_user / on_snapshot；
+      off_time == ts_text → 该操作视为关闭，回填 off_user / off_snapshot。
+
+    items: [{entity_id, ts_text, user_name, action_snapshot}]（本次新写入的操作）。
+    同一条 device_history 记录的 on_time 与 off_time 可分别由不同操作匹配，
+    互不影响。ts_text 为空或 entity_id 为空则跳过。
+    """
+    valid = [it for it in items if it and it.get("entity_id") and it.get("ts_text")]
+    if not valid:
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            for it in valid:
+                eid = it["entity_id"]
+                ts_text = it["ts_text"]
+                user = (it.get("user_name") or "").strip()
+                snap = it.get("action_snapshot") or ""
+                # 查该实体在 ts_text 时刻是否存在 on_time / off_time 命中的记录
+                rows = conn.execute(
+                    f"SELECT id, on_time, off_time, on_user, off_user FROM {TABLE_DEVICE_HISTORY} "
+                    f"WHERE entity_id = ? AND (on_time = ? OR off_time = ?)",
+                    (eid, ts_text, ts_text),
+                ).fetchall()
+                for row in rows:
+                    record_id = row[0]
+                    # 命中 on_time → 开启用户（用户/快照非空才覆盖）
+                    if row[1] == ts_text:
+                        if user:
+                            conn.execute(
+                                f"UPDATE {TABLE_DEVICE_HISTORY} SET on_user = ? WHERE id = ?",
+                                (user, record_id),
+                            )
+                        if snap:
+                            conn.execute(
+                                f"UPDATE {TABLE_DEVICE_HISTORY} SET on_snapshot = ? WHERE id = ?",
+                                (snap, record_id),
+                            )
+                    # 命中 off_time → 关闭用户
+                    if row[2] == ts_text:
+                        if user:
+                            conn.execute(
+                                f"UPDATE {TABLE_DEVICE_HISTORY} SET off_user = ? WHERE id = ?",
+                                (user, record_id),
+                            )
+                        if snap:
+                            conn.execute(
+                                f"UPDATE {TABLE_DEVICE_HISTORY} SET off_snapshot = ? WHERE id = ?",
+                                (snap, record_id),
+                            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        _LOGGER.warning("[action_log] 关联 device_history 用户失败: %s", exc)
+
+
 class ActionLogView(_BaseDBView):
     """前端操作记录上报。
 
@@ -8130,10 +8797,12 @@ class ActionLogView(_BaseDBView):
         db_path = self._db_path
         now = _get_local_iso(DEFAULT_TIMEZONE)
 
-        def _insert() -> int:
+        def _insert() -> tuple[int, list]:
             conn = sqlite3.connect(db_path)
             try:
                 inserted = 0
+                # 收集本次成功写入的记录，用于后续关联 device_history（on_user/off_user 等）
+                matched_items: list = []
                 for item in raw_actions:
                     if not isinstance(item, dict):
                         continue
@@ -8188,16 +8857,30 @@ class ActionLogView(_BaseDBView):
                         ),
                     )
                     inserted += 1
+                    # 收集本次插入记录，用于 device_history 关联（含可能的空用户/空快照）
+                    matched_items.append({
+                        "entity_id": eid,
+                        "ts_text": ts_text,
+                        "user_name": user_name,
+                        "action_snapshot": snap,
+                    })
                 conn.commit()
-                return inserted
+                return (inserted, matched_items)
             finally:
                 conn.close()
 
         try:
-            inserted = await self._exec_in_executor(hass, _insert)
+            inserted, matched_items = await self._exec_in_executor(hass, _insert)
         except Exception as exc:
             _LOGGER.exception("[action_log] 写入失败")
             return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        # 关联 device_history：把本次操作的用户/快照回填到对应 on_time/off_time 记录
+        if matched_items:
+            try:
+                await self._exec_in_executor(hass, _link_device_history_to_actions, db_path, matched_items)
+            except Exception as exc:
+                _LOGGER.warning("[action_log] 关联 device_history 用户失败: %s", exc)
 
         # 写入成功后实时刷新常用设备统计 sensor
         try:

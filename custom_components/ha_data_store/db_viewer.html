@@ -175,6 +175,12 @@
   .sub-tab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   .sub-tab-badge { display: none; position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; background: var(--accent); color: #fff; font-size: 10px; line-height: 16px; text-align: center; border-radius: 8px; padding: 0 4px; }
   .sub-tab-badge.show { display: inline-block; }
+  /* API 工具子选项卡 */
+  .api-sub-tab-btn { background: var(--card); color: var(--text2); border: 1px solid var(--border); padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 6px; white-space: nowrap; }
+  .api-sub-tab-btn:hover { background: var(--hover); color: var(--text); }
+  .api-sub-tab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .api-sub-panel { display: none; }
+  .api-sub-panel.active { display: block; }
   .sub-panel { display: none; }
   .sub-panel.active { display: block; }
   .sep-title { color: var(--accent); font-size: 12px; margin: 16px 0 8px; padding: 4px 0 4px 10px; border-left: 3px solid var(--accent); font-weight: 500; }
@@ -219,6 +225,7 @@
     <button class="btn-accent" onclick="initDbViewer()" style="font-size:12px;padding:6px 12px">🔄 刷新</button>
     <button id="btnBatchDel" class="btn-batch-del hidden" onclick="batchDeleteRows()" title="批量删除选中的数据行">🗑 批量删除</button>
     <button class="btn-accent" onclick="deleteSelectedTable()" style="background:#c0392b;border-color:#c0392b;font-size:12px;padding:6px 12px" title="删除当前选中表（需管理员密码）">🗑 删表</button>
+    <button class="btn-accent" onclick="openAlterTablePanel()" style="background:#16a085;border-color:#16a085;font-size:12px;padding:6px 12px" title="查看/添加/删除当前表的字段">🧬 字段管理</button>
     <button id="btnVacuum" class="btn-accent" onclick="vacuumDatabase()" style="background:var(--orange);border-color:var(--orange);font-size:12px;padding:6px 12px" title="压缩数据库文件">🗜 压缩</button>
     <button class="btn-accent" onclick="showUnclosedToday()" style="background:#8e44ad;border-color:#8e44ad;font-size:12px;padding:6px 12px" title="查找当日有on_time但没有off_time的记录">⚠ 未关闭记录</button>
     <button class="btn-accent" onclick="showSQLModal()" style="background:#2ecc71;border-color:#2ecc71;font-size:12px;padding:6px 12px" title="执行自定义 SQL 语句">▶ 执行SQL</button>
@@ -276,6 +283,38 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button id="sqlBtnNext" onclick="sqlLoadPage(sqlCurPage+1)">下一页</button>
     <button id="sqlBtnLast" onclick="sqlLoadPage(sqlTotalPages)">末页</button>
   </div>
+</div>
+
+<!-- 字段管理模态框 -->
+<div id="alterTableModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:999" onclick="closeAlterTableModal()"></div>
+<div id="alterTableModal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 20px;z-index:1000;width:80%;max-width:900px;max-height:85vh;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.6)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <h4 style="color:var(--accent);margin:0">🧬 字段管理：<span id="alterTableName" style="font-family:monospace"></span></h4>
+    <button onclick="closeAlterTableModal()" style="background:transparent;border:none;color:var(--text2);cursor:pointer;font-size:18px;padding:0 4px">✕</button>
+  </div>
+  <div style="margin:4px 0;font-size:12px;color:var(--text2);background:var(--bg);padding:8px;border-radius:6px;border:1px dashed var(--border)">
+    ⚠️ 增加/删除字段依赖全局「数据库修改」开关。核心表字段受保护不可改，删除字段需 SQLite 3.35+（主键字段不可删）。
+  </div>
+  <div style="display:flex;gap:8px;margin:10px 0;align-items:center;flex-wrap:wrap;background:var(--bg);padding:10px;border-radius:6px;border:1px solid var(--border)">
+    <b style="font-size:13px">➕ 添加字段：</b>
+    <input id="alterAddCol" placeholder="字段名" style="padding:6px;font-size:12px;width:150px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+    <select id="alterAddType" style="padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+      <option value="TEXT">TEXT</option>
+      <option value="INTEGER">INTEGER</option>
+      <option value="REAL">REAL</option>
+      <option value="NUMERIC">NUMERIC</option>
+      <option value="BOOLEAN">BOOLEAN</option>
+      <option value="BLOB">BLOB</option>
+    </select>
+    <input id="alterAddDefault" placeholder="默认值(可空)" style="padding:6px;font-size:12px;width:120px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+    <button class="btn-green" onclick="addDbColumn()" style="padding:6px 14px">添加</button>
+    <span id="alterAddStatus" style="font-size:12px;color:var(--text2)"></span>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <b style="font-size:13px">现有字段：</b>
+    <button onclick="refreshAlterColumns()" style="padding:4px 10px;font-size:12px">🔄 刷新</button>
+  </div>
+  <div id="alterColumns" style="max-height:calc(85vh - 260px);overflow:auto;border:1px solid var(--border);border-radius:6px"></div>
 </div>
 
 <!-- ================================================ -->
@@ -958,6 +997,11 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
 <!--  Tab 5: API工具                                      -->
 <!-- ================================================ -->
 <div id="tab-api" class="tab-panel">
+  <div class="sub-tabs" style="margin:16px 0 8px">
+    <button class="api-sub-tab-btn active" onclick="switchApiSubTab('gen')">🔗 API 地址生成器</button>
+    <button class="api-sub-tab-btn" onclick="switchApiSubTab('routes')">🛠 自定义路由管理</button>
+  </div>
+  <div id="apisub-gen" class="api-sub-panel active">
   <div class="section" style="margin-bottom:10px">
     <h3>🔗 API 地址生成器</h3>
     <div class="hint">生成的 URL 会自动带上选中的 API Key。</div>
@@ -970,6 +1014,14 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <optgroup label="设备类">
           <option value="device_history">设备开关记录</option>
           <option value="device_summary">设备汇总</option>
+          <option value="device_users_list">👥 设备操作用户列表</option>
+          <option value="device_user_history">👤 按用户查设备记录</option>
+          <option value="device_user_summary">📊 按用户设备汇总</option>
+          <option value="device_on_user_history">🔛 按开启用户查设备记录</option>
+          <option value="device_off_user_history">🔚 按关闭用户查设备记录</option>
+          <option value="device_user_by_date">📅 指定实体指定日期用户操作记录</option>
+          <option value="device_user_by_month">🗓 指定实体指定月份用户操作记录</option>
+          <option value="device_user_month_dates">📅 指定实体指定月份有用户操作的日期</option>
         </optgroup>
         <optgroup label="传感器类">
           <option value="env_history">环境历史</option>
@@ -1043,6 +1095,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="user_actions_entity_summary">🏆 实体操作次数排行</option>
           <option value="user_actions_user_summary">👤 按用户汇总</option>
           <option value="user_actions_entity_last_today">⚡ 实体当日最后一条记录</option>
+        </optgroup>
+        <optgroup label="自定义路由" id="apiCustomRoutesGroup">
         </optgroup>
       </select>
     </div>
@@ -1213,6 +1267,24 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <label>播放列表名称 (name)</label>
       <input type="text" id="apiMediaName" placeholder="如：我的歌单" oninput="generateApiUrl()">
     </div>
+    <!-- 设备用户维度查询专用字段 -->
+    <div id="apiDeviceUserNameRow" style="display:none">
+      <label>用户 (user_name)</label>
+      <input type="text" id="apiDeviceUserName" placeholder="留空=全部用户" oninput="generateApiUrl()">
+    </div>
+    <div id="apiDeviceUserDirRow" style="display:none">
+      <label>匹配方向</label>
+      <select id="apiDeviceUserDir" onchange="generateApiUrl()">
+        <option value="both">开启+关闭</option>
+        <option value="on">仅开启用户</option>
+        <option value="off">仅关闭用户</option>
+      </select>
+    </div>
+    <!-- 自定义路由参数区 -->
+    <div id="apiCustomParamsRow" style="display:none">
+      <label>自定义参数（SQL 中的 :name 占位符）</label>
+      <div id="apiCustomParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
+    </div>
   </div>
 
   <div class="section">
@@ -1234,6 +1306,14 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <table style="font-size:12px;line-height:1.6">
         <tr><td style="color:var(--green);padding-right:16px">device_history</td><td>设备开关记录 · entity_id/date/month/year/room/limit</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_summary</td><td>设备汇总 · entity_id/date/month/year/room</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_users_list</td><td>设备操作用户列表 · date/month/year/room · 各用户开启/关闭次数</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_user_history</td><td>按用户查设备记录 · user_name/direction(on|off|both)/entity_id/date/room/limit · 每条标注 matched</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_user_summary</td><td>按用户设备汇总 · user_name(可选)/date/month/year/room · 开启/关闭次数/设备数/能耗/时长</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_on_user_history</td><td>按开启用户查记录 · user_name(可选)/entity_id/date/room/limit · on_user 非空的开启记录</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_off_user_history</td><td>按关闭用户查记录 · user_name(可选)/entity_id/date/room/limit · off_user 非空的关闭记录</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_user_by_date</td><td>指定实体或房间指定日期用户操作记录 · entity_id或room(至少一个)/date(必填)/user_name(可选)/limit · on_user 或 off_user 非空(或=指定用户)的记录</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_user_by_month</td><td>指定实体或房间指定月份用户操作记录 · entity_id或room(至少一个)/month(必填)/user_name(可选)/limit · on_user 或 off_user 非空(或=指定用户)的记录</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_user_month_dates</td><td>指定实体或房间指定月份有用户操作的日期列表 · entity_id或room(至少一个)/month(必填)/user_name(可选) · 按日期去重返回该月内有 on_user/off_user 非空(或=指定用户)的日期</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">env_history</td><td>环境历史 · entity_id/metric/date/room/limit</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">env_latest</td><td>环境最新 · entity_id/metric</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">attr_history</td><td>属性历史 · attr_type/entity_id/date/room/limit</td></tr>
@@ -1356,6 +1436,38 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div><code style="color:var(--green)">GET /api/ha_data_store/db_viewer/data?table=...&page=1</code> <span style="color:var(--text2)">— 分页查表</span></div>
       <div><code style="color:var(--green)">GET /api/ha_data_store/config</code> <span style="color:var(--text2)">— 实体配置</span></div>
     </div>
+  </div>
+
+  </div>
+
+  <div id="apisub-routes" class="api-sub-panel">
+  <div class="section" style="margin-top:16px">
+    <h3>🛠 自定义路由管理</h3>
+    <div class="hint">把常用查询固化为独立接口，之后通过 <code>GET /api/ha_data_store/custom/{route_path}?参数=值</code> 直接调用，无需改后端。SQL 必须以 SELECT 开头，推荐用 <b>:name 命名占位符</b>（如 <code>:entity_id</code>），保存后可在 API 地址生成器里自动生成参数输入框；也兼容传统 <code>?</code> 占位符（此时按参数字母序绑定）。</div>
+
+    <div style="display:flex;gap:8px;margin:10px 0;align-items:center;flex-wrap:wrap">
+      <button class="btn-green" onclick="newRouteForm()" style="padding:6px 14px">➕ 新建路由</button>
+      <button class="btn-accent" onclick="loadCustomRoutes()" style="padding:6px 14px">🔄 刷新列表</button>
+      <span id="routeListStatus" style="font-size:12px;color:var(--text2)"></span>
+    </div>
+
+    <div id="routeFormWrap" style="display:none;margin:10px 0;background:var(--bg);padding:12px;border-radius:6px;border:1px solid var(--border)">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div><label>接口路径 (route_path)</label><input type="text" id="routePath" placeholder="如：device_energy_month" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box"></div>
+        <div><label>描述 (description)</label><input type="text" id="routeDesc" placeholder="接口用途说明" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box"></div>
+      </div>
+      <div style="margin-bottom:8px"><label>SQL 语句 (sql_statement) — 推荐用 :name 命名占位符</label>
+        <textarea id="routeSql" placeholder="SELECT * FROM device_history WHERE entity_id = :entity_id AND on_time LIKE :month ORDER BY on_time DESC" style="width:100%;height:70px;padding:6px;font-family:monospace;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box;resize:vertical"></textarea>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn-green" onclick="saveCustomRoute()" style="padding:6px 14px">💾 保存</button>
+        <button onclick="cancelRouteForm()" style="padding:6px 12px">取消</button>
+        <span id="routeFormStatus" style="font-size:12px;color:var(--text2)"></span>
+      </div>
+    </div>
+
+    <div id="routeListWrap" style="border:1px solid var(--border);border-radius:6px;overflow:auto;max-height:360px"></div>
+  </div>
   </div>
 </div>
 
@@ -1560,6 +1672,304 @@ async function vacuumDatabase() {
     }
   } catch(e) { btn.disabled = false; btn.textContent = '🗜 压缩'; showToast('请求失败', false); }
 }
+
+// ==============================
+//  字段管理（增加/删除字段）
+// ==============================
+const ALTER_API = '/api/ha_data_store/alter_table';
+const COLUMNS_API = '/api/ha_data_store/table_columns';
+
+function openAlterTablePanel() {
+  const table = document.getElementById('tableSelect').value;
+  if (!table) { showToast('请先选择要操作的数据表', false); return; }
+  document.getElementById('alterTableName').textContent = table;
+  document.getElementById('alterAddCol').value = '';
+  document.getElementById('alterAddDefault').value = '';
+  document.getElementById('alterAddType').value = 'TEXT';
+  document.getElementById('alterAddStatus').textContent = '';
+  document.getElementById('alterTableModalOverlay').style.display = 'block';
+  document.getElementById('alterTableModal').style.display = 'block';
+  refreshAlterColumns();
+}
+
+function closeAlterTableModal() {
+  document.getElementById('alterTableModalOverlay').style.display = 'none';
+  document.getElementById('alterTableModal').style.display = 'none';
+}
+
+async function refreshAlterColumns() {
+  const table = document.getElementById('alterTableName').textContent;
+  const box = document.getElementById('alterColumns');
+  box.innerHTML = '<div class="loading">加载中...</div>';
+  if (!table) { box.innerHTML = '<div class="empty">无表</div>'; return; }
+  try {
+    const resp = await fetch(COLUMNS_API + '?table=' + encodeURIComponent(table));
+    const json = await resp.json();
+    if (!json.success) { box.innerHTML = '<div class="empty">' + (json.error||'加载失败') + '</div>'; return; }
+    const cols = json.data || [];
+    if (!cols.length) { box.innerHTML = '<div class="empty">无字段</div>'; return; }
+    let html = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">字段名</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">类型</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">操作</th>'
+      + '</tr></thead><tbody>';
+    for (const c of cols) {
+      const name = (c.name || '').toString();
+      const type = (c.type || '').toString() || '-';
+      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:12px">' + name + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text2)">' + type + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border)">'
+        + '<button onclick="dropDbColumn(\'' + name.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#c0392b;border-color:#c0392b;color:#fff;border-radius:5px;cursor:pointer" title="删除此字段（需SQLite 3.35+）">🗑 删除</button>'
+        + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
+  } catch(e) { box.innerHTML = '<div class="empty">请求失败</div>'; }
+}
+
+async function addDbColumn() {
+  const table = document.getElementById('alterTableName').textContent;
+  const col = document.getElementById('alterAddCol').value.trim();
+  const type = document.getElementById('alterAddType').value;
+  const def = document.getElementById('alterAddDefault').value.trim();
+  if (!table || !col) { showToast('请填写字段名', false); return; }
+  try {
+    const body = { table: table, action: 'add', column: col, type: type };
+    if (def !== '') body.default = def;
+    const resp = await fetch(ALTER_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await resp.json();
+    if (json.success) {
+      showToast(json.message, true);
+      document.getElementById('alterAddCol').value = '';
+      document.getElementById('alterAddDefault').value = '';
+      refreshAlterColumns();
+    } else {
+      showToast('添加失败: ' + (json.error || '未知错误'), false);
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function dropDbColumn(col) {
+  const table = document.getElementById('alterTableName').textContent;
+  if (!table || !col) return;
+  if (!confirm('确定删除字段 "' + table + '.' + col + '" 吗？此操作不可撤销！')) return;
+  try {
+    const resp = await fetch(ALTER_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table: table, action: 'drop', column: col }),
+    });
+    const json = await resp.json();
+    if (json.success) {
+      showToast(json.message, true);
+      refreshAlterColumns();
+    } else {
+      showToast('删除失败: ' + (json.error || '未知错误'), false);
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// ==============================
+//  自定义路由管理
+// ==============================
+const ROUTES_API = '/api/ha_data_store/routes';
+
+async function loadCustomRoutes() {
+  const wrap = document.getElementById('routeListWrap');
+  const st = document.getElementById('routeListStatus');
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="loading">加载中...</div>';
+  if (st) st.textContent = '';
+  try {
+    const resp = await fetch(ROUTES_API);
+    const json = await resp.json();
+    if (!json.success) { wrap.innerHTML = '<div class="empty">' + (json.error||'加载失败') + '</div>'; return; }
+    const routes = json.data || [];
+    window.__customRoutesCache = routes;
+    if (!routes.length) { wrap.innerHTML = '<div class="empty">暂无自定义路由，点击「➕ 新建路由」创建</div>'; return; }
+    let html = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">接口路径</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">描述</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">SQL</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">调用地址</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">操作</th>'
+      + '</tr></thead><tbody>';
+    for (const r of routes) {
+      const path = (r.route_path || '').toString();
+      const desc = (r.description || '').toString();
+      const sql = (r.sql_statement || '').toString();
+      const callUrl = '/api/ha_data_store/custom/' + path;
+      const shortSql = sql.length > 70 ? sql.slice(0, 67) + '...' : sql;
+      html += '<tr>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:12px;color:var(--green)">' + path + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + desc + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;color:var(--text2)">' + shortSql + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;color:var(--text2)">' + callUrl + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap">'
+        + '<button onclick="editRouteForm(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#2980b9;border-color:#2980b9;color:#fff;border-radius:5px;cursor:pointer;margin-right:4px">✏️ 编辑</button>'
+        + '<button onclick="deleteCustomRoute(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#c0392b;border-color:#c0392b;color:#fff;border-radius:5px;cursor:pointer">🗑 删除</button>'
+        + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    if (st) st.textContent = '共 ' + routes.length + ' 条';
+  } catch(e) { wrap.innerHTML = '<div class="empty">请求失败</div>'; }
+}
+
+function newRouteForm() {
+  document.getElementById('routeFormWrap').style.display = 'block';
+  document.getElementById('routePath').value = '';
+  document.getElementById('routeDesc').value = '';
+  document.getElementById('routeSql').value = '';
+  document.getElementById('routeFormStatus').textContent = '';
+  document.getElementById('routePath').focus();
+}
+
+function editRouteForm(path) {
+  // 若无缓存先加载，再回填表单
+  const doEdit = () => {
+    const routes = (window.__customRoutesCache || []).find(r => r.route_path === path);
+    document.getElementById('routeFormWrap').style.display = 'block';
+    if (routes) {
+      document.getElementById('routePath').value = routes.route_path;
+      document.getElementById('routeDesc').value = routes.description || '';
+      document.getElementById('routeSql').value = routes.sql_statement || '';
+    } else {
+      document.getElementById('routePath').value = path;
+      document.getElementById('routeDesc').value = '';
+      document.getElementById('routeSql').value = '';
+    }
+    document.getElementById('routeFormStatus').textContent = '';
+  };
+  if (window.__customRoutesCache) {
+    doEdit();
+  } else {
+    loadCustomRoutes().then(doEdit);
+  }
+}
+
+function cancelRouteForm() {
+  document.getElementById('routeFormWrap').style.display = 'none';
+}
+
+async function saveCustomRoute() {
+  const path = document.getElementById('routePath').value.trim();
+  const sql = document.getElementById('routeSql').value.trim();
+  const desc = document.getElementById('routeDesc').value.trim();
+  if (!path) { showToast('请填写接口路径', false); return; }
+  if (!sql) { showToast('请填写 SQL 语句', false); return; }
+  try {
+    const resp = await fetch(ROUTES_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_path: path, sql_statement: sql, description: desc }),
+    });
+    const json = await resp.json();
+    if (json.success) {
+      showToast('路由已保存', true);
+      cancelRouteForm();
+      loadCustomRoutes();
+      if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
+    } else {
+      showToast('保存失败: ' + (json.error || '未知错误'), false);
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function deleteCustomRoute(path) {
+  if (!path) return;
+  if (!confirm('确定删除自定义路由 "' + path + '" 吗？此操作不可撤销！')) return;
+  try {
+    const resp = await fetch(ROUTES_API + '?route_path=' + encodeURIComponent(path), {
+      method: 'DELETE',
+    });
+    const json = await resp.json();
+    if (json.success) {
+      showToast('路由已删除', true);
+      loadCustomRoutes();
+      if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
+    } else {
+      showToast('删除失败: ' + (json.error || '未知错误'), false);
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// 把自定义路由填充到 API 地址生成器的"自定义路由"分组
+async function loadCustomRoutesIntoApi() {
+  const group = document.getElementById('apiCustomRoutesGroup');
+  if (!group) return;
+  try {
+    const resp = await fetch(ROUTES_API);
+    const json = await resp.json();
+    const routes = (json && json.success) ? (json.data || []) : [];
+    window.__customRoutesCache = routes;
+    group.innerHTML = '';
+    if (!routes.length) {
+      group.innerHTML = '<option value="" disabled>暂无自定义路由</option>';
+      return;
+    }
+    for (const r of routes) {
+      const opt = document.createElement('option');
+      opt.value = 'custom:' + (r.route_path || '');
+      opt.textContent = '⚡ ' + (r.description || r.route_path);
+      group.appendChild(opt);
+    }
+  } catch(e) { /* 忽略 */ }
+}
+
+// 解析自定义路由 SQL 中的 :name 占位符，生成参数输入框
+function renderCustomRouteParams(path) {
+  const box = document.getElementById('apiCustomParamsBox');
+  if (!box) return;
+  box.innerHTML = '';
+  const routes = window.__customRoutesCache || [];
+  const route = routes.find(r => r.route_path === path);
+  if (!route) {
+    box.innerHTML = '<div style="font-size:12px;color:var(--text2);grid-column:1/-1">路由未找到</div>';
+    generateApiUrl();
+    return;
+  }
+  const sql = route.sql_statement || '';
+  const m = sql.match(/[:@$]([A-Za-z_][A-Za-z0-9_]*)/g);
+  if (!m) {
+    box.innerHTML = '<div style="font-size:12px;color:var(--orange);grid-column:1/-1">该 SQL 未使用命名占位符（:name），无法自动生成参数框。请改用 :name 写法或直接手写 URL。</div>';
+    generateApiUrl();
+    return;
+  }
+  // 去重保序
+  const names = [];
+  for (const token of m) {
+    const nm = token.slice(1);
+    if (!names.includes(nm)) names.push(nm);
+  }
+  for (const nm of names) {
+    const wrap = document.createElement('div');
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:11px;color:var(--text2);margin-bottom:2px';
+    label.textContent = nm;
+    const input = document.createElement('input');
+    input.setAttribute('data-name', nm);
+    input.placeholder = nm;
+    input.style.cssText = 'width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box';
+    input.oninput = generateApiUrl;
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    box.appendChild(wrap);
+  }
+  generateApiUrl();
+}
+
+// 初始化时加载路由列表 + 填充地址生成器下拉
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(() => {
+    if (typeof loadCustomRoutes === 'function') loadCustomRoutes();
+    if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
+  }, 500);
+});
 
 // ==============================
 //  SQL 执行
@@ -2894,6 +3304,20 @@ function switchSubTab(name) {
   if (name === 'xiaoai') { loadXiaoaiConfigs(); }
   if (name === 'media') { loadMediaPlaylists(); }
   if (name === 'printer') { loadPrinterConfigs(); }
+}
+
+// API 工具子选项卡：gen=API 地址生成器，routes=自定义路由管理
+function switchApiSubTab(name) {
+  document.querySelectorAll('.api-sub-tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.api-sub-panel').forEach(p => p.classList.remove('active'));
+  const btn = document.querySelector(`.api-sub-tab-btn[onclick*="'${name}'"]`);
+  if (btn) btn.classList.add('active');
+  const panel = document.getElementById('apisub-' + name);
+  if (panel) panel.classList.add('active');
+  // 切换到路由管理时刷新列表
+  if (name === 'routes' && typeof loadCustomRoutes === 'function') {
+    loadCustomRoutes();
+  }
 }
 
 async function loadAttrTypes() {
@@ -4882,7 +5306,8 @@ function _hideAllApiFormRows() {
     'apiRoomDataCatRow','apiYearRow','apiDateFieldRow','apiDateSingle','apiDateRange',
     'apiEleDayTableRow','apiEleMonthTableRow','apiEleYearTableRow','apiEleDayLimitRow',
     'apiEleMonthLimitRow','apiEleYearLimitRow','apiEleTranslatedFieldRow',
-    'apiHealthNameRow','apiHealthTypeRow','apiMediaUserRow','apiMediaIdRow','apiMediaNameRow'];
+    'apiHealthNameRow','apiHealthTypeRow','apiMediaUserRow','apiMediaIdRow','apiMediaNameRow',
+    'apiDeviceUserNameRow','apiDeviceUserDirRow'];
   ids.forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.style.display = 'none';
@@ -4915,6 +5340,11 @@ function _showMediaApiRows(qt) {
 
 function onApiTypeChange() {
   const qt = document.getElementById('apiQueryType').value;
+  // 自定义路由：value 格式 "custom:{route_path}"
+  const isCustomRoute = qt.startsWith('custom:');
+  const isCustomRoutePath = isCustomRoute ? qt.slice('custom:'.length) : '';
+  // 默认隐藏自定义参数区；仅自定义路由分支会重新显示
+  document.getElementById('apiCustomParamsRow').style.display = 'none';
   const isRoomsDaily = qt === 'rooms_daily';
   const isVacuumHistory = qt === 'vacuum_history';
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
@@ -4955,6 +5385,26 @@ function onApiTypeChange() {
     isUserActionHourDist || isUserActionEntitySummary || isUserActionUserSummary ||
     isUserActionEntityLastToday;
   const isUserActionHasEntity = isUserActionHourDist;
+  // 设备用户维度查询组（新增）
+  const isDeviceUsersList = qt === 'device_users_list';
+  const isDeviceUserHistory = qt === 'device_user_history';
+  const isDeviceUserSummary = qt === 'device_user_summary';
+  const isDeviceOnUserHistory = qt === 'device_on_user_history';
+  const isDeviceOffUserHistory = qt === 'device_off_user_history';
+  const isDeviceUserByDate = qt === 'device_user_by_date';
+  const isDeviceUserByMonth = qt === 'device_user_by_month';
+  const isDeviceUserMonthDates = qt === 'device_user_month_dates';
+  const isDeviceUserQuery = isDeviceUsersList || isDeviceUserHistory || isDeviceUserSummary ||
+    isDeviceOnUserHistory || isDeviceOffUserHistory || isDeviceUserByDate || isDeviceUserByMonth ||
+    isDeviceUserMonthDates;
+  // 需要用户输入框的（device_users_list / device_users_list 不需要）
+  const isDeviceUserHasName = isDeviceUserHistory || isDeviceUserSummary ||
+    isDeviceOnUserHistory || isDeviceOffUserHistory ||
+    isDeviceUserByDate || isDeviceUserByMonth || isDeviceUserMonthDates;
+  // 需要方向选择框的（仅按用户查记录）
+  const isDeviceUserHasDir = isDeviceUserHistory;
+  // 需要月份输入的（device_user_by_month / device_user_month_dates）
+  const isDeviceUserHasMonth = isDeviceUserByMonth || isDeviceUserMonthDates;
 
   // 电费专属字段：默认隐藏，仅 electricity_standard 时显示
   document.getElementById('apiEleDayTableRow').style.display = isElectricityStandard ? '' : 'none';
@@ -4979,6 +5429,37 @@ function onApiTypeChange() {
     restoreDateFieldSelect();
   } else {
     document.getElementById('apiDateFieldRow').style.display = 'none';
+  }
+
+  if (isCustomRoute) {
+    // 自定义路由：隐藏所有常规输入行，只显示参数区
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiHealthNameRow').style.display = 'none';
+    document.getElementById('apiHealthTypeRow').style.display = 'none';
+    document.getElementById('apiMediaUserRow').style.display = 'none';
+    document.getElementById('apiMediaIdRow').style.display = 'none';
+    document.getElementById('apiMediaNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    // 显示自定义参数区
+    document.getElementById('apiCustomParamsRow').style.display = 'block';
+    // 加载该路由的参数（从 SQL 解析 :name）
+    renderCustomRouteParams(isCustomRoutePath);
+    return;
   }
 
   if (isVacuumHistory) {
@@ -5269,6 +5750,41 @@ function onApiTypeChange() {
     onDateModeChange();
     // 填充用户动作查询可用的实体列表
     if (typeof loadUserActionEntitiesForApi === 'function') loadUserActionEntitiesForApi();
+  } else if (isDeviceUserQuery) {
+    // 设备用户维度查询组：显示 entity_id/room/日期模式/limit，用户/方向专用控件
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = '';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiHealthNameRow').style.display = 'none';
+    document.getElementById('apiHealthTypeRow').style.display = 'none';
+    document.getElementById('apiAttrDailyRow').style.display = 'none';
+    document.getElementById('apiEleDayTableRow').style.display = 'none';
+    document.getElementById('apiEleMonthTableRow').style.display = 'none';
+    document.getElementById('apiEleYearTableRow').style.display = 'none';
+    document.getElementById('apiEleDayLimitRow').style.display = 'none';
+    document.getElementById('apiEleMonthLimitRow').style.display = 'none';
+    document.getElementById('apiEleYearLimitRow').style.display = 'none';
+    document.getElementById('apiEleTranslatedFieldRow').style.display = 'none';
+    // 用户输入框：除 device_users_list 外均显示
+    document.getElementById('apiDeviceUserNameRow').style.display = isDeviceUserHasName ? '' : 'none';
+    // 方向选择框：仅按用户查记录时显示
+    document.getElementById('apiDeviceUserDirRow').style.display = isDeviceUserHasDir ? '' : 'none';
+    // 月份查询（device_user_by_month / device_user_month_dates）：显示月份输入，隐藏日期模式
+    document.getElementById('apiMonthRow').style.display = isDeviceUserHasMonth ? 'block' : 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    // 日期模式：device_user_by_date 强制单日期；月份查询隐藏；其余支持单日/范围/不限
+    document.getElementById('apiDateMode').parentNode.style.display = isDeviceUserHasMonth ? 'none' : '';
+    document.getElementById('apiDateMode').value = isDeviceUserByDate ? 'single' : 'none';
+    onDateModeChange();
+    loadApiEntitiesAndRooms();
   } else {
     document.getElementById('apiEntityId').parentNode.style.display = '';
     document.getElementById('apiRoom').parentNode.style.display = '';
@@ -5277,6 +5793,8 @@ function onApiTypeChange() {
     document.getElementById('apiOffset').parentNode.style.display = '';
     document.getElementById('apiOrderBy').parentNode.style.display = '';
     document.getElementById('apiFields').parentNode.style.display = '';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
     document.getElementById('apiDateMode').parentNode.style.display = '';
     document.getElementById('apiDateMode').value = 'none';
     restoreDateFieldSelect();
@@ -5474,6 +5992,27 @@ function generateApiUrl() {
 
   let url = BASE_PATH + BASE_URL + '?type=' + qt;
   if (selectedApiKey) url += '&key=' + encodeURIComponent(selectedApiKey);
+
+  // 自定义路由：独立 RESTful 路径，参数从 apiCustomParamsBox 读取，按字母序拼接
+  if (qt.startsWith('custom:')) {
+    const routePath = qt.slice('custom:'.length);
+    let customUrl = BASE_PATH + '/api/ha_data_store/custom/' + encodeURIComponent(routePath);
+    if (selectedApiKey) customUrl += '?key=' + encodeURIComponent(selectedApiKey);
+    const params = {};
+    document.querySelectorAll('#apiCustomParamsBox input').forEach(inp => {
+      const key = inp.getAttribute('data-name');
+      const val = inp.value;
+      if (key && val !== '') params[key] = val;
+    });
+    const keys = Object.keys(params).sort();
+    let sep = selectedApiKey ? '&' : '?';
+    for (const k of keys) {
+      customUrl += sep + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+      sep = '&';
+    }
+    document.getElementById('apiUrlOutput').value = customUrl;
+    return;
+  }
 
   // 音乐媒体 API 特殊处理（独立 RESTful 路径，不走 /query）
   if (qt.startsWith('media_')) {
@@ -5800,6 +6339,42 @@ function generateApiUrl() {
   }
 
   if (qt.startsWith('attr_')) { if (tables) url += '&attr_type=' + encodeURIComponent(tables); }
+
+  // 设备用户维度查询组专用（device_history 的 on_user/off_user 字段）
+  if (qt === 'device_users_list' || qt === 'device_user_history' || qt === 'device_user_summary' ||
+      qt === 'device_on_user_history' || qt === 'device_off_user_history' || qt === 'device_user_by_date' ||
+      qt === 'device_user_by_month' || qt === 'device_user_month_dates') {
+    const userName = document.getElementById('apiDeviceUserName').value.trim();
+    const dir = document.getElementById('apiDeviceUserDir').value;
+    // 用户过滤：device_user_history / device_user_summary 均支持可选 user_name；
+    // on/off 查询同样支持（可选）
+    if (userName) url += '&user_name=' + encodeURIComponent(userName);
+    // 方向：仅 device_user_history 使用 direction 参数
+    if (qt === 'device_user_history' && dir && dir !== 'both') {
+      url += '&direction=' + encodeURIComponent(dir);
+    }
+    if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
+    if (room) url += '&room=' + encodeURIComponent(room);
+    // 月份模式（device_user_by_month / device_user_month_dates）
+    if (qt === 'device_user_by_month' || qt === 'device_user_month_dates') {
+      const m = document.getElementById('apiMonth').value;
+      if (m) url += '&month=' + encodeURIComponent(m);
+    }
+    // 日期模式
+    else if (dateMode === 'single') {
+      const d = document.getElementById('apiDate').value;
+      if (d) url += '&date=' + encodeURIComponent(d);
+    } else if (dateMode === 'range') {
+      const ds = document.getElementById('apiDateStart').value;
+      const de = document.getElementById('apiDateEnd').value;
+      if (ds) url += '&start=' + encodeURIComponent(ds);
+      if (de) url += '&end=' + encodeURIComponent(de);
+    }
+    if (limit) url += '&limit=' + encodeURIComponent(limit);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
   // 用户动作查询组专用
   if (qt.startsWith('user_actions_')) {
     if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
