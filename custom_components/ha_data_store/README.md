@@ -59,7 +59,9 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 🔗 **自定义路由** | 通过 GUI 或 API 定义自定义 HTTP 路由，绑定任意 SQL 查询 |
 | 🗂️ **统一泛域名动态路由** | 万能路由 `/api/ha_data_store/custom/{tail}` 运行时查库执行任意自定义 SQL |
 | 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发 |
-| 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot），`sensor.近期使用设备` 近30天聚合，API工具支持多维度查询 |
+| 🤖 **简单自动化引擎** | 定时/间隔触发 + 多条件判断 + 顺序执行服务动作，执行记录落库（30 秒调度，db_viewer 管理） |
+| 📊 **自动化状态传感器** | `sensor.ha_data_store_automation` 实时统计自动化总数/启停/执行结果，前端自动化管理卡片数据源 |
+| 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot + config_id），ts 采用实体状态时间与 device_history 精确关联，`sensor.近期使用设备` 近30天聚合，API工具支持多维度查询 |
 
 ---
 
@@ -541,14 +543,18 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx  # 主动重采
 | `other` | 预留字段 |
 | `state_log` | 操作前后状态变化（如 `on→off`、`cool→heat`） |
 | `ts` / `ts_text` | 时间戳 / 人类可读时间 |
+| `config_id` | 操作所属弹窗/选项卡/设备的 config_id（如 `diannao`），用于定位并还原完整弹窗配置 |
+| `device_type` | 设备类型（如 light/socket/ac 等） |
 | `action_snapshot` | 完整 tap_action 快照（JSON，用于还原设备面板） |
+
+**时间权威源**：`ts` 取**实体状态变化时刻**（HA `last_changed`）而非前端点击时刻，前后端时间源统一，消除浏览器/服务器时钟偏差（前端 8 秒时间窗 + 最多 8 次轮询核对后覆盖）。后端 `ts_text` 由 `ts` 按秒精度本地化；`device_history.on_time/off_time` 同为实体状态时间（秒精度，毫秒自动截断），`_link_device_history_to_actions` 用 `on_time == ts_text` 精确匹配回填操作者，保证跨表时间严格一致。
 
 ### 近期使用设备传感器
 
 `user_actions` 写入后，`sensor.近期使用设备`（`sensor.ha_data_store_user_actions`）实时聚合近 30 天数据：
 
 - **状态值** = 近 30 天有操作的不同设备面板数
-- `attributes.devices` = 按 **action_snapshot 归一化聚合** 的设备列表，每项含：`entity_id / name / icon / room_name / count`（使用次数）/ `last_used` + `last_used_text`（最近使用）/ `state_log`（最近状态变化）/ `action_snapshot`（完整还原快照），按使用次数降序
+- `attributes.devices` = 按 **action_snapshot 归一化聚合** 的设备列表，每项含：`entity_id / name / icon / room_name / count`（使用次数）/ `last_used` + `last_used_text`（最近使用）/ `state_log`（最近状态变化）/ `config_id` / `device_type` / `action_snapshot`（完整还原快照），按使用次数降序
 - 30 秒定时刷新 + 写入后实时刷新
 
 前端可直接订阅该 sensor，无需调 API 即可渲染"常用设备小卡片"，并凭 `action_snapshot` 还原设备控制面板。
@@ -560,7 +566,7 @@ POST /api/ha_data_store/action_log   Body: { actions: [ {user_name, entity_id, a
 GET  /api/ha_data_store/action_log?days=30   查询近 N 天原始记录
 ```
 
-前端本地缓冲，满 20 条或 10 秒批量上报，成功推进游标、失败保留重试。
+前端本地缓冲，**操作停止 5 秒后统一上报**（防抖合并连续操作），**满 20 条立即上报**；fetch 15 秒超时（AbortController 防 pending 锁死）、失败**指数退避自动重试**（5s 起、上限 5 分钟）、上报前游标取 max 防多实例重复上报；fetch 前同步补核对（实体状态时间 + state_log 权威值）。
 
 ### 查询（API 工具 → 🎯 用户动作查询组）
 
@@ -746,6 +752,11 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
 | `/api/ha_data_store/batch_entity_state` | POST | 批量写入实体状态 |
 | `/api/ha_data_store/db_maintain` | POST | 数据库维护（VACUUM/REINDEX） |
 | `/api/ha_data_store/entity_monitor` | GET | 实体在线监控 |
+| `/api/ha_data_store/automations` | GET/POST | 自动化配置列表/新增 |
+| `/api/ha_data_store/automations/{id}` | PUT/DELETE | 修改/删除自动化（修改后自动重算下次运行时间） |
+| `/api/ha_data_store/automations/{id}/run?force=1` | POST | 手动运行（force=1 跳过条件） |
+| `/api/ha_data_store/automation_logs` | GET/DELETE | 执行记录分页查询 / 清理（?days=N 或 ?automation_id=） |
+| `/api/ha_data_store/automation_lookup` | GET | 按名称查询自动化详细信息（?name= 精确 / &fuzzy=1 模糊，含配置+统计） |
 
 ### 高级接口
 
@@ -884,7 +895,9 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `virtual_devices` | 虚拟设备持久化 |
 | `printer_configs` | 打印机配置（支持多台，name 唯一） |
 | `printer_daily` | 打印机每日记录（汇总 + 墨量 + 当日明细 JSON） |
-| `user_actions` | 用户操作记录（前端埋点上报，含 action_snapshot/state_log/ts_text 等） |
+| `user_actions` | 用户操作记录（前端埋点上报，含 action_snapshot/state_log/ts_text/config_id/device_type 等；ts 采用实体状态时间，与 device_history 精确关联） |
+| `automations` | 自动化配置（触发/条件/动作，30 秒调度执行） |
+| `automation_logs` | 自动化执行记录（时间、条件明细、动作结果、耗时、状态，保留 30 天） |
 
 ---
 

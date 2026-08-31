@@ -51,6 +51,8 @@ from .const import (
     TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
     TABLE_MEDIA_NOW_PLAYING,
+    TABLE_AUTOMATIONS,
+    TABLE_AUTOMATION_LOGS,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -630,6 +632,55 @@ def _init_database(db_path: str) -> None:
                 updated_at  TEXT NOT NULL DEFAULT ''
             )
             """
+        )
+        # 17) 简单自动化配置表 — 定时/间隔触发 + 多条件 + 服务调用动作
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_AUTOMATIONS} (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                name           TEXT NOT NULL DEFAULT '',
+                enabled        INTEGER NOT NULL DEFAULT 1,
+                trigger_type   TEXT NOT NULL DEFAULT 'time',
+                trigger_config TEXT NOT NULL DEFAULT '{{}}',
+                conditions     TEXT NOT NULL DEFAULT '[]',
+                logic          TEXT NOT NULL DEFAULT 'all',
+                actions        TEXT NOT NULL DEFAULT '[]',
+                stop_on_error  INTEGER NOT NULL DEFAULT 0,
+                next_run       TEXT NOT NULL DEFAULT '',
+                last_run       TEXT NOT NULL DEFAULT '',
+                last_result    TEXT NOT NULL DEFAULT '',
+                created_at     TEXT NOT NULL DEFAULT '',
+                updated_at     TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # 18) 自动化执行记录表 — 时间/触发/条件明细/动作结果/耗时
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_AUTOMATION_LOGS} (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                automation_id     INTEGER NOT NULL DEFAULT 0,
+                automation_name   TEXT NOT NULL DEFAULT '',
+                trigger_type      TEXT NOT NULL DEFAULT '',
+                trigger_desc      TEXT NOT NULL DEFAULT '',
+                trigger_time      TEXT NOT NULL DEFAULT '',
+                condition_result  INTEGER NOT NULL DEFAULT 0,
+                conditions_checked TEXT NOT NULL DEFAULT '[]',
+                status            TEXT NOT NULL DEFAULT '',
+                actions_result    TEXT NOT NULL DEFAULT '[]',
+                duration_ms       INTEGER NOT NULL DEFAULT 0,
+                created_at        TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_automations_enabled ON {TABLE_AUTOMATIONS} (enabled);"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_automation_logs_aid ON {TABLE_AUTOMATION_LOGS} (automation_id);"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_automation_logs_time ON {TABLE_AUTOMATION_LOGS} (created_at);"
         )
 
         if local_logger:
@@ -3982,7 +4033,13 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         MediaNowPlayingView,
         TableColumnsView,
         ReportEntitiesView,
+        ReportAutoEntitiesView,
         ActionLogView,
+        AutomationsView,
+        AutomationItemView,
+        AutomationRunView,
+        AutomationLogsView,
+        AutomationLookupView,
     )
     hass.http.register_view(EntityConfigView(db_path))
     hass.http.register_view(EntityConfigListView(db_path))
@@ -4032,7 +4089,13 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(MediaNowPlayingView(db_path))
     hass.http.register_view(TableColumnsView(db_path))
     hass.http.register_view(ReportEntitiesView(db_path))
+    hass.http.register_view(ReportAutoEntitiesView(db_path))
     hass.http.register_view(ActionLogView(db_path))
+    hass.http.register_view(AutomationsView(db_path))
+    hass.http.register_view(AutomationItemView(db_path))
+    hass.http.register_view(AutomationRunView(db_path))
+    hass.http.register_view(AutomationLogsView(db_path))
+    hass.http.register_view(AutomationLookupView(db_path))
 
     # 小爱对话 API（独立模块）
     from .xiaoai import register_api_views as _xiaoai_register_api_views
@@ -4084,6 +4147,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].setdefault("allow_remote_access", False)
 
     _register_api_views(hass, db_path)
+
+    # ── 简单自动化引擎（定时/间隔/条件 + 执行记录） ──
+    from .automations import AutomationManager
+    automation_manager = AutomationManager(hass, db_path)
+    automation_manager.start()
+    hass.data[DOMAIN]["automation_manager"] = automation_manager
 
     # ── 服务：今日家庭状态总结（按需生成） ──
     from homeassistant.helpers import config_validation as cv
@@ -4554,6 +4623,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     bridge_manager = hass.data.get(DOMAIN, {}).get("bridge_manager")
     if bridge_manager:
         await bridge_manager.stop_all()
+
+    # 停止简单自动化调度器
+    automation_manager = hass.data.get(DOMAIN, {}).get("automation_manager")
+    if automation_manager:
+        automation_manager.stop()
 
     for key in ("cancel_bus_listener", "cancel_env_poll", "cancel_attr_poll", "cancel_file_src", "cancel_api_src", "cancel_midnight_split", "cancel_correction_scan", "cancel_daily_summary"):
         cancel = hass.data.get(DOMAIN, {}).get(key)

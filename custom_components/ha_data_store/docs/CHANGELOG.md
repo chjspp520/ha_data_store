@@ -1,5 +1,91 @@
 # 更新日志
 
+## 2026-08-31 — v3.0.0 操作记录时间权威对齐 + 简单自动化引擎与自动化管理卡片
+
+### ⏱️ 操作记录时间与实体状态时间严格对齐（差一秒修复）
+
+**背景**：前端操作记录时间 `ts` 此前取自**点击时刻**（浏览器时钟），而后端 `device_history` 的 `on_time/off_time` 直接采用**实体状态变化时刻**（`last_changed`），两端时间源不一致，且浏览器时钟与服务器时钟存在 1-2 秒偏差，导致 `user_actions.ts_text` 与 `device_history` 精确匹配时差一秒。
+
+- **前端**（room-elves-card `action-log.js`）：`ts` 改为**无条件以实体状态时间（`last_changed`）为准**，消除浏览器/服务器时钟偏差。
+  - 覆盖条件从 `stateTs >= clickTs` 改为**时间窗判断**：`|stateTs - clickTs| <= 8 秒` 即用实体状态时间覆盖（`_ACTION_LOG_ALIGN_TOLERANCE`）。
+  - 500ms 延迟核对改为**轮询式**（`_ACTION_LOG_ALIGN_MAX_ATTEMPTS`，最多 8 次约 4 秒）：慢设备状态未变化完成（读到上一次 `last_changed` 超容差）时延迟 500ms 再核对；`state_log` 组装加幂等保护。
+  - `_flushActionLog` fetch 前同步补核对同样改为时间窗判断（防抖/阈值调度先于延迟核对触发时的兜底）。
+- **后端**（本集成）：
+  - `__init__.py`：启动数据清理——将历史 `device_history.on_time/off_time` 中带毫秒后缀的时间戳**截断到秒**（`SUBSTR(...,1,19)`），保证与前端 `ts_text`（秒精度）格式一致，精确匹配即可命中。
+  - `http_api.py`：`ts_text` 统一由前端 `ts` 经 `_format_ts_ms` 按**秒精度**格式化（本地时区）。
+  - `_link_device_history_to_actions`：用 `on_time == ts_text` / `off_time == ts_text` **精确相等**关联回填操作用户，杜绝差一秒漏关联。
+
+### ⚡ 操作记录上报链路健壮性（配合前端性能优化）
+
+前端 `action-log.js` 上报逻辑重构，后端无需改动即可受益：
+
+- **fetch 超时**：新增 `_ACTION_LOG_FLUSH_TIMEOUT=15s`，`AbortController` 中止挂起请求，避免 `pending` 标志被永久锁死导致后续上报全部跳过。
+- **失败自动重试**：指数退避（5s→10s→…上限 5 分钟），不再依赖"下次用户操作"才恢复。
+- **防抖式上报**：操作停止 5 秒后统一上报（`_ACTION_LOG_FLUSH_INTERVAL`），连续操作合并为一批；阈值满 20 条立即上报并清理定时器。
+- **游标防倒退**：上报前读 localStorage 游标取 `max`，防止多实例/多标签页并发重复上报。
+- **fetch 前同步补核对**：确保 `ts`（实体状态时间）与 `state_log` 在任意调度时序下都是权威值。
+
+### 🤖 简单自动化引擎（定时/间隔/条件 + 执行记录）
+- **触发方式**：① 定时（每天固定时间 + 可选星期白名单）② 间隔（每 N 秒，重启后过期不补跑，直接顺延）。
+- **多条件执行**：基于实体状态比较，运算符 `==`/`!=`/`>`/`>=`/`<`/`<=`/`contains`，支持 `all`（全部满足）/`any`（任一满足）组合；`unavailable`/`unknown` 视为条件不成立并记录明细。
+- **动作**：顺序调用 HA 服务（`domain.service` + 实体 + 参数 JSON），逐条记录成功/失败；`stop_on_error` 可配置失败即停。
+- **执行记录落库**（`automation_logs` 表）：时间、触发描述、条件逐条明细、动作逐条结果、耗时、状态（success/failed/partial_failed/skipped），默认保留 30 天自动清理。
+- **调度**：统一 30 秒 tick（`async_track_time_interval`），配置每次从 DB 重读（增删改立即生效）；`next_run` 持久化到 DB；防重入（执行中跳过重复触发）。
+- **API**（沿用 API Key 鉴权）：
+  - `GET/POST /api/ha_data_store/automations` — 列表/新增
+  - `PUT/DELETE /api/ha_data_store/automations/{id}` — 修改（部分更新，改后自动重算 next_run）/删除
+  - `POST /api/ha_data_store/automations/{id}/run?force=1` — 手动触发（force 跳过条件）
+  - `GET/DELETE /api/ha_data_store/automation_logs` — 执行记录分页查询/清理（`?days=N` 或 `?automation_id=`）
+- **前端**：db_viewer.html 新增「🤖 自动化」页签，含自动化列表（启用开关/手动运行/强制运行/编辑/删除）+ 编辑弹窗（触发/条件动态行/动作动态行）+ 执行记录子页签（分页/按自动化与状态过滤/明细弹窗/清理）。
+
+### 📊 新增「自动化状态」传感器（`sensor.ha_data_store_automation`）
+- **实体 ID 固定**：自动化状态传感器实体 ID 固定为 **`sensor.ha_data_store_automation`**（HA 实体 ID 不允许点号，配置中 `sensor.ha.data.store.automation` 的点号写法会自动归一为下划线）。
+- 旧实体 `sensor.hashu_ju_tong_yi_cun_chu_xi_tong_automation_status` 自动重命名（registry 迁移）。
+- 前端卡片支持 `entity` 配置项自定义数据实体，默认 `sensor.ha_data_store_automation`。
+- **状态值** = 系统中有多少个启用自动化。
+- **状态属性**：
+  - `total`/`enabled`/`disabled` — 自动化总数 / 启用 / 停用。
+  - `success`/`failed`/`skipped`/`never` — 按**最近一次执行结果**统计的自动化数量（成功/失败+部分失败/条件跳过/从未执行）。
+  - `total_runs` — 全部执行次数合计；`updated_at` — 数据更新时间。
+  - `automations[]` — 每个自动化的详细信息：`id/name/enabled/trigger_type/trigger_desc/stop_on_error/next_run/last_run/last_result/last_duration_ms/run_count/success_count/failed_count/skipped_count`。
+- 30 秒定时刷新（`async_track_time_interval`），与现有传感器一致。
+
+### 🃏 room-elves-card 自动化管理卡片增强（选项卡 + 编辑功能）
+- **头部**：去掉右侧启用数（`auto-header-right`），副标题只显示"更新于 xxx"。
+- **新增选项卡栏**（信息 | 编辑）：
+  - **信息选项卡**：原整体统计卡（7 项）+ 自动化明细列表。
+  - **编辑选项卡**：自动化管理列表（对接后端 REST API），每个自动化支持：
+    - 启停切换（PUT enabled）
+    - 手动运行（POST run）
+    - 强制运行（跳过条件，force=1）
+    - 编辑（打开表单弹窗回填，PUT）
+    - 删除（DELETE，带确认）
+    - ＋ 新建自动化（表单弹窗，POST）
+- **编辑/新建表单弹窗**：名称、启用、失败即停、触发类型（定时：时间+星期多选 / 间隔：分钟数）、执行条件（逻辑 all/any + 条件行可增删：实体+操作符+值）、执行动作（常用服务下拉分组+自定义服务、实体、参数 JSON，可增删）。
+- **两种触发**：`popup_card`（card.type: `automation` → `createAutomationCard`）与 `action:card`（type: `automation` → `showAutomationPopup`）。
+- API 鉴权：复用卡片顶层配置 `api_base_url` + `key`。
+- 主题化：全部使用 `--room-*` 主题变量，随房间精灵 5 套主题自动适配。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `__init__.py` | 启动数据清理：截断 `device_history.on_time/off_time` 毫秒后缀；`_init_database` 建 automations/automation_logs 表+索引；setup 启动/停止 AutomationManager；注册 4 个 View |
+| `http_api.py` | `ts_text` 秒精度格式化；`_link_device_history_to_actions` 用 `on_time == ts_text` 精确匹配关联；新增 `AutomationsView`/`AutomationItemView`/`AutomationRunView`/`AutomationLogsView` |
+| `automations.py` | 新建：`AutomationManager` 执行引擎（调度/条件/动作/记录） |
+| `sensor.py` | 新增 `AutomationStatusSensor`（30 秒刷新，实体 ID 固定 `sensor.ha_data_store_automation`） |
+| `const.py` | VERSION → 3.0.0；新增 `TABLE_AUTOMATIONS`/`TABLE_AUTOMATION_LOGS` 及调度参数 |
+| `manifest.json` | 版本 3.0.0 |
+| `translations/zh-Hans.json` | 新增 `automation_status.name` |
+| `db_viewer.html` | 新增「🤖 自动化」页签（列表/编辑弹窗/执行记录/明细） |
+| `C:\HA\src\modules\core\action-log.js` | 前端配合：时间窗+轮询无条件以 `last_changed` 为准；fetch 超时/重试/防抖/游标防倒退 |
+| `C:\HA\src\modules\cards\automation.js` | 新建自动化管理 Mixin：头部/统计卡/明细列表 + 选项卡栏 + 编辑表单弹窗 + API 封装 `_autoFetch`；默认实体 `sensor.ha_data_store_automation`，`_autoNormalizeEntityId` 兼容点号写法 |
+| `C:\HA\src\room-elves-card.js` | import + Object.assign + CARD_TYPE_REGISTRY['automation'] |
+| `C:\HA\src\modules\cards\card-factory.js` | internalCardTypes 加入 automation |
+| `C:\HA\src\modules\core\actions.js` | case 'automation' 分支 |
+| `C:\HA\src\room-elves-card-styles.css` | 追加 auto-* 系列样式（含 auto-tabs/auto-edit-*/auto-form-*） |
+
+---
+
 ## 2026-08-30 — v2.19.1 修复自定义路由访问 500
 
 ### 🐛 修复动态路由访问 500（根因：视图方法缺 tail 参数）

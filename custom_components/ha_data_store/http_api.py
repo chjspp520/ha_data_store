@@ -52,6 +52,8 @@ from .const import (
     TABLE_MEDIA_SONGS,
     TABLE_MEDIA_QUEUE,
     TABLE_MEDIA_NOW_PLAYING,
+    TABLE_AUTOMATIONS,
+    TABLE_AUTOMATION_LOGS,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -8703,6 +8705,49 @@ class ReportEntitiesView(_BaseDBView):
 
 
 # =========================================================================== #
+#  实体上报 - 自动化实体查询 API — ReportAutoEntitiesView                        #
+#  用途：查询 report_entities 表中 entity_id 以 automation. 开头的自动化实体， #
+#        返回全部字段（供 db_viewer API 工具"实体上报"组使用）。                  #
+# =========================================================================== #
+class ReportAutoEntitiesView(_BaseDBView):
+    """查询上报实体中的自动化实体。
+
+    GET /api/ha_data_store/report/auto_entities?key=xxx
+      → 返回 entity_id 以 automation. 开头的全部上报实体
+        （id/entity_id/name/icon/room_name/source/rooms/last_report_time）
+    """
+
+    url = "/api/ha_data_store/report/auto_entities"
+    name = "api:ha_data_store:report_auto_entities"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+
+        def _load() -> list[dict]:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    f"SELECT id, entity_id, name, icon, room_name, source, rooms, last_report_time "
+                    f"FROM {TABLE_REPORT_ENTITIES} "
+                    f"WHERE entity_id LIKE 'automation.%' "
+                    f"ORDER BY entity_id, name"
+                )
+                return [dict(r) for r in cursor.fetchall()]
+            finally:
+                conn.close()
+
+        try:
+            rows = await self._exec_in_executor(hass, _load)
+            return self.json({"success": True, "total": len(rows), "data": rows})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# =========================================================================== #
 #  前端操作记录上报 API — ActionLogView                                         #
 #  用途：接收 room-elves-card 前端埋点上报的操作记录（含完整 action_snapshot 快照），#
 #        追加写入 user_actions 表（不去重，保留每次操作以便统计使用习惯）。         #
@@ -8919,5 +8964,481 @@ class ActionLogView(_BaseDBView):
         try:
             rows = await self._exec_in_executor(hass, _load)
             return self.json({"success": True, "count": len(rows), "actions": rows})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ─────────────────────────────────────────────────────────────
+# 简单自动化：配置 CRUD + 手动触发 + 执行记录
+# 路由：
+#   GET  /api/ha_data_store/automations          → 配置列表（分页/关键字）
+#   POST /api/ha_data_store/automations          → 新增
+#   PUT  /api/ha_data_store/automations/{id}     → 修改（部分更新）
+#   DELETE /api/ha_data_store/automations/{id}   → 删除
+#   POST /api/ha_data_store/automations/{id}/run → 手动触发（?force=1 跳过条件）
+#   GET  /api/ha_data_store/automation_logs      → 执行记录分页查询
+#   DELETE /api/ha_data_store/automation_logs    → 清理（?days=N 或 ?automation_id=）
+#   GET  /api/ha_data_store/automation_lookup    → 按名称查询自动化详细信息（?name=，默认精确；&fuzzy=1 模糊；配置+统计）
+# ─────────────────────────────────────────────────────────────
+
+
+def _json_field(raw, default):
+    """兼容「对象」与「JSON 字符串」两种传入形态的字段解析。"""
+    if isinstance(raw, (list, dict)):
+        return raw
+    if raw is None or raw == "":
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+class AutomationsView(_BaseDBView):
+    """自动化配置：列表查询 + 新增。"""
+
+    url = "/api/ha_data_store/automations"
+    name = "api:ha_data_store:automations"
+
+    async def get(self, request):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            page = max(1, int(request.query.get("page", 1) or 1))
+        except Exception:
+            page = 1
+        try:
+            size = max(1, min(200, int(request.query.get("size", 50) or 50)))
+        except Exception:
+            size = 50
+        keyword = (request.query.get("keyword") or "").strip()
+        db_path = self._db_path
+
+        def _load() -> tuple[int, list[dict]]:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                where, params = "", []
+                if keyword:
+                    where = "WHERE name LIKE ?"
+                    params.append(f"%{keyword}%")
+                total = conn.execute(
+                    f"SELECT COUNT(*) AS c FROM {TABLE_AUTOMATIONS} {where}", params
+                ).fetchone()["c"]
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {TABLE_AUTOMATIONS} {where} "
+                    f"ORDER BY id DESC LIMIT ? OFFSET ?",
+                    params + [size, (page - 1) * size],
+                ).fetchall()]
+                return total, rows
+            finally:
+                conn.close()
+
+        try:
+            total, rows = await self._exec_in_executor(hass, _load)
+            for row in rows:
+                row["trigger_config"] = _json_field(row.get("trigger_config"), {})
+                row["conditions"] = _json_field(row.get("conditions"), [])
+                row["actions"] = _json_field(row.get("actions"), [])
+            return self.json({
+                "success": True, "total": total, "page": page, "size": size, "items": rows,
+            })
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def post(self, request):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        db_path = self._db_path
+        try:
+            name = str(body.get("name") or "").strip()
+            if not name:
+                return self.json({"success": False, "error": "name 不能为空"}, status_code=400)
+            trigger_type = str(body.get("trigger_type") or "time").strip()
+            if trigger_type not in ("time", "interval"):
+                return self.json(
+                    {"success": False, "error": "trigger_type 仅支持 time / interval"},
+                    status_code=400,
+                )
+            trigger_config = _json_field(body.get("trigger_config"), {})
+            if not isinstance(trigger_config, dict):
+                trigger_config = {}
+            conditions = _json_field(body.get("conditions"), [])
+            if not isinstance(conditions, list):
+                conditions = []
+            logic = str(body.get("logic") or "all").strip()
+            if logic not in ("all", "any"):
+                logic = "all"
+            actions = _json_field(body.get("actions"), [])
+            if not isinstance(actions, list):
+                actions = []
+            stop_on_error = 1 if body.get("stop_on_error") else 0
+            enabled = 1 if body.get("enabled", True) else 0
+            now = _get_local_iso(DEFAULT_TIMEZONE)
+
+            def _insert() -> int:
+                conn = sqlite3.connect(db_path)
+                try:
+                    cur = conn.execute(
+                        f"INSERT INTO {TABLE_AUTOMATIONS} "
+                        f"(name, enabled, trigger_type, trigger_config, conditions, logic, "
+                        f"actions, stop_on_error, created_at, updated_at) "
+                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (name, enabled, trigger_type,
+                         json.dumps(trigger_config, ensure_ascii=False),
+                         json.dumps(conditions, ensure_ascii=False),
+                         logic, json.dumps(actions, ensure_ascii=False),
+                         stop_on_error, now, now),
+                    )
+                    conn.commit()
+                    return cur.lastrowid
+                finally:
+                    conn.close()
+
+            new_id = await self._exec_in_executor(hass, _insert)
+            next_run = None
+            manager = hass.data.get(DOMAIN, {}).get("automation_manager")
+            if manager:
+                next_run = await manager.recompute_next_run(new_id)
+            return self.json({"success": True, "id": new_id, "next_run": next_run})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class AutomationItemView(_BaseDBView):
+    """自动化配置：修改（部分更新）+ 删除。"""
+
+    url = "/api/ha_data_store/automations/{auto_id}"
+    name = "api:ha_data_store:automations_item"
+
+    async def put(self, request, auto_id: str = ""):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            auto_id = int(auto_id)
+        except Exception:
+            return self.json({"success": False, "error": "auto_id 无效"}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        db_path = self._db_path
+        try:
+            fields: list[str] = []
+            params: list = []
+            if "name" in body:
+                fields.append("name = ?")
+                params.append(str(body["name"] or "").strip())
+            if "enabled" in body:
+                fields.append("enabled = ?")
+                params.append(1 if body["enabled"] else 0)
+            if "trigger_type" in body:
+                ttype = str(body["trigger_type"] or "").strip()
+                if ttype not in ("time", "interval"):
+                    return self.json(
+                        {"success": False, "error": "trigger_type 仅支持 time / interval"},
+                        status_code=400,
+                    )
+                fields.append("trigger_type = ?")
+                params.append(ttype)
+            if "trigger_config" in body:
+                cfg = _json_field(body["trigger_config"], {})
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                fields.append("trigger_config = ?")
+                params.append(json.dumps(cfg, ensure_ascii=False))
+            if "conditions" in body:
+                conds = _json_field(body["conditions"], [])
+                if not isinstance(conds, list):
+                    conds = []
+                fields.append("conditions = ?")
+                params.append(json.dumps(conds, ensure_ascii=False))
+            if "logic" in body:
+                logic = str(body["logic"] or "all").strip()
+                if logic not in ("all", "any"):
+                    logic = "all"
+                fields.append("logic = ?")
+                params.append(logic)
+            if "actions" in body:
+                acts = _json_field(body["actions"], [])
+                if not isinstance(acts, list):
+                    acts = []
+                fields.append("actions = ?")
+                params.append(json.dumps(acts, ensure_ascii=False))
+            if "stop_on_error" in body:
+                fields.append("stop_on_error = ?")
+                params.append(1 if body["stop_on_error"] else 0)
+            if not fields:
+                return self.json({"success": False, "error": "没有可更新的字段"}, status_code=400)
+            # 修改后强制重新计算 next_run（旧值作废，避免过期立即触发）
+            fields.append("next_run = ''")
+            fields.append("updated_at = ?")
+            params.append(_get_local_iso(DEFAULT_TIMEZONE))
+            params.append(auto_id)
+
+            def _update() -> int:
+                conn = sqlite3.connect(db_path)
+                try:
+                    cur = conn.execute(
+                        f"UPDATE {TABLE_AUTOMATIONS} SET {', '.join(fields)} WHERE id = ?",
+                        params,
+                    )
+                    conn.commit()
+                    return cur.rowcount
+                finally:
+                    conn.close()
+
+            affected = await self._exec_in_executor(hass, _update)
+            if not affected:
+                return self.json({"success": False, "error": "自动化不存在"}, status_code=404)
+            next_run = None
+            manager = hass.data.get(DOMAIN, {}).get("automation_manager")
+            if manager:
+                next_run = await manager.recompute_next_run(auto_id)
+            return self.json({"success": True, "id": auto_id, "next_run": next_run})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete(self, request, auto_id: str = ""):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            auto_id = int(auto_id)
+        except Exception:
+            return self.json({"success": False, "error": "auto_id 无效"}, status_code=400)
+        db_path = self._db_path
+
+        def _delete() -> int:
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.execute(
+                    f"DELETE FROM {TABLE_AUTOMATIONS} WHERE id = ?", (auto_id,)
+                )
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+        try:
+            affected = await self._exec_in_executor(hass, _delete)
+            if not affected:
+                return self.json({"success": False, "error": "自动化不存在"}, status_code=404)
+            return self.json({"success": True, "id": auto_id})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class AutomationRunView(_BaseDBView):
+    """手动触发自动化（?force=1 跳过条件直接执行）。"""
+
+    url = "/api/ha_data_store/automations/{auto_id}/run"
+    name = "api:ha_data_store:automations_run"
+
+    async def post(self, request, auto_id: str = ""):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            auto_id = int(auto_id)
+        except Exception:
+            return self.json({"success": False, "error": "auto_id 无效"}, status_code=400)
+        force = request.query.get("force", "") in ("1", "true", "True", "yes", "on")
+        manager = hass.data.get(DOMAIN, {}).get("automation_manager")
+        if not manager:
+            return self.json({"success": False, "error": "自动化引擎未运行"}, status_code=500)
+        try:
+            result = await manager.run_by_id(auto_id, force=force)
+            return self.json(result)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class AutomationLogsView(_BaseDBView):
+    """自动化执行记录：分页查询 + 清理。"""
+
+    url = "/api/ha_data_store/automation_logs"
+    name = "api:ha_data_store:automation_logs"
+
+    async def get(self, request):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        auto_id = (request.query.get("automation_id") or "").strip()
+        status = (request.query.get("status") or "").strip()
+        try:
+            page = max(1, int(request.query.get("page", 1) or 1))
+        except Exception:
+            page = 1
+        try:
+            size = max(1, min(200, int(request.query.get("size", 20) or 20)))
+        except Exception:
+            size = 20
+        db_path = self._db_path
+
+        def _load() -> tuple[int, list[dict]]:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                where, params = [], []
+                if auto_id:
+                    where.append("automation_id = ?")
+                    params.append(auto_id)
+                if status:
+                    where.append("status = ?")
+                    params.append(status)
+                where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+                total = conn.execute(
+                    f"SELECT COUNT(*) AS c FROM {TABLE_AUTOMATION_LOGS} {where_sql}", params
+                ).fetchone()["c"]
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {TABLE_AUTOMATION_LOGS} {where_sql} "
+                    f"ORDER BY id DESC LIMIT ? OFFSET ?",
+                    params + [size, (page - 1) * size],
+                ).fetchall()]
+                return total, rows
+            finally:
+                conn.close()
+
+        try:
+            total, rows = await self._exec_in_executor(hass, _load)
+            for row in rows:
+                row["conditions_checked"] = _json_field(row.get("conditions_checked"), [])
+                row["actions_result"] = _json_field(row.get("actions_result"), [])
+            return self.json({
+                "success": True, "total": total, "page": page, "size": size, "items": rows,
+            })
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete(self, request):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        try:
+            days = max(1, int(request.query.get("days", 0) or 0))
+        except Exception:
+            days = 0
+        auto_id = (request.query.get("automation_id") or "").strip()
+        db_path = self._db_path
+
+        def _clean() -> int:
+            conn = sqlite3.connect(db_path)
+            try:
+                if auto_id:
+                    cur = conn.execute(
+                        f"DELETE FROM {TABLE_AUTOMATION_LOGS} WHERE automation_id = ?",
+                        (auto_id,),
+                    )
+                elif days > 0:
+                    # 与引擎写入格式保持一致（YYYY-MM-DD HH:MM:SS，空格分隔）
+                    cutoff_str = (
+                        datetime.utcnow()
+                        + timedelta(hours=DEFAULT_TIMEZONE, days=-days)
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+                    cur = conn.execute(
+                        f"DELETE FROM {TABLE_AUTOMATION_LOGS} WHERE created_at < ?",
+                        (cutoff_str,),
+                    )
+                else:
+                    return -1
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+        try:
+            affected = await self._exec_in_executor(hass, _clean)
+            if affected < 0:
+                return self.json(
+                    {"success": False, "error": "需要 days 或 automation_id 参数"}, status_code=400
+                )
+            return self.json({"success": True, "deleted": affected})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class AutomationLookupView(_BaseDBView):
+    """按名称查询指定自动化的详细信息（完整配置 + 执行统计 + 最近执行记录）。
+
+    GET /api/ha_data_store/automation_lookup?name=自动化名称[&fuzzy=1]
+    - 默认精确匹配（name = ?）；传 fuzzy=1 时改为 LIKE 模糊匹配
+    - 返回 items 数组（按 id 倒序，同名/模糊匹配的全部返回），每项含：
+        trigger_config / conditions / actions（JSON 已解析）
+        run_count / success_count / failed_count / skipped_count 统计
+        recent_logs：最近 5 条执行记录（含 conditions_checked / actions_result 已解析）
+    """
+
+    url = "/api/ha_data_store/automation_lookup"
+    name = "api:ha_data_store:automation_lookup"
+
+    async def get(self, request):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        name = (request.query.get("name") or "").strip()
+        if not name:
+            return self.json({"success": False, "error": "name 不能为空"}, status_code=400)
+        fuzzy = (request.query.get("fuzzy") or "").strip() in ("1", "true", "True", "yes", "on")
+        db_path = self._db_path
+
+        def _load() -> list[dict]:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                if fuzzy:
+                    rows = conn.execute(
+                        f"SELECT * FROM {TABLE_AUTOMATIONS} WHERE name LIKE ? ORDER BY id DESC",
+                        (f"%{name}%",),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        f"SELECT * FROM {TABLE_AUTOMATIONS} WHERE name = ? ORDER BY id DESC",
+                        (name,),
+                    ).fetchall()
+                items = []
+                for r in rows:
+                    item = dict(r)
+                    stats = conn.execute(
+                        f"SELECT COUNT(*) AS run_count, "
+                        f"SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count, "
+                        f"SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count, "
+                        f"SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count "
+                        f"FROM {TABLE_AUTOMATION_LOGS} WHERE automation_id = ?",
+                        (item["id"],),
+                    ).fetchone()
+                    item.update({k: (v or 0) for k, v in dict(stats).items()})
+                    logs = conn.execute(
+                        f"SELECT * FROM {TABLE_AUTOMATION_LOGS} WHERE automation_id = ? "
+                        f"ORDER BY id DESC LIMIT 5",
+                        (item["id"],),
+                    ).fetchall()
+                    item["recent_logs"] = [dict(l) for l in logs]
+                    items.append(item)
+                return items
+            finally:
+                conn.close()
+
+        try:
+            items = await self._exec_in_executor(hass, _load)
+            if not items:
+                return self.json(
+                    {"success": False, "error": f"未找到自动化: {name}"}, status_code=404
+                )
+            for item in items:
+                item["trigger_config"] = _json_field(item.get("trigger_config"), {})
+                item["conditions"] = _json_field(item.get("conditions"), [])
+                item["actions"] = _json_field(item.get("actions"), [])
+                for log in item.get("recent_logs") or []:
+                    log["conditions_checked"] = _json_field(log.get("conditions_checked"), [])
+                    log["actions_result"] = _json_field(log.get("actions_result"), [])
+            return self.json({"success": True, "total": len(items), "items": items})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)

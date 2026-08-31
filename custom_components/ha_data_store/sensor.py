@@ -16,11 +16,15 @@ from homeassistant.helpers.event import async_track_time_interval, async_track_u
 
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
-    TABLE_USER_ACTIONS, CATEGORY_ATTRIBUTE)
+    TABLE_USER_ACTIONS, TABLE_AUTOMATIONS, TABLE_AUTOMATION_LOGS,
+    CATEGORY_ATTRIBUTE)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 from .daily_summary import build_daily_summary_sync
 
 _LOGGER = logging.getLogger(__name__)
+
+# 自动化星期名（与 automations.py 保持一致）
+_WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 
 class MonitoredEntitiesSensor(SensorEntity):
@@ -384,6 +388,196 @@ class TodayFamilyStatusSensor(SensorEntity):
         self.async_write_ha_state()
 
 
+class AutomationStatusSensor(SensorEntity):
+    """简单自动化 + 上报自动化实体（ha_automation）状态传感器。
+
+    状态值 = 启用自动化总数（简单自动化 enabled 数 + 上报自动化实体中状态为 on 的个数）
+    状态属性：
+      total        → 自动化总数（简单自动化 + 上报自动化实体）
+      enabled      → 启用数（简单自动化 enabled + 上报自动化实体状态 on 数，= 状态值）
+      disabled     → 停用数（简单自动化 disabled + 上报自动化实体状态 off/不可用 数）
+      success      → 最近一次执行为成功的自动化数（上报自动化按 last_triggered 非空近似）
+      failed       → 最近一次执行为失败/部分失败的自动化数
+      skipped      → 最近一次执行为条件跳过的自动化数
+      never        → 从未执行过的自动化数（上报自动化按 last_triggered 为空）
+      total_runs   → 全部执行次数合计（上报自动化按"触发过"各计 1 次近似）
+      updated_at   → 数据刷新时间
+      automations[] → 每个自动化的详细信息（id/name/enabled/trigger_type/trigger_desc/
+                      stop_on_error/next_run/last_run/last_result/last_duration_ms/
+                      run_count/success_count/failed_count/skipped_count）
+      ha_automation[] → 上报实体中的自动化实体（report_entities 表 entity_id 以
+                      automation. 开头的行：entity_id/name/icon/room_name/source/
+                      rooms/last_report_time）
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "automation_status"
+    _attr_icon = "mdi:creation"
+    _attr_native_unit_of_measurement = "个"
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_automation_status"
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+
+    @staticmethod
+    def _parse_json(raw, default):
+        """兼容 dict/list/JSON 字符串。"""
+        if isinstance(raw, (dict, list)):
+            return raw
+        try:
+            return json.loads(raw) if raw else default
+        except Exception:
+            return default
+
+    @staticmethod
+    def _describe_trigger(ttype, tcfg):
+        """生成人类可读的触发描述（与 automations.py describe_trigger 一致）。"""
+        if ttype == "interval":
+            try:
+                secs = max(int(tcfg.get("interval_seconds") or 60), 10)
+            except (TypeError, ValueError):
+                secs = 60
+            if secs % 3600 == 0:
+                return f"每 {secs // 3600} 小时"
+            if secs % 60 == 0:
+                return f"每 {secs // 60} 分钟"
+            return f"每 {secs} 秒"
+        time_str = str(tcfg.get("time") or "00:00")
+        days = tcfg.get("days") or []
+        if not isinstance(days, list) or not days:
+            return f"每天 {time_str}"
+        names = "、".join(_WEEKDAY_NAMES[d] for d in sorted(days) if 0 <= d <= 6)
+        return f"{names} {time_str}"
+
+    def _load_data(self):
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        empty = {"total": 0, "enabled": 0, "disabled": 0, "success": 0,
+                 "failed": 0, "skipped": 0, "never": 0, "total_runs": 0,
+                 "updated_at": "", "automations": [], "ha_automation": []}
+        if not db_path:
+            return empty
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT id, name, enabled, trigger_type, trigger_config, stop_on_error, "
+                    f"next_run, last_run, last_result FROM {TABLE_AUTOMATIONS} ORDER BY id ASC"
+                ).fetchall()]
+                # 按 (automation_id, status) 聚合执行记录数
+                stat_rows = [dict(r) for r in conn.execute(
+                    f"SELECT automation_id, status, COUNT(*) AS cnt FROM {TABLE_AUTOMATION_LOGS} "
+                    f"GROUP BY automation_id, status"
+                ).fetchall()]
+                # 每个自动化最近一次执行的耗时
+                dur_rows = [dict(r) for r in conn.execute(
+                    f"SELECT automation_id, duration_ms FROM {TABLE_AUTOMATION_LOGS} "
+                    f"WHERE id IN (SELECT MAX(id) FROM {TABLE_AUTOMATION_LOGS} GROUP BY automation_id)"
+                ).fetchall()]
+                # 上报实体中的自动化实体（前端实体健康上报的 automation.* 实体）
+                report_rows = [dict(r) for r in conn.execute(
+                    f"SELECT entity_id, name, icon, room_name, source, rooms, last_report_time "
+                    f"FROM {TABLE_REPORT_ENTITIES} "
+                    f"WHERE entity_id LIKE 'automation.%' ORDER BY entity_id ASC"
+                ).fetchall()]
+            finally:
+                conn.close()
+        except Exception as e:
+            _LOGGER.error("[HDS] 自动化状态传感器加载失败: %s", e)
+            empty["error"] = str(e)
+            return empty
+
+        stats: dict[int, dict[str, int]] = {}
+        for s in stat_rows:
+            stats.setdefault(s["automation_id"], {})[s["status"]] = s["cnt"]
+        last_dur = {r["automation_id"]: r["duration_ms"] for r in dur_rows}
+
+        automations: list[dict[str, Any]] = []
+        success = failed = skipped = never = 0
+        total_runs = 0
+        for r in rows:
+            aid = r["id"]
+            st = stats.get(aid, {})
+            run_count = int(sum(st.values())) if st else 0
+            success_count = int(st.get("success", 0) or 0)
+            failed_count = int(st.get("failed", 0) or 0) + int(st.get("partial_failed", 0) or 0)
+            skipped_count = int(st.get("skipped", 0) or 0)
+            total_runs += run_count
+            last_result = str(r.get("last_result") or "")
+            item = {
+                "id": aid,
+                "name": str(r.get("name") or ""),
+                "enabled": bool(r.get("enabled")),
+                "trigger_type": str(r.get("trigger_type") or ""),
+                "trigger_desc": self._describe_trigger(
+                    r.get("trigger_type"),
+                    self._parse_json(r.get("trigger_config"), {}),
+                ),
+                "stop_on_error": bool(r.get("stop_on_error")),
+                "next_run": str(r.get("next_run") or ""),
+                "last_run": str(r.get("last_run") or ""),
+                "last_result": last_result,
+                "last_duration_ms": int(last_dur.get(aid, 0) or 0),
+                "run_count": run_count,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "skipped_count": skipped_count,
+            }
+            automations.append(item)
+            # 按最近一次执行结果统计自动化数量
+            if last_result == "success":
+                success += 1
+            elif last_result in ("failed", "partial_failed"):
+                failed += 1
+            elif last_result == "skipped":
+                skipped += 1
+            else:
+                never += 1
+
+        return {
+            "total": len(automations),
+            "enabled": sum(1 for a in automations if a["enabled"]),
+            "disabled": sum(1 for a in automations if not a["enabled"]),
+            "success": success,
+            "failed": failed,
+            "skipped": skipped,
+            "never": never,
+            "total_runs": total_runs,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "automations": automations,
+            "ha_automation": report_rows,
+        }
+
+    async def _async_refresh(self, now=None):
+        data = await self._hass.async_add_executor_job(self._load_data)
+        # 合并 ha_automation（上报的 HA 原生自动化实体）状态统计：
+        #   - on/off 由实体实时状态判定（无法检测/不可用/unknown 均视为停用）
+        #   - last_triggered 非空视为"执行过"（计入 success 与 total_runs 各 1 次近似）
+        ha_list = data.get("ha_automation") or []
+        if ha_list:
+            ha_on = ha_off = ha_triggered = 0
+            for item in ha_list:
+                st = self._hass.states.get(item.get("entity_id") or "")
+                if st is not None and st.state == "on":
+                    ha_on += 1
+                else:
+                    ha_off += 1  # off / unknown / unavailable / 实体不存在 → 停用
+                if st and st.attributes.get("last_triggered"):
+                    ha_triggered += 1
+            data["total"] = int(data.get("total", 0)) + len(ha_list)
+            data["enabled"] = int(data.get("enabled", 0)) + ha_on
+            data["disabled"] = int(data.get("disabled", 0)) + ha_off
+            data["success"] = int(data.get("success", 0)) + ha_triggered
+            data["never"] = int(data.get("never", 0)) + (len(ha_list) - ha_triggered)
+            data["total_runs"] = int(data.get("total_runs", 0)) + ha_triggered
+        self._attr_native_value = data.get("enabled", 0)
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     # 存储回调
     hass.data.setdefault(DOMAIN, {})["async_add_sensor"] = async_add_entities
@@ -394,10 +588,29 @@ async def async_setup_entry(hass, entry, async_add_entities):
     report_sensor = ReportedEntitiesHealthSensor(hass, device_info)
     summary_sensor = TodayFamilyStatusSensor(hass, device_info)
     user_actions_sensor = UserActionsSensor(hass, device_info)
+    automation_status_sensor = AutomationStatusSensor(hass, device_info)
     # 存引用，供按钮/服务触发按需刷新
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
     hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
-    entities = [sensor, report_sensor, summary_sensor, user_actions_sensor]
+    hass.data.setdefault(DOMAIN, {})["automation_status_sensor"] = automation_status_sensor
+    entities = [sensor, report_sensor, summary_sensor, user_actions_sensor, automation_status_sensor]
+
+    # 自动化状态传感器：固定实体 ID 为 sensor.ha_data_store_automation
+    # （HA 实体 ID 只允许小写字母/数字/下划线，配置里的点号写法会自动归一为下划线）
+    try:
+        reg = er.async_get(hass)
+        new_eid = "sensor.ha_data_store_automation"
+        old_eid = reg.async_get_entity_id("sensor", DOMAIN, automation_status_sensor.unique_id)
+        if old_eid and old_eid != new_eid:
+            try:
+                reg.async_update_entity(old_eid, new_entity_id=new_eid)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 自动化状态传感器实体重命名失败（%s → %s）: %s", old_eid, new_eid, e)
+        reg.async_get_or_create(domain="sensor", platform=DOMAIN,
+                                unique_id=automation_status_sensor.unique_id,
+                                suggested_object_id="ha_data_store_automation")
+    except Exception as e:
+        _LOGGER.warning("[HDS] 自动化状态传感器实体ID设置失败: %s", e)
 
     bdi = get_bridge_device_info(entry.entry_id)
     try:
@@ -418,6 +631,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, report_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
+    async_track_time_interval(hass, automation_status_sensor._async_refresh, timedelta(seconds=30))
 
     # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 分钟（整 30 分钟）更新 ──
     async def _delayed_first_refresh():

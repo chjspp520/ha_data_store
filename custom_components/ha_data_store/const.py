@@ -29,6 +29,8 @@ TABLE_MEDIA_PLAYLISTS = "media_playlists"
 TABLE_MEDIA_SONGS = "media_songs"
 TABLE_MEDIA_QUEUE = "media_queue"
 TABLE_MEDIA_NOW_PLAYING = "media_now_playing"
+TABLE_AUTOMATIONS = "automations"
+TABLE_AUTOMATION_LOGS = "automation_logs"
 
 # 传感器类：每种指标独立建表，表名前缀
 ENV_TABLE_PREFIX = "env_"
@@ -97,5 +99,10 @@ PENDING_JSON_FILENAME = "ha_data_store_pending.json"
 # HA 停机判定阈值（秒）：超过此时间视为长时间停机
 SHUTDOWN_THRESHOLD_SECONDS = 1800
 
+# 简单自动化引擎参数
+AUTOMATION_TICK_SECONDS = 30        # 调度器 tick 间隔（秒）
+AUTOMATION_LOG_RETENTION_DAYS = 30  # 执行记录保留天数（自动清理）
+AUTOMATION_LOG_CLEANUP_EVERY = 60   # 每 N 次 tick 清理一次过期执行记录
+
 # 系统版本号（与 manifest.json 同步）
-VERSION = "2.19.1"
+VERSION = "3.0.0"

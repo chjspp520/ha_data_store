@@ -169,6 +169,9 @@
       },
       "today_family_status": {
         "name": "今日家庭状态"
+      },
+      "automation_status": {
+        "name": "自动化状态"
       }
     },
     "button": {

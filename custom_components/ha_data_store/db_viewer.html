@@ -183,8 +183,13 @@
   .api-sub-panel.active { display: block; }
   .sub-panel { display: none; }
   .sub-panel.active { display: block; }
+  .auto-sub-tab-btn { background: var(--card); color: var(--text2); border: 1px solid var(--border); padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 6px; white-space: nowrap; }
+  .auto-sub-tab-btn:hover { background: var(--hover); color: var(--text); }
+  .auto-sub-tab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .auto-sub-panel { display: none; }
+  .auto-sub-panel.active { display: block; }
   .sep-title { color: var(--accent); font-size: 12px; margin: 16px 0 8px; padding: 4px 0 4px 10px; border-left: 3px solid var(--accent); font-weight: 500; }
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+  .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
   .form-grid .full { grid-column: 1 / -1; }
   .form-grid .col3 { grid-template-columns: 1fr 1fr 1fr; }
   .form-grid label { display: block; color: var(--text2); font-size: 12px; margin-bottom: 3px; }
@@ -209,6 +214,7 @@
   <button class="tab-btn" onclick="switchTab('db')">数据库浏览</button>
   <button class="tab-btn" onclick="switchTab('log')">日志查看</button>
   <button class="tab-btn" onclick="switchTab('user')">用户管理</button>
+  <button class="tab-btn" onclick="switchTab('automation')">🤖 自动化</button>
 </div>
 </div>
 
@@ -1096,6 +1102,19 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="user_actions_user_summary">👤 按用户汇总</option>
           <option value="user_actions_entity_last_today">⚡ 实体当日最后一条记录</option>
         </optgroup>
+        <optgroup label="🤖 自动化">
+          <option value="auto_list">自动化列表</option>
+          <option value="auto_lookup">🔍 按名称查详情</option>
+          <option value="auto_logs">执行记录列表</option>
+          <option value="auto_run">手动运行（可跳过条件）</option>
+          <option value="auto_create">新增自动化</option>
+          <option value="auto_update">更新自动化</option>
+          <option value="auto_delete">删除自动化</option>
+          <option value="auto_logs_clear">清理执行记录</option>
+        </optgroup>
+        <optgroup label="实体上报">
+          <option value="report_auto_entities">🤖 自动化实体列表</option>
+        </optgroup>
         <optgroup label="自定义路由" id="apiCustomRoutesGroup">
         </optgroup>
       </select>
@@ -1266,6 +1285,31 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="apiMediaNameRow" style="display:none">
       <label>播放列表名称 (name)</label>
       <input type="text" id="apiMediaName" placeholder="如：我的歌单" oninput="generateApiUrl()">
+    </div>
+    <!-- 简单自动化专用字段 -->
+    <div id="apiAutoIdRow" style="display:none">
+      <label>自动化 ID</label>
+      <input type="number" id="apiAutoId" placeholder="如：1" min="1" oninput="generateApiUrl()">
+    </div>
+    <div id="apiAutoKeywordRow" style="display:none">
+      <label>关键词 (keyword)</label>
+      <input type="text" id="apiAutoKeyword" placeholder="按名称模糊搜索" oninput="generateApiUrl()">
+    </div>
+    <div id="apiAutoFuzzyRow" style="display:none">
+      <label style="display:flex;align-items:center;gap:5px;margin-top:22px;color:var(--text)"><input type="checkbox" id="apiAutoFuzzy" onchange="generateApiUrl()"> 模糊匹配 (fuzzy=1，默认精确)</label>
+    </div>
+    <div id="apiAutoStatusRow" style="display:none">
+      <label>执行状态 (status)</label>
+      <select id="apiAutoStatus" onchange="generateApiUrl()">
+        <option value="">-- 全部 --</option>
+        <option value="success">成功</option>
+        <option value="failed">失败</option>
+        <option value="partial_failed">部分失败</option>
+        <option value="skipped">条件未满足</option>
+      </select>
+    </div>
+    <div id="apiAutoForceRow" style="display:none">
+      <label style="display:flex;align-items:center;gap:5px;margin-top:22px;color:var(--text)"><input type="checkbox" id="apiAutoForce" onchange="generateApiUrl()"> 强制运行 (force=1，跳过条件)</label>
     </div>
     <!-- 设备用户维度查询专用字段 -->
     <div id="apiDeviceUserNameRow" style="display:none">
@@ -1513,6 +1557,124 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
   </div>
 </div>
 
+<!-- ================================================ -->
+<!--  Tab 7: 简单自动化                                   -->
+<!-- ================================================ -->
+<div id="tab-automation" class="tab-panel">
+  <div class="sub-tabs" style="margin:0 0 12px">
+    <button class="auto-sub-tab-btn active" onclick="switchAutoSubTab('list')">🤖 自动化列表</button>
+    <button class="auto-sub-tab-btn" onclick="switchAutoSubTab('logs')">📋 执行记录</button>
+  </div>
+
+  <!-- 子面板: 自动化列表 -->
+  <div id="auto-sub-list" class="auto-sub-panel active">
+    <div class="toolbar">
+      <input type="text" id="autoKeyword" placeholder="按名称搜索..." style="width:180px" onkeydown="if(event.key==='Enter')loadAutomations(1)">
+      <button class="btn-accent" onclick="loadAutomations(1)">查询</button>
+      <button class="btn-green" onclick="openAutoModal()">＋ 新增自动化</button>
+    </div>
+    <div id="autoListWrap"></div>
+  </div>
+
+  <!-- 子面板: 执行记录 -->
+  <div id="auto-sub-logs" class="auto-sub-panel">
+    <div class="toolbar">
+      <select id="autoLogFilter" onchange="loadAutomationLogs(1)"><option value="">全部自动化</option></select>
+      <select id="autoLogStatus" onchange="loadAutomationLogs(1)">
+        <option value="">全部状态</option>
+        <option value="success">成功</option>
+        <option value="failed">失败</option>
+        <option value="partial_failed">部分失败</option>
+        <option value="skipped">条件未满足</option>
+      </select>
+      <button class="btn-accent" onclick="loadAutomationLogs(1)">刷新</button>
+      <button class="btn-filter" style="color:#f85149" onclick="clearAutomationLogs()">清理记录</button>
+    </div>
+    <div id="autoLogsWrap"></div>
+  </div>
+</div>
+
+<!-- 自动化编辑弹窗 -->
+<div id="autoModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:999" onclick="if(event.target===this)closeAutoModal()">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:760px;max-width:94vw;max-height:88vh;overflow:auto;background:#161b22;border:1px solid var(--border);border-radius:12px;padding:20px 24px">
+    <h3 id="autoModalTitle" style="margin:0 0 14px">新增自动化</h3>
+    <div class="form-grid">
+      <div>
+        <label>名称 *</label>
+        <input type="text" id="autoName" placeholder="如：早上8点半开灯">
+      </div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;white-space:nowrap;padding-bottom:4px">
+        <label style="display:flex;align-items:center;gap:5px;margin:0;color:var(--text);white-space:nowrap"><input type="checkbox" id="autoEnabled" checked> 启用</label>
+        <label style="display:flex;align-items:center;gap:5px;margin:0;color:var(--text);white-space:nowrap"><input type="checkbox" id="autoStopOnError"> 失败即停</label>
+      </div>
+    </div>
+
+    <div class="sep-title">触发配置</div>
+    <div class="form-grid">
+      <div>
+        <label>触发类型</label>
+        <select id="autoTriggerType" onchange="toggleAutoTriggerFields()">
+          <option value="time">定时（每天固定时间 + 可选星期）</option>
+          <option value="interval">间隔（每 N 秒）</option>
+        </select>
+      </div>
+    </div>
+    <div id="autoTimeFields">
+      <div class="form-grid" style="margin-top:8px">
+        <div>
+          <label>时间</label>
+          <input type="time" id="autoTime" value="08:30">
+        </div>
+        <div class="full">
+          <label>星期（不勾选 = 每天）</label>
+          <div id="autoDaysWrap" style="display:flex;gap:8px;flex-wrap:wrap;padding-top:6px"></div>
+        </div>
+      </div>
+    </div>
+    <div id="autoIntervalFields" style="display:none">
+      <div class="form-grid" style="margin-top:8px">
+        <div>
+          <label>间隔（秒）</label>
+          <input type="number" id="autoIntervalSecs" value="1800" min="10">
+        </div>
+        <div><label style="color:var(--text2)">≥10 秒；重启后过期不补跑，直接从当前时间顺延</label></div>
+      </div>
+    </div>
+
+    <div class="sep-title">条件（不填则无条件，直接执行）</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <label style="display:flex;align-items:center;gap:5px;color:var(--text);font-size:13px">满足方式
+        <select id="autoLogic" style="width:auto">
+          <option value="all">全部满足 (AND)</option>
+          <option value="any">任一满足 (OR)</option>
+        </select>
+      </label>
+      <button class="btn-filter btn-accent" onclick="addAutoCondRow()">＋ 添加条件</button>
+    </div>
+    <div id="autoCondRows"></div>
+
+    <div class="sep-title">动作（调用 HA 服务）</div>
+    <button class="btn-filter btn-accent" onclick="addAutoActionRow()">＋ 添加动作</button>
+    <div id="autoActionRows" style="margin-top:8px"></div>
+
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+      <button class="btn-accent" onclick="saveAutoModal()">保存</button>
+      <button onclick="closeAutoModal()">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 执行记录明细弹窗 -->
+<div id="autoLogDetailOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:999" onclick="if(event.target===this)closeAutoLogDetail()">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:680px;max-width:94vw;max-height:85vh;overflow:auto;background:#161b22;border:1px solid var(--border);border-radius:12px;padding:20px 24px">
+    <h3 style="margin:0 0 12px">执行记录明细</h3>
+    <div id="autoLogDetailBody"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px">
+      <button onclick="closeAutoLogDetail()">关闭</button>
+    </div>
+  </div>
+</div>
+
 </div>
 
 <script>
@@ -1574,7 +1736,7 @@ function isUserTable(name) {
       || name === 'media_playlists' || name === 'media_songs' || name === 'media_queue' || name === 'media_now_playing'
       || name === 'xiaoai_conversations'
       || name === 'printer_daily'
-      || name === 'report_entities' || name === 'user_actions';
+      || name === 'report_entities' || name === 'user_actions' || name === 'automation_logs';
 }
 
 function populateTableSelect() {
@@ -5307,7 +5469,8 @@ function _hideAllApiFormRows() {
     'apiEleDayTableRow','apiEleMonthTableRow','apiEleYearTableRow','apiEleDayLimitRow',
     'apiEleMonthLimitRow','apiEleYearLimitRow','apiEleTranslatedFieldRow',
     'apiHealthNameRow','apiHealthTypeRow','apiMediaUserRow','apiMediaIdRow','apiMediaNameRow',
-    'apiDeviceUserNameRow','apiDeviceUserDirRow'];
+    'apiDeviceUserNameRow','apiDeviceUserDirRow',
+    'apiAutoIdRow','apiAutoKeywordRow','apiAutoFuzzyRow','apiAutoStatusRow','apiAutoForceRow'];
   ids.forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.style.display = 'none';
@@ -5336,6 +5499,20 @@ function _showMediaApiRows(qt) {
     // 添加歌曲也需要 user（用于展示说明，实际只需 playlist_id）
     if (qt === 'media_song_add') document.getElementById('apiMediaUserRow').style.display = '';
   }
+}
+
+// 简单自动化：根据查询类型显示对应专用字段
+function _showAutoApiRows(qt) {
+  if (['auto_update','auto_delete','auto_run'].indexOf(qt) !== -1) {
+    document.getElementById('apiAutoIdRow').style.display = '';
+  }
+  if (qt === 'auto_logs' || qt === 'auto_logs_clear') {
+    document.getElementById('apiAutoIdRow').style.display = '';
+    document.getElementById('apiAutoStatusRow').style.display = (qt === 'auto_logs') ? '' : 'none';
+  }
+  if (qt === 'auto_list' || qt === 'auto_lookup') document.getElementById('apiAutoKeywordRow').style.display = '';
+  if (qt === 'auto_lookup') document.getElementById('apiAutoFuzzyRow').style.display = '';
+  if (qt === 'auto_run') document.getElementById('apiAutoForceRow').style.display = '';
 }
 
 function onApiTypeChange() {
@@ -5373,6 +5550,10 @@ function onApiTypeChange() {
   const isPrinterRange = qt === 'printer_daily_range';
   const isPrinterDetail = qt === 'printer_detail';
   const isMediaApi = qt.startsWith('media_');
+  // 简单自动化 RESTful API
+  const isAutoApi = qt.startsWith('auto_');
+  // 实体上报 RESTful API（自动化实体列表，无参数仅 key）
+  const isReportAutoEntities = qt === 'report_auto_entities';
   // 用户动作查询组
   const isUserActionDaily = qt === 'user_actions_daily';
   const isUserActionRange = qt === 'user_actions_range';
@@ -5729,6 +5910,28 @@ function onApiTypeChange() {
     // 音乐媒体：隐藏所有常规控件，只显示对应专用字段
     _hideAllApiFormRows();
     _showMediaApiRows(qt);
+  } else if (isReportAutoEntities) {
+    // 实体上报：自动化实体列表，无参数，仅 key
+    _hideAllApiFormRows();
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+  } else if (isAutoApi) {
+    // 简单自动化：隐藏常规控件，显示对应专用字段 + 列表类的 limit/offset
+    _hideAllApiFormRows();
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    const isAutoList = (qt === 'auto_list' || qt === 'auto_logs');
+    document.getElementById('apiLimit').parentNode.style.display = isAutoList ? '' : 'none';
+    document.getElementById('apiOffset').parentNode.style.display = isAutoList ? '' : 'none';
+    _showAutoApiRows(qt);
   } else if (isUserAction) {
     // 用户动作查询组：显示实体/日期/月份/limit，隐藏表格/offset/orderBy/fields
     document.getElementById('apiEntityId').parentNode.style.display = '';
@@ -6063,6 +6266,81 @@ function generateApiUrl() {
         break;
     }
     document.getElementById('apiUrlOutput').value = mediaUrl;
+    return;
+  }
+
+  // 简单自动化 API 特殊处理（独立 RESTful 路径，不走 /query）
+  if (qt.startsWith('auto_')) {
+    const autoBase = BASE_PATH + '/api/ha_data_store/automations';
+    const autoId = document.getElementById('apiAutoId').value.trim();
+    const autoKeyword = document.getElementById('apiAutoKeyword').value.trim();
+    const autoStatus = document.getElementById('apiAutoStatus').value;
+    const autoForce = document.getElementById('apiAutoForce').checked;
+    const autoKey = selectedApiKey ? ('&key=' + encodeURIComponent(selectedApiKey)) : '';
+    function autoJoin(params) {
+      let u = autoBase + (autoKey ? ('?' + autoKey.slice(1)) : '');
+      let sep = autoKey ? '&' : '?';
+      params.forEach(kv => { u += sep + kv; sep = '&'; });
+      return u;
+    }
+    let autoUrl = '';
+    switch (qt) {
+      case 'auto_list': {
+        const p = [];
+        if (autoKeyword) p.push('keyword=' + encodeURIComponent(autoKeyword));
+        if (limit) p.push('limit=' + encodeURIComponent(limit));
+        if (offset) p.push('offset=' + encodeURIComponent(offset));
+        autoUrl = autoJoin(p);
+        break;
+      }
+      case 'auto_lookup': {
+        const p = [];
+        if (autoKeyword) p.push('name=' + encodeURIComponent(autoKeyword));
+        if (document.getElementById('apiAutoFuzzy').checked) p.push('fuzzy=1');
+        autoUrl = autoJoin(p).replace('/automations', '/automation_lookup');
+        break;
+      }
+      case 'auto_logs': {
+        const p = [];
+        if (autoId) p.push('automation_id=' + encodeURIComponent(autoId));
+        if (autoStatus) p.push('status=' + encodeURIComponent(autoStatus));
+        if (limit) p.push('limit=' + encodeURIComponent(limit));
+        if (offset) p.push('offset=' + encodeURIComponent(offset));
+        autoUrl = autoJoin(p).replace('/automations', '/automation_logs');
+        break;
+      }
+      case 'auto_create':
+        autoUrl = autoJoin(['_method=POST']);
+        break;
+      case 'auto_update':
+        autoUrl = autoJoin(['_method=PUT']).replace('/automations', '/automations/' + encodeURIComponent(autoId));
+        break;
+      case 'auto_delete':
+        autoUrl = autoJoin(['_method=DELETE']).replace('/automations', '/automations/' + encodeURIComponent(autoId));
+        break;
+      case 'auto_run': {
+        const p = ['_method=POST'];
+        if (autoForce) p.push('force=1');
+        autoUrl = autoJoin(p).replace('/automations', '/automations/' + encodeURIComponent(autoId) + '/run');
+        break;
+      }
+      case 'auto_logs_clear': {
+        const p = ['_method=DELETE'];
+        if (autoId) p.push('automation_id=' + encodeURIComponent(autoId));
+        if (limit) p.push('days=' + encodeURIComponent(limit));
+        autoUrl = autoJoin(p).replace('/automations', '/automation_logs');
+        break;
+      }
+    }
+    document.getElementById('apiUrlOutput').value = autoUrl;
+    return;
+  }
+
+  // 实体上报 API 特殊处理（独立 RESTful 路径，不走 /query）
+  if (qt === 'report_auto_entities') {
+    let reUrl = BASE_PATH + '/api/ha_data_store/report/auto_entities';
+    if (selectedApiKey) reUrl += '?key=' + encodeURIComponent(selectedApiKey);
+    document.getElementById('apiUrlOutput').value = reUrl;
     return;
   }
 
@@ -6526,8 +6804,412 @@ switchTab = function(name) {
 };
 
 // ==============================
+//  简单自动化管理
+// ==============================
+let autoPage = 1, autoLogPage = 1, autoEditingId = null, autoTabVisited = false;
+let autoCache = [], autoLogCache = [];
+const AUTO_DAY_NAMES = ['周一','周二','周三','周四','周五','周六','周日'];
+const AUTO_OPS = ['==','!=','>=','<=','>','<','contains'];
+const AUTO_STAT_MAP = { success: '成功', failed: '失败', partial_failed: '部分失败', skipped: '条件未满足' };
+// 常用服务下拉（动作行使用）
+const AUTO_COMMON_SERVICES = [
+  { group: '灯光', items: [ ['light.turn_on','开灯'], ['light.turn_off','关灯'], ['light.toggle','切换'] ] },
+  { group: '开关', items: [ ['switch.turn_on','开'], ['switch.turn_off','关'], ['switch.toggle','切换'] ] },
+  { group: '空调', items: [ ['climate.set_temperature','设定温度'], ['climate.set_hvac_mode','切换模式'], ['climate.set_fan_mode','设定风速'], ['climate.turn_on','开机'], ['climate.turn_off','关机'] ] },
+  { group: '风扇', items: [ ['fan.turn_on','开'], ['fan.turn_off','关'], ['fan.set_percentage','设定风速'] ] },
+  { group: '窗帘', items: [ ['cover.open_cover','打开'], ['cover.close_cover','关闭'], ['cover.stop_cover','停止'], ['cover.set_cover_position','设定开度'] ] },
+  { group: '媒体', items: [ ['media_player.turn_on','开机'], ['media_player.turn_off','关机'], ['media_player.media_play','播放'], ['media_player.media_pause','暂停'], ['media_player.media_stop','停止'], ['media_player.media_next_track','下一首'], ['media_player.media_previous_track','上一首'] ] },
+  { group: '场景/自动化', items: [ ['scene.turn_on','激活场景'], ['automation.turn_on','启用自动化'], ['automation.turn_off','停用自动化'], ['script.turn_on','运行脚本'] ] },
+  { group: '通知/杂项', items: [ ['notify.send_message','发送通知'], ['button.press','按按钮'], ['input_boolean.turn_on','开（布尔）'], ['input_boolean.turn_off','关（布尔）'], ['input_boolean.toggle','切（布尔）'], ['homeassistant.turn_on','开（通用）'], ['homeassistant.turn_off','关（通用）'] ] }
+];
+const AUTO_SVC_VALUES = new Set(AUTO_COMMON_SERVICES.flatMap(g => g.items.map(it => it[0])));
+
+function switchAutoSubTab(name) {
+  document.querySelectorAll('.auto-sub-tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.auto-sub-panel').forEach(p => p.classList.remove('active'));
+  const btn = document.querySelector(`.auto-sub-tab-btn[onclick*="'${name}'"]`);
+  if (btn) btn.classList.add('active');
+  const panel = document.getElementById('auto-sub-' + name);
+  if (panel) panel.classList.add('active');
+  if (name === 'list') loadAutomations(1);
+  if (name === 'logs') { fillAutoLogFilter(); loadAutomationLogs(1); }
+}
+
+// ── 自动化列表 ──
+async function loadAutomations(page) {
+  autoPage = page;
+  const kw = encodeURIComponent(document.getElementById('autoKeyword').value.trim());
+  try {
+    const r = await fetch(`/api/ha_data_store/automations?page=${page}&size=20${kw ? '&keyword=' + kw : ''}`);
+    const d = await r.json();
+    if (!d.success) { showToast(d.error || '加载失败', false); return; }
+    autoCache = d.items || [];
+    renderAutoList(autoCache, d.total || 0, d.page || 1);
+  } catch (e) { showToast('请求失败', false); }
+}
+
+function describeAutoTrigger(a) {
+  const tc = a.trigger_config || {};
+  if (a.trigger_type === 'interval') {
+    const s = parseInt(tc.interval_seconds) || 60;
+    if (s % 3600 === 0) return `每 ${s / 3600} 小时`;
+    if (s % 60 === 0) return `每 ${s / 60} 分钟`;
+    return `每 ${s} 秒`;
+  }
+  const t = tc.time || '00:00';
+  const days = Array.isArray(tc.days) ? tc.days : [];
+  if (!days.length) return `每天 ${t}`;
+  return days.slice().sort((a, b) => a - b).map(d => AUTO_DAY_NAMES[d]).join('、') + ' ' + t;
+}
+
+function renderAutoList(items, total, page) {
+  const size = 20, totalPages = Math.max(1, Math.ceil(total / size));
+  const cnt = arr => (Array.isArray(arr) ? arr.length : 0);
+  let html = `<div class="table-wrap"><table class="data-table">`;
+  html += `<tr><th style="width:44px">ID</th><th>名称</th><th style="width:130px">触发</th><th style="width:48px">条件</th><th style="width:48px">动作</th><th style="width:60px">启用</th><th style="width:140px">下次运行</th><th style="width:140px">上次运行</th><th style="width:80px">上次结果</th><th style="width:190px">操作</th></tr>`;
+  if (!items.length) html += `<tr><td colspan="10" style="text-align:center;color:var(--text2);padding:24px">暂无自动化，点击右上角「＋ 新增自动化」创建</td></tr>`;
+  items.forEach(a => {
+    html += `<tr>
+      <td>${a.id}</td>
+      <td>${escHtml(String(a.name || ''))}</td>
+      <td style="font-size:12px">${escHtml(describeAutoTrigger(a))}</td>
+      <td>${cnt(a.conditions)}</td>
+      <td>${cnt(a.actions)}</td>
+      <td><input type="checkbox" ${a.enabled ? 'checked' : ''} onchange="toggleAutoEnabled(${a.id}, this.checked)"></td>
+      <td style="font-size:12px">${escHtml(a.next_run || '待计算')}</td>
+      <td style="font-size:12px">${escHtml(a.last_run || '-')}</td>
+      <td style="font-size:12px">${a.last_result ? escHtml(AUTO_STAT_MAP[a.last_result] || a.last_result) : '-'}</td>
+      <td>
+        <button class="btn-filter" onclick="runAuto(${a.id}, false)">▶ 运行</button>
+        <button class="btn-filter" onclick="runAuto(${a.id}, true)" title="跳过条件强制执行">⏩ 强制</button>
+        <button class="btn-filter" onclick="openAutoModalById(${a.id})">✏️ 编辑</button>
+        <button class="btn-filter" style="color:#f85149" onclick="deleteAuto(${a.id})">🗑 删除</button>
+      </td>
+    </tr>`;
+  });
+  html += `</table></div>`;
+  html += `<div class="pagination">
+    <button onclick="loadAutomations(1)" ${page <= 1 ? 'disabled' : ''}>首页</button>
+    <button onclick="loadAutomations(${page - 1})" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+    <span class="info">第 ${page} / ${totalPages} 页（共 ${total} 条）</span>
+    <button onclick="loadAutomations(${page + 1})" ${page >= totalPages ? 'disabled' : ''}>下一页</button>
+    <button onclick="loadAutomations(${totalPages})" ${page >= totalPages ? 'disabled' : ''}>末页</button>
+  </div>`;
+  document.getElementById('autoListWrap').innerHTML = html;
+}
+
+async function toggleAutoEnabled(id, checked) {
+  try {
+    const r = await fetch(`/api/ha_data_store/automations/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: checked })
+    });
+    const d = await r.json();
+    if (!d.success) { showToast(d.error || '操作失败', false); loadAutomations(autoPage); return; }
+    showToast(checked ? '已启用' : '已停用', true);
+    loadAutomations(autoPage);
+  } catch (e) { showToast('请求失败', false); }
+}
+
+async function runAuto(id, force) {
+  if (!confirm(force ? '强制触发（跳过条件）？' : '立即触发该自动化？')) return;
+  try {
+    const r = await fetch(`/api/ha_data_store/automations/${id}/run${force ? '?force=1' : ''}`, { method: 'POST' });
+    const d = await r.json();
+    if (!d.success) { showToast(d.error || '触发失败', false); return; }
+    showToast(`执行完成：${d.status}`, true);
+    loadAutomations(autoPage);
+  } catch (e) { showToast('请求失败', false); }
+}
+
+async function deleteAuto(id) {
+  if (!confirm('确定删除该自动化？执行记录会保留。')) return;
+  try {
+    const r = await fetch(`/api/ha_data_store/automations/${id}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (!d.success) { showToast(d.error || '删除失败', false); return; }
+    showToast('已删除', true);
+    loadAutomations(autoPage);
+  } catch (e) { showToast('请求失败', false); }
+}
+
+// ── 新增/编辑弹窗 ──
+function initAutoDaysWrap() {
+  const wrap = document.getElementById('autoDaysWrap');
+  wrap.innerHTML = '';
+  AUTO_DAY_NAMES.forEach((n, i) => {
+    const lb = document.createElement('label');
+    lb.style.cssText = 'display:flex;align-items:center;gap:4px;color:var(--text);font-size:13px;cursor:pointer;white-space:nowrap';
+    lb.innerHTML = `<input type="checkbox" value="${i}"> ${n}`;
+    wrap.appendChild(lb);
+  });
+}
+initAutoDaysWrap();
+
+function openAutoModalById(id) {
+  const it = autoCache.find(x => x.id === id);
+  if (it) openAutoModal(it);
+}
+
+function openAutoModal(item) {
+  autoEditingId = item ? item.id : null;
+  document.getElementById('autoModalTitle').textContent = item ? `编辑自动化 #${item.id}` : '新增自动化';
+  document.getElementById('autoName').value = item ? (item.name || '') : '';
+  document.getElementById('autoEnabled').checked = item ? !!item.enabled : true;
+  document.getElementById('autoStopOnError').checked = item ? !!item.stop_on_error : false;
+  const tc = (item && item.trigger_config) || {};
+  document.getElementById('autoTriggerType').value = item ? (item.trigger_type || 'time') : 'time';
+  document.getElementById('autoTime').value = tc.time || '08:30';
+  const days = Array.isArray(tc.days) ? tc.days : [];
+  document.querySelectorAll('#autoDaysWrap input').forEach(cb => { cb.checked = days.includes(parseInt(cb.value)); });
+  document.getElementById('autoIntervalSecs').value = tc.interval_seconds || 1800;
+  document.getElementById('autoLogic').value = item ? (item.logic || 'all') : 'all';
+  toggleAutoTriggerFields();
+  const conds = (item && Array.isArray(item.conditions)) ? item.conditions : [];
+  document.getElementById('autoCondRows').innerHTML = '';
+  if (!conds.length) addAutoCondRow();
+  conds.forEach(c => addAutoCondRow(c));
+  const acts = (item && Array.isArray(item.actions)) ? item.actions : [];
+  document.getElementById('autoActionRows').innerHTML = '';
+  if (!acts.length) addAutoActionRow();
+  acts.forEach(a => addAutoActionRow(a));
+  document.getElementById('autoModalOverlay').style.display = 'block';
+}
+
+function closeAutoModal() { document.getElementById('autoModalOverlay').style.display = 'none'; }
+
+function toggleAutoTriggerFields() {
+  const t = document.getElementById('autoTriggerType').value;
+  document.getElementById('autoTimeFields').style.display = t === 'time' ? 'block' : 'none';
+  document.getElementById('autoIntervalFields').style.display = t === 'interval' ? 'block' : 'none';
+}
+
+function addAutoCondRow(cond) {
+  const rows = document.getElementById('autoCondRows');
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;margin-bottom:8px;align-items:center';
+  row.innerHTML = `
+    <input type="text" placeholder="实体ID，如 sensor.temperature" style="flex:2;background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:13px" value="${cond ? escAttr(cond.entity_id || '') : ''}">
+    <select style="width:90px;background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 6px;font-size:13px">
+      ${AUTO_OPS.map(op => `<option value="${op}" ${cond && cond.operator === op ? 'selected' : ''}>${op}</option>`).join('')}
+    </select>
+    <input type="text" placeholder="比较值" style="flex:1;background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:13px" value="${cond !== undefined && cond.value !== undefined ? escAttr(String(cond.value)) : ''}">
+    <button class="btn-filter" style="color:#f85149" onclick="this.parentNode.remove()">✕</button>`;
+  rows.appendChild(row);
+}
+
+// 下拉选择"自定义..."时显示/隐藏对应的自定义输入框
+function toggleAutoCustomField(sel, cls) {
+  const custom = sel.parentNode.querySelector('.' + cls);
+  if (custom) custom.style.display = sel.value === '__custom__' ? 'block' : 'none';
+}
+
+function addAutoActionRow(act) {
+  const rows = document.getElementById('autoActionRows');
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap';
+  let dataStr = '';
+  if (act && act.data) dataStr = typeof act.data === 'string' ? act.data : JSON.stringify(act.data);
+  const svc = act ? (act.service || '') : '';
+  const eid = act ? (act.entity_id || '') : '';
+  const svcInList = svc && AUTO_SVC_VALUES.has(svc);
+  row.innerHTML = `
+    <select class="auto-svc" style="flex:1.3;min-width:200px;background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 6px;font-size:13px" onchange="toggleAutoCustomField(this,'auto-svc-custom')">
+      ${AUTO_COMMON_SERVICES.map(g => `<optgroup label="${escAttr(g.group)}">` + g.items.map(it => `<option value="${it[0]}" ${svc === it[0] ? 'selected' : ''}>${it[0]}（${it[1]}）</option>`).join('') + '</optgroup>').join('')}
+      <option value="__custom__" ${!svcInList ? 'selected' : ''}>✏️ 自定义服务...</option>
+    </select>
+    <input type="text" class="auto-svc-custom" placeholder="自定义服务，如 light.turn_on" style="flex:1.3;min-width:200px;display:${(!svcInList && svc) ? 'block' : 'none'};background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:13px" value="${svcInList ? '' : escAttr(svc)}">
+    <input type="text" class="auto-eid" placeholder="实体ID（可空，手动输入）" style="flex:1.5;min-width:200px;background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:13px" value="${escAttr(eid)}">
+    <input type="text" class="auto-data" placeholder='参数 JSON，如 {"brightness":255}' style="flex:2;min-width:220px;background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:13px" value="${escAttr(dataStr)}">
+    <button class="btn-filter" style="color:#f85149" onclick="this.parentNode.remove()">✕</button>`;
+  rows.appendChild(row);
+}
+
+async function saveAutoModal() {
+  const name = document.getElementById('autoName').value.trim();
+  if (!name) { showToast('名称不能为空', false); return; }
+  const ttype = document.getElementById('autoTriggerType').value;
+  let trigger_config;
+  if (ttype === 'time') {
+    const days = [];
+    document.querySelectorAll('#autoDaysWrap input:checked').forEach(cb => days.push(parseInt(cb.value)));
+    trigger_config = { time: document.getElementById('autoTime').value || '00:00', days };
+  } else {
+    trigger_config = { interval_seconds: Math.max(10, parseInt(document.getElementById('autoIntervalSecs').value) || 60) };
+  }
+  const conditions = [];
+  document.querySelectorAll('#autoCondRows > div').forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    const sel = row.querySelector('select');
+    const entity_id = inputs[0].value.trim();
+    if (entity_id) conditions.push({ entity_id, operator: sel.value, value: inputs[1].value });
+  });
+  const actions = [];
+  let jsonErr = false;
+  document.querySelectorAll('#autoActionRows > div').forEach(row => {
+    const svcSel = row.querySelector('.auto-svc');
+    const svcCustom = row.querySelector('.auto-svc-custom');
+    const service = (svcSel.value === '__custom__' ? svcCustom.value : svcSel.value).trim();
+    const entity_id = row.querySelector('.auto-eid').value.trim();
+    const dataRaw = row.querySelector('.auto-data').value.trim();
+    let data = {};
+    if (dataRaw) {
+      try { data = JSON.parse(dataRaw); } catch (e) { jsonErr = true; }
+    }
+    if (service) actions.push({ service, entity_id, data });
+  });
+  if (jsonErr) { showToast('动作参数 JSON 格式错误', false); return; }
+  const body = {
+    name, enabled: document.getElementById('autoEnabled').checked,
+    trigger_type: ttype, trigger_config,
+    conditions, logic: document.getElementById('autoLogic').value,
+    actions, stop_on_error: document.getElementById('autoStopOnError').checked
+  };
+  const url = autoEditingId ? `/api/ha_data_store/automations/${autoEditingId}` : '/api/ha_data_store/automations';
+  const method = autoEditingId ? 'PUT' : 'POST';
+  try {
+    const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!d.success) { showToast(d.error || '保存失败', false); return; }
+    showToast('保存成功', true);
+    closeAutoModal();
+    loadAutomations(autoPage);
+  } catch (e) { showToast('请求失败', false); }
+}
+
+// ── 执行记录 ──
+async function fillAutoLogFilter() {
+  const sel = document.getElementById('autoLogFilter');
+  if (sel.dataset.filled) return;
+  try {
+    const r = await fetch('/api/ha_data_store/automations?page=1&size=200');
+    const d = await r.json();
+    if (!d.success || !d.items) return;
+    sel.dataset.filled = '1';
+    (d.items || []).forEach(a => {
+      const op = document.createElement('option');
+      op.value = a.id;
+      op.textContent = `#${a.id} ${a.name}`;
+      sel.appendChild(op);
+    });
+  } catch (e) {}
+}
+
+async function loadAutomationLogs(page) {
+  autoLogPage = page;
+  const aid = document.getElementById('autoLogFilter').value;
+  const st = document.getElementById('autoLogStatus').value;
+  const qs = `page=${page}&size=20${aid ? '&automation_id=' + aid : ''}${st ? '&status=' + st : ''}`;
+  try {
+    const r = await fetch('/api/ha_data_store/automation_logs?' + qs);
+    const d = await r.json();
+    if (!d.success) { showToast(d.error || '加载失败', false); return; }
+    autoLogCache = d.items || [];
+    renderAutoLogs(autoLogCache, d.total || 0, d.page || 1);
+  } catch (e) { showToast('请求失败', false); }
+}
+
+function renderAutoLogs(items, total, page) {
+  const size = 20, totalPages = Math.max(1, Math.ceil(total / size));
+  const trigMap = { time: '定时', interval: '间隔' };
+  let html = `<div class="table-wrap"><table class="data-table">`;
+  html += `<tr><th style="width:50px">ID</th><th>自动化</th><th style="width:70px">触发</th><th style="width:150px">触发时间</th><th style="width:70px">条件</th><th style="width:90px">状态</th><th style="width:80px">耗时</th><th style="width:60px">操作</th></tr>`;
+  if (!items.length) html += `<tr><td colspan="8" style="text-align:center;color:var(--text2);padding:24px">暂无执行记录</td></tr>`;
+  items.forEach(l => {
+    const stName = AUTO_STAT_MAP[l.status] || l.status;
+    const stColor = l.status === 'success' ? 'var(--green)' : (l.status === 'failed' ? '#f85149' : (l.status === 'partial_failed' ? '#d29922' : 'var(--text2)'));
+    const condTxt = l.condition_result ? '通过' : ((Array.isArray(l.conditions_checked) && l.conditions_checked.length) ? '未满足' : '-');
+    html += `<tr>
+      <td>${l.id}</td>
+      <td>${escHtml(l.automation_name || '')} <span style="color:var(--text2);font-size:11px">#${l.automation_id}</span></td>
+      <td style="font-size:12px">${trigMap[l.trigger_type] || escHtml(l.trigger_type || '')}</td>
+      <td style="font-size:12px">${escHtml(l.trigger_time || '')}</td>
+      <td style="font-size:12px">${condTxt}</td>
+      <td style="font-size:12px;color:${stColor}">${escHtml(stName)}</td>
+      <td style="font-size:12px">${l.duration_ms}ms</td>
+      <td><button class="btn-filter" onclick="showAutoLogDetail(${l.id})">明细</button></td>
+    </tr>`;
+  });
+  html += `</table></div>`;
+  html += `<div class="pagination">
+    <button onclick="loadAutomationLogs(1)" ${page <= 1 ? 'disabled' : ''}>首页</button>
+    <button onclick="loadAutomationLogs(${page - 1})" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+    <span class="info">第 ${page} / ${totalPages} 页（共 ${total} 条）</span>
+    <button onclick="loadAutomationLogs(${page + 1})" ${page >= totalPages ? 'disabled' : ''}>下一页</button>
+    <button onclick="loadAutomationLogs(${totalPages})" ${page >= totalPages ? 'disabled' : ''}>末页</button>
+  </div>`;
+  document.getElementById('autoLogsWrap').innerHTML = html;
+}
+
+function showAutoLogDetail(id) {
+  const l = autoLogCache.find(x => x.id === id);
+  if (!l) return;
+  const conds = Array.isArray(l.conditions_checked) ? l.conditions_checked : [];
+  const acts = Array.isArray(l.actions_result) ? l.actions_result : [];
+  const stName = AUTO_STAT_MAP[l.status] || l.status;
+  let html = `<div style="font-size:13px;color:var(--text2);margin-bottom:10px">
+    自动化：<b style="color:var(--text)">${escHtml(l.automation_name || '')}</b>（#${l.automation_id}）｜
+    触发：${escHtml(l.trigger_desc || '')}｜时间：${escHtml(l.trigger_time || '')}｜
+    状态：<b>${escHtml(stName)}</b>｜耗时：${l.duration_ms}ms
+  </div>`;
+  html += `<div class="sep-title">条件明细${conds.length ? '' : '（无条件）'}</div>`;
+  if (conds.length) {
+    html += `<div class="table-wrap" style="max-height:240px"><table class="data-table">
+      <tr><th>实体</th><th style="width:80px">运算符</th><th>期望值</th><th>实际值</th><th style="width:60px">结果</th></tr>`;
+    conds.forEach(c => {
+      html += `<tr>
+        <td>${escHtml(c.entity_id || '')}</td>
+        <td>${escHtml(c.operator || '')}</td>
+        <td>${escHtml(c.value !== undefined ? String(c.value) : '')}</td>
+        <td>${escHtml(c.actual !== undefined ? String(c.actual) : '')}</td>
+        <td style="color:${c.matched ? 'var(--green)' : '#f85149'}">${c.matched ? '✓' : '✗'}</td>
+      </tr>`;
+    });
+    html += `</table></div>`;
+  }
+  html += `<div class="sep-title">动作结果（${acts.length}）</div>`;
+  if (!acts.length) html += `<div style="color:var(--text2);font-size:13px">条件未满足，未执行动作</div>`;
+  acts.forEach(a => {
+    html += `<div style="font-size:13px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="color:${a.ok ? 'var(--green)' : '#f85149'};margin-right:8px">${a.ok ? '✓' : '✗'}</span>
+      <b>${escHtml(a.service || '')}</b>
+      <span style="color:var(--text2);margin-left:8px">${escHtml(a.entity_id || '')}</span>
+      ${a.error ? `<span style="color:#f85149;margin-left:8px">${escHtml(a.error)}</span>` : ''}
+    </div>`;
+  });
+  document.getElementById('autoLogDetailBody').innerHTML = html;
+  document.getElementById('autoLogDetailOverlay').style.display = 'block';
+}
+
+function closeAutoLogDetail() { document.getElementById('autoLogDetailOverlay').style.display = 'none'; }
+
+async function clearAutomationLogs() {
+  const days = prompt('清理 N 天前的执行记录（输入天数，≥1）：', '30');
+  if (days === null) return;
+  const n = parseInt(days);
+  if (!n || n < 1) { showToast('天数无效', false); return; }
+  if (!confirm(`确定清理 ${n} 天前的全部执行记录？`)) return;
+  try {
+    const r = await fetch(`/api/ha_data_store/automation_logs?days=${n}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (!d.success) { showToast(d.error || '清理失败', false); return; }
+    showToast(`已清理 ${d.deleted} 条`, true);
+    loadAutomationLogs(1);
+  } catch (e) { showToast('请求失败', false); }
+}
+
+// ==============================
 //  初始化
 // ==============================
+const origSwitchTabAuto = switchTab;
+switchTab = function(name) {
+  origSwitchTabAuto(name);
+  if (name === 'automation' && !autoTabVisited) {
+    autoTabVisited = true;
+    loadAutomations(1);
+  }
+};
+
 initDbViewer();
 loadMonitor();
 </script>
