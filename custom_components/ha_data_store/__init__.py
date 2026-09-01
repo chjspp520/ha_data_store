@@ -3228,10 +3228,27 @@ async def _async_file_source_poll(hass: HomeAssistant, db_path: str) -> None:
 
             await hass.async_add_executor_job(_save_device_id)
         else:
-            device_registry.async_get_or_create(
+            device = device_registry.async_get_or_create(
                 config_entry_id=entry_id,
                 identifiers={ident},
             )
+            if device.id != device_id:
+                # 数据库中持久化的 device_id 已失效（设备被删除/重建，registry 重新分配了 id）
+                # → 用新 id 回写数据库，避免后续 _set_bridge_entity_sync 引用不存在的设备
+                device_id = device.id
+
+                def _save_device_id():
+                    conn = sqlite3.connect(db_path)
+                    try:
+                        conn.execute(
+                            f"UPDATE {TABLE_FILE_SOURCE_CONFIGS} SET device_id = ? WHERE id = ?",
+                            (device_id, cfg_id),
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+
+                await hass.async_add_executor_job(_save_device_id)
 
         file_name = os.path.splitext(os.path.basename(file_path))[0]
         safe_name = file_name.replace(".", "_").replace(" ", "_")
@@ -3415,10 +3432,26 @@ async def _async_api_source_poll(hass: HomeAssistant, db_path: str) -> None:
 
             await hass.async_add_executor_job(_save_api_device_id)
         else:
-            device_registry.async_get_or_create(
+            device = device_registry.async_get_or_create(
                 config_entry_id=entry_id,
                 identifiers={ident},
             )
+            if device.id != device_id:
+                # 数据库中持久化的 device_id 已失效（设备被删除/重建）→ 回写新 id
+                device_id = device.id
+
+                def _save_api_device_id():
+                    conn = sqlite3.connect(db_path)
+                    try:
+                        conn.execute(
+                            f"UPDATE {TABLE_API_SOURCE_CONFIGS} SET device_id = ? WHERE id = ?",
+                            (device_id, cfg_id),
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+
+                await hass.async_add_executor_job(_save_api_device_id)
 
         # 创建实体
         if isinstance(data, list):
@@ -3525,7 +3558,11 @@ async def _async_state_changed(hass: HomeAssistant, db_path: str, event: Event) 
     power_rating = info.get("power_rating", 0)
     room = info.get("room", "")
     tz = _get_timezone(hass)
-    now_str = _get_local_now_str(tz)
+    # ★ 时间权威源统一为实体 last_changed（与前端 user_actions.ts 同源）：
+    #   避免事件处理延迟（_get_entity_info executor 查询等）导致 on/off 时间比
+    #   真实状态变化晚 1-2 秒，从而与 user_actions.ts_text 秒级精确匹配失败。
+    _lc = getattr(new_state, "last_changed", None)
+    now_str = _utc_to_local_str(_lc, tz) if _lc else _get_local_now_str(tz)
     new_state_val = new_state.state
 
     local_logger = get_logger()
@@ -4040,6 +4077,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         AutomationRunView,
         AutomationLogsView,
         AutomationLookupView,
+        AutomationStatsView,
     )
     hass.http.register_view(EntityConfigView(db_path))
     hass.http.register_view(EntityConfigListView(db_path))
@@ -4096,6 +4134,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(AutomationRunView(db_path))
     hass.http.register_view(AutomationLogsView(db_path))
     hass.http.register_view(AutomationLookupView(db_path))
+    hass.http.register_view(AutomationStatsView(db_path))
 
     # 小爱对话 API（独立模块）
     from .xiaoai import register_api_views as _xiaoai_register_api_views

@@ -232,14 +232,14 @@ class _BaseDBView(HomeAssistantView):
         return await hass.async_add_executor_job(func, *args)
 
     def _check_api_enabled(self, request: web.Request) -> web.Response | None:
-        """检查 API 访问开关 + API Key。开关关闭或无有效 Key 返回 403。"""
+        """检查 API 访问开关 + API Key。开关关闭或无有效 Key 返回 403 JSON（带 body，前端可解析）。"""
         hass: HomeAssistant = request.app["hass"]
         if not hass.data.get(DOMAIN, {}).get("api_enabled", True):
-            return web.Response(status=403)
+            return web.json_response({"success": False, "error": "API 访问未启用"}, status=403)
         # 检查 API Key
         key = request.query.get("key", "") or request.headers.get("Authorization", "").replace("Bearer ", "")
         if not key:
-            return web.Response(status=403)
+            return web.json_response({"success": False, "error": "缺少 API Key 参数"}, status=403)
         def _verify():
             conn = sqlite3.connect(self._db_path)
             try:
@@ -267,28 +267,28 @@ class _BaseDBView(HomeAssistantView):
             finally:
                 conn.close()
         if not _verify():
-            return web.Response(status=403)
+            return web.json_response({"success": False, "error": "API Key 无效或已禁用"}, status=403)
         return None
 
     @staticmethod
     def _check_master_switch(hass: HomeAssistant) -> web.Response | None:
         """仅检查主开关（不含 Key），用于 db_viewer 等管理页面。"""
         if not hass.data.get(DOMAIN, {}).get("api_enabled", True):
-            return web.Response(status=403)
+            return web.json_response({"success": False, "error": "API 访问未启用"}, status=403)
         return None
 
     @staticmethod
     def _check_db_viewer_enabled(hass: HomeAssistant) -> web.Response | None:
-        """检查数据库浏览器访问开关，关闭时返回 403。"""
+        """检查数据库浏览器访问开关，关闭时返回 403 JSON。"""
         if not hass.data.get(DOMAIN, {}).get("db_viewer_enabled", True):
-            return web.Response(status=403)
+            return web.json_response({"success": False, "error": "数据库浏览器访问未启用"}, status=403)
         return None
 
     @staticmethod
     def _check_db_edit_enabled(hass: HomeAssistant) -> web.Response | None:
-        """检查数据库修改开关，关闭时返回 403。"""
+        """检查数据库修改开关，关闭时返回 403 JSON。"""
         if not hass.data.get(DOMAIN, {}).get("db_edit_enabled", True):
-            return web.Response(status=403)
+            return web.json_response({"success": False, "error": "数据库修改未启用"}, status=403)
         return None
 
 
@@ -4182,8 +4182,8 @@ class QueryView(_BaseDBView):
         """用户操作记录查询（user_actions 表）。
 
         子类型（type 参数）：
-        - user_actions_daily      : date=YYYY-MM-DD            → 指定日期所有操作
-        - user_actions_range      : start/end=YYYY-MM-DD       → 日期段操作
+        - user_actions_daily      : date=YYYY-MM-DD（entity_id 可选）→ 指定日期操作
+        - user_actions_range      : start/end=YYYY-MM-DD（entity_id 可选）→ 日期段操作
         - user_actions_month_dates: month=YYYY-MM              → 该月哪些日期有数据
         - user_actions_hour_dist  : entity_id(可选)            → 数据点按小时分布（00-23）
         - user_actions_entity_summary : (可选 limit)           → 各实体操作次数排行
@@ -4205,26 +4205,33 @@ class QueryView(_BaseDBView):
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         try:
-            # 1) 指定日期
+            # 1) 指定日期（entity_id 可选过滤）
             if query_type == "user_actions_daily":
                 if not date:
                     raise ValueError("user_actions_daily 需要 date 参数 (YYYY-MM-DD)")
+                conds, params = ["substr(ts_text,1,10) = ?"], [date]
+                if entity_id:
+                    conds.append("entity_id = ?")
+                    params.append(entity_id)
                 rows = [dict(r) for r in conn.execute(
                     f"SELECT * FROM {TABLE_USER_ACTIONS} "
-                    f"WHERE substr(ts_text,1,10) = ? ORDER BY ts ASC LIMIT ?",
-                    (date, limit),
+                    f"WHERE {' AND '.join(conds)} ORDER BY ts ASC LIMIT ?",
+                    (*params, limit),
                 ).fetchall()]
                 return {"date": date, "count": len(rows), "actions": rows}
 
-            # 2) 日期段
+            # 2) 日期段（entity_id 可选过滤）
             if query_type == "user_actions_range":
                 if not start or not end:
                     raise ValueError("user_actions_range 需要 start/end 参数 (YYYY-MM-DD)")
+                conds, params = ["substr(ts_text,1,10) >= ?", "substr(ts_text,1,10) <= ?"], [start, end]
+                if entity_id:
+                    conds.append("entity_id = ?")
+                    params.append(entity_id)
                 rows = [dict(r) for r in conn.execute(
                     f"SELECT * FROM {TABLE_USER_ACTIONS} "
-                    f"WHERE substr(ts_text,1,10) >= ? AND substr(ts_text,1,10) <= ? "
-                    f"ORDER BY ts ASC LIMIT ?",
-                    (start, end, limit),
+                    f"WHERE {' AND '.join(conds)} ORDER BY ts ASC LIMIT ?",
+                    (*params, limit),
                 ).fetchall()]
                 return {"start": start, "end": end, "count": len(rows), "actions": rows}
 
@@ -8753,12 +8760,28 @@ class ReportAutoEntitiesView(_BaseDBView):
 #        追加写入 user_actions 表（不去重，保留每次操作以便统计使用习惯）。         #
 #        写入成功后立即触发 user_actions_sensor 实时刷新（近30天聚合）。           #
 # =========================================================================== #
+_LINK_TOLERANCE_SECONDS = 2  # 关联容差（秒）：覆盖历史数据/旧版写入的 on/off 时间与 ts 之间的 1-2 秒偏差
+
+
+def _ts_diff_seconds(a: str, b: str) -> float:
+    """两个 'YYYY-MM-DD HH:MM:SS' 字符串的绝对差值（秒）；解析失败返回无穷。"""
+    try:
+        da = datetime.strptime(a, "%Y-%m-%d %H:%M:%S")
+        db = datetime.strptime(b, "%Y-%m-%d %H:%M:%S")
+        return abs((da - db).total_seconds())
+    except Exception:
+        return float("inf")
+
+
 def _link_device_history_to_actions(db_path: str, items: list) -> None:
     """把新写入 user_actions 的用户/快照关联回填到 device_history。
 
     关联规则：device_history.entity_id == user_actions.entity_id 且
       on_time  == ts_text → 该操作视为开启，回填 on_user / on_snapshot；
       off_time == ts_text → 该操作视为关闭，回填 off_user / off_snapshot。
+    时间权威源已统一为实体 last_changed（正常写入同秒精确匹配）；若精确匹配
+    未命中，再按 ±_LINK_TOLERANCE_SECONDS 秒容差窗口查找最接近的一条兜底
+    （覆盖历史数据/旧版写入的 1-2 秒偏差）。
 
     items: [{entity_id, ts_text, user_name, action_snapshot}]（本次新写入的操作）。
     同一条 device_history 记录的 on_time 与 off_time 可分别由不同操作匹配，
@@ -8775,12 +8798,48 @@ def _link_device_history_to_actions(db_path: str, items: list) -> None:
                 ts_text = it["ts_text"]
                 user = (it.get("user_name") or "").strip()
                 snap = it.get("action_snapshot") or ""
-                # 查该实体在 ts_text 时刻是否存在 on_time / off_time 命中的记录
+                # ① 精确匹配：on_time == ts_text / off_time == ts_text（权威时间源同秒必然命中）
                 rows = conn.execute(
                     f"SELECT id, on_time, off_time, on_user, off_user FROM {TABLE_DEVICE_HISTORY} "
                     f"WHERE entity_id = ? AND (on_time = ? OR off_time = ?)",
                     (eid, ts_text, ts_text),
                 ).fetchall()
+                if not rows:
+                    # ② 容差兜底：±2 秒窗口内选时间差最小的一条，回填最接近的 on/off 字段
+                    try:
+                        ts_dt = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S")
+                        lo = (ts_dt - timedelta(seconds=_LINK_TOLERANCE_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+                        hi = (ts_dt + timedelta(seconds=_LINK_TOLERANCE_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        lo = hi = None
+                    if lo:
+                        candidates = conn.execute(
+                            f"SELECT id, on_time, off_time, on_user, off_user FROM {TABLE_DEVICE_HISTORY} "
+                            f"WHERE entity_id = ? AND ((on_time BETWEEN ? AND ?) OR (off_time BETWEEN ? AND ?))",
+                            (eid, lo, hi, lo, hi),
+                        ).fetchall()
+                        best = None  # (diff, record_id, field)  field: 'on' | 'off'
+                        for row in candidates:
+                            for field, t in (("on", row[1]), ("off", row[2])):
+                                if not t:
+                                    continue
+                                diff = _ts_diff_seconds(t, ts_text)
+                                if diff <= _LINK_TOLERANCE_SECONDS and (best is None or diff < best[0]):
+                                    best = (diff, row[0], field)
+                        if best:
+                            col_user = "on_user" if best[2] == "on" else "off_user"
+                            col_snap = "on_snapshot" if best[2] == "on" else "off_snapshot"
+                            if user:
+                                conn.execute(
+                                    f"UPDATE {TABLE_DEVICE_HISTORY} SET {col_user} = ? WHERE id = ?",
+                                    (user, best[1]),
+                                )
+                            if snap:
+                                conn.execute(
+                                    f"UPDATE {TABLE_DEVICE_HISTORY} SET {col_snap} = ? WHERE id = ?",
+                                    (snap, best[1]),
+                                )
+                        continue
                 for row in rows:
                     record_id = row[0]
                     # 命中 on_time → 开启用户（用户/快照非空才覆盖）
@@ -9273,14 +9332,26 @@ class AutomationLogsView(_BaseDBView):
             return resp
         auto_id = (request.query.get("automation_id") or "").strip()
         status = (request.query.get("status") or "").strip()
+        keyword = (request.query.get("keyword") or "").strip()
+        date = (request.query.get("date") or "").strip()
         try:
             page = max(1, int(request.query.get("page", 1) or 1))
         except Exception:
             page = 1
         try:
-            size = max(1, min(200, int(request.query.get("size", 20) or 20)))
+            size = max(1, min(200, int(request.query.get("limit", 0) or 0)))
         except Exception:
-            size = 20
+            size = 0
+        if not size:
+            try:
+                size = max(1, min(200, int(request.query.get("size", 20) or 20)))
+            except Exception:
+                size = 20
+        try:
+            offset = max(0, int(request.query.get("offset", 0) or 0))
+        except Exception:
+            offset = 0
+        offset_val = offset if offset else (page - 1) * size
         db_path = self._db_path
 
         def _load() -> tuple[int, list[dict]]:
@@ -9291,29 +9362,57 @@ class AutomationLogsView(_BaseDBView):
                 if auto_id:
                     where.append("automation_id = ?")
                     params.append(auto_id)
+                if keyword:
+                    where.append("automation_name LIKE ?")
+                    params.append(f"%{keyword}%")
                 if status:
                     where.append("status = ?")
                     params.append(status)
+                if date:
+                    where.append("substr(trigger_time,1,10) = ?")
+                    params.append(date)
                 where_sql = ("WHERE " + " AND ".join(where)) if where else ""
                 total = conn.execute(
                     f"SELECT COUNT(*) AS c FROM {TABLE_AUTOMATION_LOGS} {where_sql}", params
                 ).fetchone()["c"]
+                stats_row = conn.execute(
+                    f"SELECT COUNT(*) AS run_count, "
+                    f"SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count, "
+                    f"SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count, "
+                    f"SUM(CASE WHEN status = 'partial_failed' THEN 1 ELSE 0 END) AS partial_failed_count, "
+                    f"SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count, "
+                    f"AVG(duration_ms) AS avg_duration_ms, "
+                    f"MIN(duration_ms) AS min_duration_ms, "
+                    f"MAX(duration_ms) AS max_duration_ms, "
+                    f"MAX(trigger_time) AS last_run, "
+                    f"MIN(trigger_time) AS first_run "
+                    f"FROM {TABLE_AUTOMATION_LOGS} {where_sql}",
+                    params,
+                ).fetchone()
+                stats = {k: (v or 0) for k, v in dict(stats_row).items()}
+                stats["avg_duration_ms"] = round(stats["avg_duration_ms"], 1) if stats["avg_duration_ms"] else 0
+                stats["min_duration_ms"] = stats["min_duration_ms"] or 0
+                stats["max_duration_ms"] = stats["max_duration_ms"] or 0
+                stats["success_rate"] = round(stats["success_count"] / stats["run_count"] * 100, 1) if stats["run_count"] else 0.0
                 rows = [dict(r) for r in conn.execute(
                     f"SELECT * FROM {TABLE_AUTOMATION_LOGS} {where_sql} "
                     f"ORDER BY id DESC LIMIT ? OFFSET ?",
-                    params + [size, (page - 1) * size],
+                    params + [size, offset_val],
                 ).fetchall()]
-                return total, rows
+                return total, stats, rows
             finally:
                 conn.close()
 
         try:
-            total, rows = await self._exec_in_executor(hass, _load)
+            total, stats, rows = await self._exec_in_executor(hass, _load)
             for row in rows:
                 row["conditions_checked"] = _json_field(row.get("conditions_checked"), [])
                 row["actions_result"] = _json_field(row.get("actions_result"), [])
             return self.json({
-                "success": True, "total": total, "page": page, "size": size, "items": rows,
+                "success": True, "total": total, "page": page, "size": size,
+                "run_count": stats.get("run_count", 0),
+                "success_count": stats.get("success_count", 0),
+                "stats": stats, "items": rows,
             })
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -9368,12 +9467,14 @@ class AutomationLogsView(_BaseDBView):
 class AutomationLookupView(_BaseDBView):
     """按名称查询指定自动化的详细信息（完整配置 + 执行统计 + 最近执行记录）。
 
-    GET /api/ha_data_store/automation_lookup?name=自动化名称[&fuzzy=1]
+    GET /api/ha_data_store/automation_lookup?name=自动化名称[&fuzzy=1][&date=YYYY-MM-DD][&limit=5]
     - 默认精确匹配（name = ?）；传 fuzzy=1 时改为 LIKE 模糊匹配
+    - date 可选：recent_logs 仅返回指定日期的执行记录（按 trigger_time 日期过滤）
+    - limit 可选：recent_logs 条数限制（默认 5，上限 50）
     - 返回 items 数组（按 id 倒序，同名/模糊匹配的全部返回），每项含：
         trigger_config / conditions / actions（JSON 已解析）
         run_count / success_count / failed_count / skipped_count 统计
-        recent_logs：最近 5 条执行记录（含 conditions_checked / actions_result 已解析）
+        recent_logs：最近执行记录（含 conditions_checked / actions_result 已解析）
     """
 
     url = "/api/ha_data_store/automation_lookup"
@@ -9387,6 +9488,11 @@ class AutomationLookupView(_BaseDBView):
         if not name:
             return self.json({"success": False, "error": "name 不能为空"}, status_code=400)
         fuzzy = (request.query.get("fuzzy") or "").strip() in ("1", "true", "True", "yes", "on")
+        date = (request.query.get("date") or "").strip()
+        try:
+            log_limit = max(1, min(50, int(request.query.get("limit", 5) or 5)))
+        except Exception:
+            log_limit = 5
         db_path = self._db_path
 
         def _load() -> list[dict]:
@@ -9417,8 +9523,13 @@ class AutomationLookupView(_BaseDBView):
                     item.update({k: (v or 0) for k, v in dict(stats).items()})
                     logs = conn.execute(
                         f"SELECT * FROM {TABLE_AUTOMATION_LOGS} WHERE automation_id = ? "
-                        f"ORDER BY id DESC LIMIT 5",
-                        (item["id"],),
+                        f"AND substr(trigger_time,1,10) = ? "
+                        f"ORDER BY id DESC LIMIT ?",
+                        (item["id"], date, log_limit),
+                    ).fetchall() if date else conn.execute(
+                        f"SELECT * FROM {TABLE_AUTOMATION_LOGS} WHERE automation_id = ? "
+                        f"ORDER BY id DESC LIMIT ?",
+                        (item["id"], log_limit),
                     ).fetchall()
                     item["recent_logs"] = [dict(l) for l in logs]
                     items.append(item)
@@ -9440,5 +9551,85 @@ class AutomationLookupView(_BaseDBView):
                     log["conditions_checked"] = _json_field(log.get("conditions_checked"), [])
                     log["actions_result"] = _json_field(log.get("actions_result"), [])
             return self.json({"success": True, "total": len(items), "items": items})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class AutomationStatsView(_BaseDBView):
+    """自动化运行统计汇总（日常使用）。
+
+    GET /api/ha_data_store/automation_stats?[date=YYYY-MM-DD][&limit=20]
+    - date 可选：指定"今日统计"的日期（默认系统当前日期，东八区）
+    - limit 可选：排行条数（默认 20，上限 50）
+    - 返回三部分：
+        today    : 指定日期执行统计（run_count/success/failed/skipped + date）
+        total    : 全部累计统计（同上 + automation_count 自动化总数）
+        ranking  : 各自动化执行排行（run_count DESC，含 success_rate 成功率）
+    """
+
+    url = "/api/ha_data_store/automation_stats"
+    name = "api:ha_data_store:automation_stats"
+
+    async def get(self, request):
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        date = (request.query.get("date") or "").strip()
+        try:
+            limit = max(1, min(50, int(request.query.get("limit", 20) or 20)))
+        except Exception:
+            limit = 20
+        db_path = self._db_path
+
+        def _load() -> dict:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                if not date:
+                    date = (datetime.utcnow() + timedelta(hours=DEFAULT_TIMEZONE)).strftime("%Y-%m-%d")
+
+                def _stat(where_sql: str = "", params: tuple = ()) -> dict:
+                    row = conn.execute(
+                        f"SELECT COUNT(*) AS run_count, "
+                        f"SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count, "
+                        f"SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count, "
+                        f"SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count "
+                        f"FROM {TABLE_AUTOMATION_LOGS} {where_sql}",
+                        params,
+                    ).fetchone()
+                    return {k: (v or 0) for k, v in dict(row).items()}
+
+                today = _stat("WHERE substr(trigger_time,1,10) = ?", (date,))
+                today["date"] = date
+                total = _stat()
+                total["automation_count"] = conn.execute(
+                    f"SELECT COUNT(*) AS c FROM {TABLE_AUTOMATIONS}"
+                ).fetchone()["c"]
+                ranking = [dict(r) for r in conn.execute(
+                    f"SELECT automation_id, automation_name, "
+                    f"COUNT(*) AS run_count, "
+                    f"SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count, "
+                    f"SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count, "
+                    f"SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count, "
+                    f"MAX(trigger_time) AS last_run "
+                    f"FROM {TABLE_AUTOMATION_LOGS} "
+                    f"GROUP BY automation_id, automation_name "
+                    f"ORDER BY run_count DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()]
+                for r in ranking:
+                    r["run_count"] = r.get("run_count") or 0
+                    r["success_count"] = r.get("success_count") or 0
+                    r["failed_count"] = r.get("failed_count") or 0
+                    r["skipped_count"] = r.get("skipped_count") or 0
+                    rate = (r["success_count"] / r["run_count"] * 100) if r["run_count"] else 0.0
+                    r["success_rate"] = round(rate, 1)
+                return {"today": today, "total": total, "ranking": ranking}
+            finally:
+                conn.close()
+
+        try:
+            result = await self._exec_in_executor(hass, _load)
+            return self.json({"success": True, **result})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)

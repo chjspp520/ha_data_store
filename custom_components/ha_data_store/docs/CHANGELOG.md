@@ -1,5 +1,52 @@
 # 更新日志
 
+## 2026-09-01 — v3.0.1 操作记录头像统一接口 + 自动化 API 增强 + 自动化状态传感器实时刷新 + 数据库浏览器地址传感器
+
+### 👤 操作记录用户头像统一 API（配合前端）
+- **前端**（`history-bubble.js`）：用户头像获取从两条路径（`device_history` 自带用户 / `device_user_by_date` 补充）收敛为**单一 `user_actions_daily` 接口**，用 `ts_text` 与实体状态时间对比匹配用户（±2 秒容差，可扩展）。
+- **前端**（`data-fetch.js`）：`fetchApiUserActionsDaily` 新增第 4 参 `entityId`（URL 附加 `&entity_id=` 过滤）；新增 `buildUserMapFromActions`（ts 毫秒键 + `ts_text` 解析兜底）；删除废弃的 `fetchApiDeviceUserData` / `buildUserMapFromRecords`。
+
+### 🐛 修复 user_actions_daily 的 entity_id 参数无效
+- `_query_user_actions`：`user_actions_daily` 与 `user_actions_range` 分支改为**动态 WHERE 条件 + 可选 `entity_id = ?`**（此前参数已解析但未拼入 SQL，返回全部记录）。
+
+### 🐛 修复 db_viewer 实体下拉框加载失败
+- **后端**：`_check_api_enabled` / `_check_master_switch` / `_check_db_viewer_enabled` / `_check_db_edit_enabled` 鉴权失败由**空 body 403** 改为 `web.json_response({"success": False, "error": "..."}, status=403)`，前端 `resp.json()` 不再抛 "Unexpected end of JSON input"。
+- **前端**（`db_viewer.html`）：无选中 API Key 时提前拦截提示；增加 `resp.ok` / `json.success` 检查并显示具体错误信息。
+
+### 🤖 自动化 API 增强（执行结果查询丰富统计）
+- **按名称查询（auto_lookup）**：新增 `date=YYYY-MM-DD`（按 `trigger_time` 日期过滤 recent_logs）、`limit=N`（输出条数限制，默认 5 上限 50）。
+- **执行结果查询（auto_logs）**：
+  - 新增 `keyword`（按 `automation_name LIKE` 模糊筛选）、`date`（按触发日期过滤）。
+  - 分页参数**优先 `limit/offset`**，兼容原有 `size/page`（修复前端发 `limit/offset` 时后端只读 `size/page` 导致的分页失效）。
+  - 响应顶层新增 **`run_count` / `success_count`** 与 **`stats` 聚合对象**：`run_count` / `success_count` / `failed_count` / `partial_failed_count` / `skipped_count` / `success_rate` / `avg|min|max_duration_ms` / `last_run` / `first_run`。
+- **新增 `automation_stats` 汇总接口**（`GET /api/ha_data_store/automation_stats?date=&limit=`）：返回 `today`（当日统计）/ `total`（累计统计）/ `ranking`（执行排行，含 automation_id/name/run_count/success_rate/last_run）。
+- **前端**（`db_viewer.html`）：`auto_stats` 下拉选项；auto_lookup 显示条数参数、auto_logs 显示名称/日期/条数参数；`generateApiUrl` 同步生成对应参数。
+
+### ⚡ 自动化状态传感器更新规则改造（`sensor.ha_data_store_automation`）
+- **automation_logs 有新数据 → 自动更新**：自动化引擎每次执行记录落库后经 `_notify_status_sensor()` 回调传感器**即时刷新**（不等 30 秒轮询）；另加轮询 `MAX(id)` 增量检测兜底（覆盖外部直写数据库场景）。
+- **ha_automation 节点（`automation.*` 实体）状态变化 → 自动更新**：注册 `state_changed` 事件监听，实体 ID 以 `automation.` 开头即触发刷新，内置 **2 秒防抖**合并高频变化。
+- **新增 `async_trigger_refresh` 防重入入口**：定时器、日志回调、实体变化、手动按钮统一走此入口。
+- **新增手动刷新按钮** `button.ha_data_store_automation_status_refresh`（"刷新自动化状态" / "Refresh Automation Status"，图标 `mdi:refresh`）。
+
+### 🔗 新增数据库浏览器地址传感器（`sensor.ha_data_store_db_viewer_url`）
+- **state** = db_viewer 完整可访问地址，如 `http://IP:端口/api/ha_data_store/db_viewer`；**attributes**：`path` / `base_url` / `updated_at`（取地址失败记录 `error`）。
+- 地址经 `hass_network.get_url` 获取（自动优先 `external_url` 其次 `internal_url`，适配 HA 实际监听地址）；**启动时立即获取** + **每 10 分钟低频刷新**（外部/内部地址变更时自动更新）。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `http_api.py` | 修复 `user_actions_daily/range` entity_id 过滤；4 个鉴权检查 403 返回 JSON body；auto_lookup 增 `date/limit`；auto_logs 增 `keyword/date`、`limit/offset` 优先分页、顶层 `run_count/success_count` + `stats`；新增 `AutomationStatsView`（automation_stats） |
+| `automations.py` | 新增 `_notify_status_sensor`：automation_logs 写日志后回调刷新自动化状态传感器 |
+| `sensor.py` | 自动化状态传感器：`async_trigger_refresh` 防重入入口 + automation_logs `MAX(id)` 增量检测 + `automation.*` 状态变化监听（2 秒防抖）；新增 `DbViewerUrlSensor`（启动即取 + 10 分钟刷新） |
+| `button.py` | 新增 `AutomationStatusButton` 手动刷新按钮 |
+| `const.py` | VERSION → 3.0.1 |
+| `manifest.json` | 版本 3.0.1 |
+| `translations/zh-Hans.json` | 新增 `automation_status_refresh` / `db_viewer_url` 名称 |
+| `translations/en.json` | 新增 `automation_status_refresh` / `db_viewer_url` 名称 |
+| `db_viewer.html` | 鉴权错误提示优化；新增 auto_stats 选项；auto_lookup/logs 日期/条数/keyword 参数 UI |
+| `C:\HA\src\modules\utils\data-fetch.js` | 前端：`fetchApiUserActionsDaily` 增 entityId 参数、新增 `buildUserMapFromActions`、删除废弃接口 |
+| `C:\HA\src\modules\cards\history-bubble.js` | 前端：头像获取统一 `user_actions_daily` 单接口，±2 秒容差匹配 |
+
 ## 2026-08-31 — v3.0.0 操作记录时间权威对齐 + 简单自动化引擎与自动化管理卡片
 
 ### ⏱️ 操作记录时间与实体状态时间严格对齐（差一秒修复）

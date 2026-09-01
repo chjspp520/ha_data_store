@@ -8,8 +8,8 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.core import EVENT_STATE_CHANGED, HomeAssistant
+from homeassistant.helpers import entity_registry as er, network as hass_network
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval, async_track_utc_time_change
@@ -421,6 +421,9 @@ class AutomationStatusSensor(SensorEntity):
         self._attr_device_info = device_info
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
+        self._last_log_max_id: int | None = None  # automation_logs 最大 id（检测新数据）
+        self._state_debounce_until = 0.0          # automation.* 实体变化防抖截止时间（monotonic）
+        self._refreshing = False                  # 防重入标志
 
     @staticmethod
     def _parse_json(raw, default):
@@ -477,6 +480,11 @@ class AutomationStatusSensor(SensorEntity):
                     f"SELECT automation_id, duration_ms FROM {TABLE_AUTOMATION_LOGS} "
                     f"WHERE id IN (SELECT MAX(id) FROM {TABLE_AUTOMATION_LOGS} GROUP BY automation_id)"
                 ).fetchall()]
+                # 当前 automation_logs 最大 id（用于检测新数据触发自动刷新）
+                max_log_row = conn.execute(
+                    f"SELECT COALESCE(MAX(id), 0) FROM {TABLE_AUTOMATION_LOGS}"
+                ).fetchone()
+                max_log_id = int(max_log_row[0] if max_log_row else 0)
                 # 上报实体中的自动化实体（前端实体健康上报的 automation.* 实体）
                 report_rows = [dict(r) for r in conn.execute(
                     f"SELECT entity_id, name, icon, room_name, source, rooms, last_report_time "
@@ -549,10 +557,34 @@ class AutomationStatusSensor(SensorEntity):
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "automations": automations,
             "ha_automation": report_rows,
+            "log_max_id": max_log_id,
         }
+
+    async def async_trigger_refresh(self, now=None):
+        """手动/事件/写日志回调触发的按需刷新（防重入）。
+
+        定时器、automation_logs 新数据回调、automation.* 实体状态变化、
+        按钮手动触发均走此入口；若上一轮刷新尚未结束则跳过本次。
+        """
+        if self._refreshing:
+            return
+        self._refreshing = True
+        try:
+            await self._async_refresh(now)
+        finally:
+            self._refreshing = False
 
     async def _async_refresh(self, now=None):
         data = await self._hass.async_add_executor_job(self._load_data)
+        # 检测 automation_logs 是否有新数据（写日志回调之外的兜底，如外部直写数据库）
+        log_max_id = int(data.get("log_max_id") or 0)
+        if self._last_log_max_id is not None and log_max_id > self._last_log_max_id:
+            _LOGGER.info(
+                "[HDS] 检测到 automation_logs 新数据（id %d→%d），已自动刷新自动化状态",
+                self._last_log_max_id, log_max_id,
+            )
+        self._last_log_max_id = log_max_id
+        data.pop("log_max_id", None)
         # 合并 ha_automation（上报的 HA 原生自动化实体）状态统计：
         #   - on/off 由实体实时状态判定（无法检测/不可用/unknown 均视为停用）
         #   - last_triggered 非空视为"执行过"（计入 success 与 total_runs 各 1 次近似）
@@ -577,6 +609,110 @@ class AutomationStatusSensor(SensorEntity):
         self._attr_extra_state_attributes = data
         self.async_write_ha_state()
 
+    async def _async_on_automation_state_changed(self, event):
+        """ha_automation 节点（automation.* 实体）状态变化 → 自动刷新。
+
+        每次变化都刷新会导致高频执行（HA 原生自动化运行即产生 on/off 变化），
+        故做 2 秒防抖合并；30 秒定时轮询仍作为最终兜底。
+        """
+        entity_id = (event.data or {}).get("entity_id", "") or ""
+        if not entity_id.startswith("automation."):
+            return
+        now = time.monotonic()
+        if now < self._state_debounce_until:
+            return
+        self._state_debounce_until = now + 2.0
+        try:
+            await self.async_trigger_refresh()
+            _LOGGER.debug("[HDS] %s 状态变化，已自动刷新自动化状态", entity_id)
+        except Exception as e:
+            _LOGGER.error("[HDS] 响应 automation 实体变化刷新失败: %s", e)
+
+
+class DbViewerUrlSensor(SensorEntity):
+    """数据库浏览器访问地址传感器。
+
+    state  = 完整可访问地址（http://IP:端口/api/ha_data_store/db_viewer）
+    attributes: path / base_url / updated_at
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "db_viewer_url"
+    _attr_icon = "mdi:database-search-outline"
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_db_viewer_url"
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+
+    def _load_db_info(self):
+        """读取数据库存储位置、文件大小与各表记录数（同步，供 executor 调用）。
+
+        返回 (db_path, size_bytes, total_records, records_by_table)；异常时返回 None 项。
+        """
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        if not db_path:
+            return None, None, None, None
+        size_bytes = None
+        total_records = 0
+        records_by_table = {}
+        try:
+            size_bytes = os.path.getsize(db_path)
+        except Exception as e:
+            _LOGGER.warning("[HDS] 读取数据库文件大小失败: %s", e)
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                tables = [r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()]
+                for t in tables:
+                    try:
+                        cnt = conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                    except Exception:
+                        continue
+                    records_by_table[t] = cnt
+                    total_records += cnt
+            finally:
+                conn.close()
+        except Exception as e:
+            _LOGGER.warning("[HDS] 读取数据库记录数失败: %s", e)
+        return db_path, size_bytes, total_records, records_by_table
+
+    async def _fetch_url(self):
+        """计算 db_viewer 访问地址与数据库信息（不写 state），返回 (url, attributes)。"""
+        try:
+            # get_url 是同步函数（返回 str），非协程
+            base = hass_network.get_url(self._hass).rstrip("/")
+            path = "/api/ha_data_store/db_viewer"
+            attrs = {
+                "path": path,
+                "base_url": base,
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            # 数据库存储位置 / 大小 / 记录总条数（executor 避免阻塞事件循环）
+            db_path, size_bytes, total_records, records_by_table = \
+                await self._hass.async_add_executor_job(self._load_db_info)
+            if db_path:
+                attrs["db_path"] = db_path
+                attrs["db_size_bytes"] = size_bytes
+                attrs["db_size_mb"] = round(size_bytes / 1048576, 2) if size_bytes else 0
+                attrs["total_records"] = total_records
+                attrs["records_by_table"] = records_by_table
+            return f"{base}{path}", attrs
+        except Exception as e:
+            _LOGGER.error("[HDS] 获取 db_viewer 访问地址失败: %s", e)
+            return None, {"error": str(e)}
+
+    async def async_trigger_refresh(self, now=None):
+        """重新获取 db_viewer 访问地址并刷新传感器。"""
+        url, attrs = await self._fetch_url()
+        self._attr_native_value = url
+        self._attr_extra_state_attributes = attrs
+        self.async_write_ha_state()
+
 
 async def async_setup_entry(hass, entry, async_add_entities):
     # 存储回调
@@ -589,11 +725,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
     summary_sensor = TodayFamilyStatusSensor(hass, device_info)
     user_actions_sensor = UserActionsSensor(hass, device_info)
     automation_status_sensor = AutomationStatusSensor(hass, device_info)
+    db_viewer_url_sensor = DbViewerUrlSensor(hass, device_info)
     # 存引用，供按钮/服务触发按需刷新
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
     hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
     hass.data.setdefault(DOMAIN, {})["automation_status_sensor"] = automation_status_sensor
-    entities = [sensor, report_sensor, summary_sensor, user_actions_sensor, automation_status_sensor]
+    entities = [sensor, report_sensor, summary_sensor, user_actions_sensor,
+                automation_status_sensor, db_viewer_url_sensor]
+    # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
+    url, attrs = await db_viewer_url_sensor._fetch_url()
+    db_viewer_url_sensor._attr_native_value = url
+    db_viewer_url_sensor._attr_extra_state_attributes = attrs
 
     # 自动化状态传感器：固定实体 ID 为 sensor.ha_data_store_automation
     # （HA 实体 ID 只允许小写字母/数字/下划线，配置里的点号写法会自动归一为下划线）
@@ -611,6 +753,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
                                 suggested_object_id="ha_data_store_automation")
     except Exception as e:
         _LOGGER.warning("[HDS] 自动化状态传感器实体ID设置失败: %s", e)
+
+    # 数据库浏览器地址传感器：强制固定实体 ID 为 sensor.ha_data_store_db_viewer_url
+    try:
+        reg = er.async_get(hass)
+        new_eid = "sensor.ha_data_store_db_viewer_url"
+        old_eid = reg.async_get_entity_id("sensor", DOMAIN, db_viewer_url_sensor.unique_id)
+        if old_eid and old_eid != new_eid:
+            try:
+                reg.async_update_entity(old_eid, new_entity_id=new_eid)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 数据库浏览器地址传感器实体重命名失败（%s → %s）: %s", old_eid, new_eid, e)
+        reg.async_get_or_create(domain="sensor", platform=DOMAIN,
+                                unique_id=db_viewer_url_sensor.unique_id,
+                                suggested_object_id="ha_data_store_db_viewer_url")
+    except Exception as e:
+        _LOGGER.warning("[HDS] 数据库浏览器地址传感器实体ID设置失败: %s", e)
 
     bdi = get_bridge_device_info(entry.entry_id)
     try:
@@ -631,7 +789,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, report_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
-    async_track_time_interval(hass, automation_status_sensor._async_refresh, timedelta(seconds=30))
+    # 自动化状态传感器：定时轮询作为兜底；automation_logs 新数据由写日志回调触发；
+    # automation.* 实体（ha_automation 节点）状态变化实时监听触发（2 秒防抖）
+    async_track_time_interval(hass, automation_status_sensor.async_trigger_refresh, timedelta(seconds=30))
+    hass.bus.async_listen(
+        EVENT_STATE_CHANGED, automation_status_sensor._async_on_automation_state_changed
+    )
+    # db_viewer 访问地址：每 10 分钟低频刷新（HA 外部/内部地址变化时更新）
+    async_track_time_interval(hass, db_viewer_url_sensor.async_trigger_refresh, timedelta(minutes=10))
 
     # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 分钟（整 30 分钟）更新 ──
     async def _delayed_first_refresh():

@@ -214,7 +214,7 @@
   <button class="tab-btn" onclick="switchTab('db')">数据库浏览</button>
   <button class="tab-btn" onclick="switchTab('log')">日志查看</button>
   <button class="tab-btn" onclick="switchTab('user')">用户管理</button>
-  <button class="tab-btn" onclick="switchTab('automation')">🤖 自动化</button>
+  <button class="tab-btn" onclick="switchTab('automation')">自动化</button>
 </div>
 </div>
 
@@ -1104,8 +1104,9 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </optgroup>
         <optgroup label="🤖 自动化">
           <option value="auto_list">自动化列表</option>
-          <option value="auto_lookup">🔍 按名称查详情</option>
-          <option value="auto_logs">执行记录列表</option>
+          <option value="auto_lookup">🔍 按名称查详情（日期/条数）</option>
+          <option value="auto_logs">执行结果查询（名称/日期/条数）</option>
+          <option value="auto_stats">📊 运行统计汇总（今日/全部/排行）</option>
           <option value="auto_run">手动运行（可跳过条件）</option>
           <option value="auto_create">新增自动化</option>
           <option value="auto_update">更新自动化</option>
@@ -5510,7 +5511,8 @@ function _showAutoApiRows(qt) {
     document.getElementById('apiAutoIdRow').style.display = '';
     document.getElementById('apiAutoStatusRow').style.display = (qt === 'auto_logs') ? '' : 'none';
   }
-  if (qt === 'auto_list' || qt === 'auto_lookup') document.getElementById('apiAutoKeywordRow').style.display = '';
+  // 名称关键词：auto_list/auto_lookup 按自动化名称，auto_logs 按执行记录中的自动化名称
+  if (['auto_list','auto_lookup','auto_logs'].indexOf(qt) !== -1) document.getElementById('apiAutoKeywordRow').style.display = '';
   if (qt === 'auto_lookup') document.getElementById('apiAutoFuzzyRow').style.display = '';
   if (qt === 'auto_run') document.getElementById('apiAutoForceRow').style.display = '';
 }
@@ -5928,9 +5930,15 @@ function onApiTypeChange() {
     document.getElementById('apiTableRow').style.display = 'none';
     document.getElementById('apiOrderBy').parentNode.style.display = 'none';
     document.getElementById('apiFields').parentNode.style.display = 'none';
-    const isAutoList = (qt === 'auto_list' || qt === 'auto_logs');
+    // auto_list/auto_logs：limit/offset 分页；auto_lookup：limit 限制最近执行记录条数
+    const isAutoList = (qt === 'auto_list' || qt === 'auto_logs' || qt === 'auto_lookup');
     document.getElementById('apiLimit').parentNode.style.display = isAutoList ? '' : 'none';
-    document.getElementById('apiOffset').parentNode.style.display = isAutoList ? '' : 'none';
+    document.getElementById('apiOffset').parentNode.style.display = (qt === 'auto_list' || qt === 'auto_logs') ? '' : 'none';
+    // 日期：auto_lookup / auto_logs 支持指定日期（过滤执行记录）
+    const isAutoDate = (qt === 'auto_lookup' || qt === 'auto_logs');
+    document.getElementById('apiDateMode').parentNode.style.display = isAutoDate ? '' : 'none';
+    document.getElementById('apiDateMode').value = isAutoDate ? 'single' : 'none';
+    onDateModeChange();
     _showAutoApiRows(qt);
   } else if (isUserAction) {
     // 用户动作查询组：显示实体/日期/月份/limit，隐藏表格/offset/orderBy/fields
@@ -6134,15 +6142,31 @@ async function loadUserActionEntitiesForApi() {
   const sel = document.getElementById('apiEntityId');
   const prev = sel.value;
   sel.innerHTML = '<option value="">-- 全部 --</option>';
+  if (!selectedApiKey) {
+    // 无 Key 时后端必然返回 403，直接提示，避免 "Unexpected end of JSON input"
+    sel.innerHTML += '<option value="">（请先在"API 密钥"面板选择有效 Key）</option>';
+    console.warn('[hds] 未选择 API Key，跳过实体列表加载');
+    if (prev) sel.value = prev;
+    generateApiUrl();
+    return;
+  }
   try {
     const base = '/api/ha_data_store/query';
     const sep = base.includes('?') ? '&' : '?';
     const url = BASE_PATH + base + sep + 'type=user_actions_entity_summary' +
-      (selectedApiKey ? '&key=' + encodeURIComponent(selectedApiKey) : '') +
+      '&key=' + encodeURIComponent(selectedApiKey) +
       '&limit=500';
     const resp = await fetch(url);
     const json = await resp.json();
-    const devices = (json && json.data && json.data.devices) || [];
+    if (!resp.ok || !json || !json.success) {
+      const errMsg = (json && json.error) || ('HTTP ' + resp.status);
+      sel.innerHTML += '<option value="">（加载失败：' + escHtml(String(errMsg)) + '）</option>';
+      console.error('[hds] 加载用户动作实体失败：', json);
+      if (prev) sel.value = prev;
+      generateApiUrl();
+      return;
+    }
+    const devices = (json.data && json.data.devices) || [];
     if (!devices.length) {
       // 表为空：提示用户，避免误以为 bug
       sel.innerHTML += '<option value="">（无操作记录，请确认前端已上报）</option>';
@@ -6297,18 +6321,27 @@ function generateApiUrl() {
         const p = [];
         if (autoKeyword) p.push('name=' + encodeURIComponent(autoKeyword));
         if (document.getElementById('apiAutoFuzzy').checked) p.push('fuzzy=1');
+        const d = document.getElementById('apiDate').value;
+        if (d) p.push('date=' + encodeURIComponent(d));
+        if (limit) p.push('limit=' + encodeURIComponent(limit));
         autoUrl = autoJoin(p).replace('/automations', '/automation_lookup');
         break;
       }
       case 'auto_logs': {
         const p = [];
         if (autoId) p.push('automation_id=' + encodeURIComponent(autoId));
+        if (autoKeyword) p.push('keyword=' + encodeURIComponent(autoKeyword));
         if (autoStatus) p.push('status=' + encodeURIComponent(autoStatus));
+        const d = document.getElementById('apiDate').value;
+        if (d) p.push('date=' + encodeURIComponent(d));
         if (limit) p.push('limit=' + encodeURIComponent(limit));
         if (offset) p.push('offset=' + encodeURIComponent(offset));
         autoUrl = autoJoin(p).replace('/automations', '/automation_logs');
         break;
       }
+      case 'auto_stats':
+        autoUrl = autoJoin([]).replace('/automations', '/automation_stats');
+        break;
       case 'auto_create':
         autoUrl = autoJoin(['_method=POST']);
         break;

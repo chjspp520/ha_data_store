@@ -172,11 +172,17 @@
       },
       "automation_status": {
         "name": "自动化状态"
+      },
+      "db_viewer_url": {
+        "name": "数据库浏览器地址"
       }
     },
     "button": {
       "daily_summary_trigger": {
         "name": "生成今日家庭状态"
+      },
+      "automation_status_refresh": {
+        "name": "刷新自动化状态"
       }
     }
   }

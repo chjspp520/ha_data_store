@@ -27,6 +27,7 @@ from .const import (
     AUTOMATION_LOG_RETENTION_DAYS,
     AUTOMATION_TICK_SECONDS,
     DEFAULT_TIMEZONE,
+    DOMAIN,
     TABLE_AUTOMATION_LOGS,
     TABLE_AUTOMATIONS,
 )
@@ -219,6 +220,8 @@ class AutomationManager:
             await self.hass.async_add_executor_job(
                 self._update_after_run, aid, trigger_time, status, next_run,
             )
+            # 5. automation_logs 已写入新记录 → 通知自动化状态传感器立即刷新
+            self._notify_status_sensor()
             _LOGGER.info(
                 "[automation] %s 触发成功 trigger=%s status=%s 动作数=%d 耗时=%dms",
                 name, trigger, status, len(actions_result), duration_ms,
@@ -423,6 +426,15 @@ class AutomationManager:
             conn.commit()
         finally:
             conn.close()
+
+    def _notify_status_sensor(self) -> None:
+        """automation_logs 写入新记录后，通知自动化状态传感器立即刷新。"""
+        try:
+            sensor = self.hass.data.get(DOMAIN, {}).get("automation_status_sensor")
+            if sensor is not None:
+                self.hass.async_create_task(sensor.async_trigger_refresh())
+        except Exception as e:
+            _LOGGER.debug("[automation] 通知自动化状态传感器刷新失败: %s", e)
 
     def _cleanup_logs(self) -> int:
         """清理超过保留天数的执行记录，返回删除行数。"""
