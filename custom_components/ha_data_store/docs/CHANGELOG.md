@@ -1,5 +1,42 @@
 # 更新日志
 
+## 2026-09-01 — v3.0.2 上报实体来源/设备/区域字段 + 实体健康实体固定 ID + 数据库浏览器列宽拖拽
+
+### 🗄️ report_entities 表新增来源/设备/区域字段
+- **`__init__.py`**：`report_entities` 建表新增 `entity_type` / `entity_device` / `entity_area` 三列（`TEXT NOT NULL DEFAULT ''`）；并添加**迁移逻辑**（循环检测列，对已存在旧表 `ALTER TABLE ... ADD COLUMN` 补列，`CREATE TABLE IF NOT EXISTS` 不会改旧表）。
+- 字段含义：
+  - `entity_type`：实体类型（前端根据配置/域判断后提交）
+  - `entity_device`：实体所属**设备名称**（HA「设置→设备与服务」中实体的设备名，前端从 `hass.devices` 注册表映射）
+  - `entity_area`：设备所属**区域名称**（前端从 `hass.areas` 注册表映射）
+
+### 🔌 上报/查询接口同步新字段
+- **`http_api.py`**：
+  - `ReportEntitiesView` POST 写入：从前端提交的 item 提取 `entity_type`/`entity_device`/`entity_area` 并入库。
+  - `ReportEntitiesView` GET 查询：`SELECT` 带上三字段。
+  - `ReportAutoEntitiesView`：`SELECT` 带上三字段。
+- **`sensor.py`**：
+  - `AutomationStatusSensor` 的 `ha_automation[]` 查询：`SELECT` 带上三字段。
+  - `ReportedEntitiesHealthSensor`（前端卡片实体健康）查询与 `entities[]` 输出：带上 `entity_type`/`entity_device`/`entity_area`。
+
+### 🏷️ "前端卡片实体健康"实体固定 ID
+- **`sensor.py`**：`ReportedEntitiesHealthSensor` 在 `__init__` 显式设置 `self.entity_id = "sensor.ha_data_entities_health"`，实体 ID 不再随翻译名/unique_id 变化。
+
+### 🖱️ 数据库浏览器表格列宽拖拽
+- **`db_viewer.html`**：
+  - 新增列宽拖拽：数据表格表头 `th.resizable` 挂载 `resize-handle` 手柄，`mousedown` 拖拽实时调整 `th` 宽度并同步该列各行 `td`（`onResizeStart`/`onResizeMove`/`onResizeEnd`）。
+  - **修复**拖拽放手误触排序：拖拽手柄阻止 `click`/`dblclick` 冒泡 + `_resizing` 标志兜底（`sortTable` 开头判断），拖拽列宽不再触发该字段排序。
+  - 新增 CSS：`th.resizable` / `.resize-handle` / `body.col-resizing`。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `__init__.py` | `report_entities` 建表 + ALTER 迁移新增 `entity_type`/`entity_device`/`entity_area` |
+| `http_api.py` | 上报实体写入/查询、自动化上报实体查询带新字段 |
+| `sensor.py` | 自动化状态传感器 ha_automation 与实体健康传感器带新字段；实体健康实体固定 ID `sensor.ha_data_entities_health` |
+| `db_viewer.html` | 表格列宽拖拽 + 修复拖拽误触排序 |
+| `const.py` | VERSION → 3.0.2 |
+| `manifest.json` | 版本 3.0.2 |
+
 ## 2026-09-01 — v3.0.1 操作记录头像统一接口 + 自动化 API 增强 + 自动化状态传感器实时刷新 + 数据库浏览器地址传感器
 
 ### 👤 操作记录用户头像统一 API（配合前端）

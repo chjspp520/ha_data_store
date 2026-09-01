@@ -505,6 +505,9 @@ def _init_database(db_path: str) -> None:
                 room_name       TEXT NOT NULL DEFAULT '',
                 source          TEXT NOT NULL DEFAULT 'room_elves',
                 rooms           TEXT NOT NULL DEFAULT '',
+                entity_type     TEXT NOT NULL DEFAULT '',
+                entity_device   TEXT NOT NULL DEFAULT '',
+                entity_area     TEXT NOT NULL DEFAULT '',
                 last_report_time TEXT NOT NULL DEFAULT ''
             );
             """
@@ -517,6 +520,19 @@ def _init_database(db_path: str) -> None:
             conn.execute(
                 f"ALTER TABLE {TABLE_REPORT_ENTITIES} ADD COLUMN rooms TEXT NOT NULL DEFAULT ''"
             )
+        # 迁移：为已存在的旧表补充实体来源/设备/区域列（前端上报）
+        for _col, _col_default in (
+            ('entity_type', "''"),
+            ('entity_device', "''"),
+            ('entity_area', "''"),
+        ):
+            _has_col = conn.execute(
+                f"SELECT COUNT(*) FROM pragma_table_info('{TABLE_REPORT_ENTITIES}') WHERE name = '{_col}'"
+            ).fetchone()[0]
+            if _has_col == 0:
+                conn.execute(
+                    f"ALTER TABLE {TABLE_REPORT_ENTITIES} ADD COLUMN {_col} TEXT NOT NULL DEFAULT {_col_default}"
+                )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_report_entities_room ON {TABLE_REPORT_ENTITIES} (room_name);"
         )

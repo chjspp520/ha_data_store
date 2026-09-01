@@ -65,6 +65,12 @@
   th.sortable .sort-arrow { margin-left: 4px; font-size: 10px; opacity: 0.4; }
   th.sortable.sorted .sort-arrow { opacity: 1; color: var(--accent); }
   th.sortable.sorted-asc .sort-arrow { opacity: 1; color: var(--accent); }
+  /* 列宽拖拽 */
+  th.resizable { position: relative; }
+  th .resize-handle { position: absolute; top: 0; right: -4px; width: 8px; height: 100%;
+                      cursor: col-resize; z-index: 2; }
+  th .resize-handle:hover, th.resizing .resize-handle { background: rgba(52,152,219,.35); }
+  body.col-resizing { cursor: col-resize; user-select: none; }
   /* filter bar */
   .filter-bar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; padding: 10px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
   .filter-row { display: flex; gap: 6px; align-items: center; }
@@ -2333,7 +2339,7 @@ async function loadTable(page) {
     let html = '<div class="table-wrap"><table id="dataTable" onDblClick><thead><tr>';
     html += '<th class="cb-col"><input type="checkbox" id="selectAllCb" onchange="toggleSelectAllRows(this)" title="全选/取消全选"></th>';
     cols.forEach(c => {
-      let cls = 'sortable';
+      let cls = 'sortable resizable';
       let arrow = '';
       if (c === currentSortCol) {
         cls += currentSortDir === 'ASC' ? ' sorted-asc' : ' sorted';
@@ -2363,6 +2369,8 @@ async function loadTable(page) {
     showFilterBar();
     // 绑定双击编辑事件
     bindDblClickEdit(d.table);
+    // 绑定列宽拖拽
+    initColResize();
 
     document.getElementById('pagination').style.display = 'flex';
     document.getElementById('pageInfo').textContent =
@@ -2420,6 +2428,8 @@ async function deleteRow(ev) {
 //  列标题排序 (二态切换: DESC ↔ ASC)
 // ==============================
 function sortTable(th) {
+  // 刚拖拽过列宽则忽略本次 click，避免误触排序
+  if (_resizing) return;
   const col = th.getAttribute('data-col');
   if (!col) return;
   if (col === currentSortCol) {
@@ -2429,6 +2439,73 @@ function sortTable(th) {
     currentSortDir = 'DESC';
   }
   loadTable(1);
+}
+
+// ==============================
+//  列宽拖拽
+// ==============================
+let _resizeTh = null;
+let _resizeStartX = 0;
+let _resizeStartW = 0;
+let _resizing = false;
+
+// 为数据表格所有表头绑定列宽拖拽手柄
+function initColResize() {
+  document.querySelectorAll('#dataTable th.resizable').forEach(th => {
+    // 避免重复绑定
+    if (th.querySelector('.resize-handle')) return;
+    const handle = document.createElement('span');
+    handle.className = 'resize-handle';
+    handle.title = '拖动调整列宽';
+    handle.addEventListener('mousedown', onResizeStart);
+    // 阻止拖拽后的 click 冒泡到 th，避免触发表头排序
+    handle.addEventListener('click', e => e.stopPropagation());
+    handle.addEventListener('dblclick', e => e.stopPropagation());
+    th.appendChild(handle);
+  });
+}
+
+function onResizeStart(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const th = e.target.parentNode;
+  _resizeTh = th;
+  _resizing = true;
+  _resizeStartX = e.clientX;
+  _resizeStartW = th.getBoundingClientRect().width;
+  th.classList.add('resizing');
+  document.body.classList.add('col-resizing');
+  document.addEventListener('mousemove', onResizeMove);
+  document.addEventListener('mouseup', onResizeEnd);
+}
+
+function onResizeMove(e) {
+  if (!_resizeTh) return;
+  const delta = e.clientX - _resizeStartX;
+  const w = Math.max(40, _resizeStartW + delta);
+  _resizeTh.style.width = w + 'px';
+  // 同步该列表格首行 td 宽度（table-layout:fixed 下 th 宽度即可，这里保险同步）
+  const table = _resizeTh.closest('table');
+  if (table) {
+    const idx = Array.prototype.indexOf.call(_resizeTh.parentNode.children, _resizeTh);
+    const rows = table.querySelectorAll('tbody tr');
+    rows.forEach(r => {
+      const cell = r.children[idx];
+      if (cell) cell.style.width = w + 'px';
+    });
+  }
+}
+
+function onResizeEnd() {
+  if (!_resizeTh) return;
+  _resizeTh.classList.remove('resizing');
+  _resizeTh = null;
+  _resizing = false;
+  // 拖拽结束后延迟清除标志，避免本次 mouseup 触发的 click 被当成列点击
+  setTimeout(() => { _resizing = false; }, 0);
+  document.body.classList.remove('col-resizing');
+  document.removeEventListener('mousemove', onResizeMove);
+  document.removeEventListener('mouseup', onResizeEnd);
 }
 
 // ==============================

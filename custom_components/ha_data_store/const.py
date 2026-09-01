@@ -105,4 +105,4 @@ AUTOMATION_LOG_RETENTION_DAYS = 30  # 执行记录保留天数（自动清理）
 AUTOMATION_LOG_CLEANUP_EVERY = 60   # 每 N 次 tick 清理一次过期执行记录
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "3.0.1"
+VERSION = "3.0.2"

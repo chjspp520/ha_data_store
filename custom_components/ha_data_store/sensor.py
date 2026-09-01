@@ -259,7 +259,9 @@ class ReportedEntitiesHealthSensor(SensorEntity):
 
     def __init__(self, hass, device_info):
         self._hass = hass
+        # 强制固定实体 id：sensor.ha_data_entities_health
         self._attr_unique_id = f"{DOMAIN}_reported_entities_health"
+        self.entity_id = "sensor.ha_data_entities_health"
         self._attr_device_info = device_info
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
@@ -273,7 +275,8 @@ class ReportedEntitiesHealthSensor(SensorEntity):
             conn.row_factory = sqlite3.Row
             try:
                 rows = [dict(r) for r in conn.execute(
-                    f"SELECT entity_id, name, icon, room_name, rooms FROM {TABLE_REPORT_ENTITIES} "
+                    f"SELECT entity_id, name, icon, room_name, rooms, "
+                    f"entity_type, entity_device, entity_area FROM {TABLE_REPORT_ENTITIES} "
                     f"ORDER BY room_name, entity_id"
                 ).fetchall()]
             finally:
@@ -306,6 +309,9 @@ class ReportedEntitiesHealthSensor(SensorEntity):
                     "icon": r["icon"],
                     "room_name": r["room_name"],
                     "rooms": r.get("rooms") or "",
+                    "entity_type": r.get("entity_type") or "",
+                    "entity_device": r.get("entity_device") or "",
+                    "entity_area": r.get("entity_area") or "",
                     "status": status,
                     "state": state_val[:30],
                 })
@@ -487,7 +493,8 @@ class AutomationStatusSensor(SensorEntity):
                 max_log_id = int(max_log_row[0] if max_log_row else 0)
                 # 上报实体中的自动化实体（前端实体健康上报的 automation.* 实体）
                 report_rows = [dict(r) for r in conn.execute(
-                    f"SELECT entity_id, name, icon, room_name, source, rooms, last_report_time "
+                    f"SELECT entity_id, name, icon, room_name, source, rooms, "
+                    f"entity_type, entity_device, entity_area, last_report_time "
                     f"FROM {TABLE_REPORT_ENTITIES} "
                     f"WHERE entity_id LIKE 'automation.%' ORDER BY entity_id ASC"
                 ).fetchall()]

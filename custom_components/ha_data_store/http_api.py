@@ -8666,11 +8666,17 @@ class ReportEntitiesView(_BaseDBView):
                     source = (item.get("source") or "room_elves").strip() or "room_elves"
                     # rooms：前端去重后合并的"使用房间"列表（多房间逗号连接），可为空
                     rooms = (item.get("rooms") or "").strip()
+                    # 实体来源/设备/区域：前端从 hass 注册表映射后上报，可为空
+                    entity_type = (item.get("entity_type") or "").strip()
+                    entity_device = (item.get("entity_device") or "").strip()
+                    entity_area = (item.get("entity_area") or "").strip()
                     conn.execute(
                         f"INSERT INTO {TABLE_REPORT_ENTITIES} "
-                        f"(entity_id, name, icon, room_name, source, rooms, last_report_time) "
-                        f"VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (eid, name, icon, room_name, source, rooms, now),
+                        f"(entity_id, name, icon, room_name, source, rooms, "
+                        f"entity_type, entity_device, entity_area, last_report_time) "
+                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (eid, name, icon, room_name, source, rooms,
+                         entity_type, entity_device, entity_area, now),
                     )
                     inserted += 1
                 conn.commit()
@@ -8697,7 +8703,8 @@ class ReportEntitiesView(_BaseDBView):
             try:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    f"SELECT entity_id, name, icon, room_name, source, rooms, last_report_time "
+                    f"SELECT entity_id, name, icon, room_name, source, rooms, "
+                    f"entity_type, entity_device, entity_area, last_report_time "
                     f"FROM {TABLE_REPORT_ENTITIES} ORDER BY room_name, entity_id"
                 )
                 return [dict(r) for r in cursor.fetchall()]
@@ -8738,7 +8745,8 @@ class ReportAutoEntitiesView(_BaseDBView):
             try:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    f"SELECT id, entity_id, name, icon, room_name, source, rooms, last_report_time "
+                    f"SELECT id, entity_id, name, icon, room_name, source, rooms, "
+                    f"entity_type, entity_device, entity_area, last_report_time "
                     f"FROM {TABLE_REPORT_ENTITIES} "
                     f"WHERE entity_id LIKE 'automation.%' "
                     f"ORDER BY entity_id, name"
