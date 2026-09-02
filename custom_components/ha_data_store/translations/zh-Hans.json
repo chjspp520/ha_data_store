@@ -175,6 +175,15 @@
       },
       "db_viewer_url": {
         "name": "数据库浏览器地址"
+      },
+      "cpu_usage": {
+        "name": "CPU 占用率"
+      },
+      "memory_usage": {
+        "name": "内存占用"
+      },
+      "disk_usage": {
+        "name": "硬盘已用"
       }
     },
     "button": {

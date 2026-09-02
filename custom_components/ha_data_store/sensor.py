@@ -17,9 +17,11 @@ from homeassistant.helpers.event import async_track_time_interval, async_track_u
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
     TABLE_USER_ACTIONS, TABLE_AUTOMATIONS, TABLE_AUTOMATION_LOGS,
-    CATEGORY_ATTRIBUTE)
+    CATEGORY_ATTRIBUTE, VERSION)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 from .daily_summary import build_daily_summary_sync
+from .system_resources import (CpuUsageSensor, DiskUsageSensor,
+    MemoryUsageSensor, async_collect_system_info)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -697,6 +699,7 @@ class DbViewerUrlSensor(SensorEntity):
             attrs = {
                 "path": path,
                 "base_url": base,
+                "version": VERSION,
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             # 数据库存储位置 / 大小 / 记录总条数（executor 避免阻塞事件循环）
@@ -708,6 +711,12 @@ class DbViewerUrlSensor(SensorEntity):
                 attrs["db_size_mb"] = round(size_bytes / 1048576, 2) if size_bytes else 0
                 attrs["total_records"] = total_records
                 attrs["records_by_table"] = records_by_table
+            # 系统/HA 基本信息（CPU/内存/硬盘/版本等，低频：随 10 分钟刷新更新）
+            try:
+                attrs["system"] = await async_collect_system_info(self._hass)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 采集系统基本信息失败: %s", e)
+                attrs["system"] = {"error": str(e)}
             return f"{base}{path}", attrs
         except Exception as e:
             _LOGGER.error("[HDS] 获取 db_viewer 访问地址失败: %s", e)
@@ -733,12 +742,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
     user_actions_sensor = UserActionsSensor(hass, device_info)
     automation_status_sensor = AutomationStatusSensor(hass, device_info)
     db_viewer_url_sensor = DbViewerUrlSensor(hass, device_info)
+    cpu_sensor = CpuUsageSensor(hass, device_info)
+    mem_sensor = MemoryUsageSensor(hass, device_info)
+    disk_sensor = DiskUsageSensor(hass, device_info)
     # 存引用，供按钮/服务触发按需刷新
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
     hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
     hass.data.setdefault(DOMAIN, {})["automation_status_sensor"] = automation_status_sensor
     entities = [sensor, report_sensor, summary_sensor, user_actions_sensor,
-                automation_status_sensor, db_viewer_url_sensor]
+                automation_status_sensor, db_viewer_url_sensor,
+                cpu_sensor, mem_sensor, disk_sensor]
     # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
     url, attrs = await db_viewer_url_sensor._fetch_url()
     db_viewer_url_sensor._attr_native_value = url
@@ -777,6 +790,27 @@ async def async_setup_entry(hass, entry, async_add_entities):
     except Exception as e:
         _LOGGER.warning("[HDS] 数据库浏览器地址传感器实体ID设置失败: %s", e)
 
+    # 三个系统资源占用传感器：固定实体 ID（cpu_usage/memory_usage/disk_usage）
+    _sys_sensor_id_map = [
+        (cpu_sensor, "ha_data_store_cpu_usage"),
+        (mem_sensor, "ha_data_store_memory_usage"),
+        (disk_sensor, "ha_data_store_disk_usage"),
+    ]
+    for _s, _oid in _sys_sensor_id_map:
+        try:
+            reg = er.async_get(hass)
+            new_eid = f"sensor.{_oid}"
+            old_eid = reg.async_get_entity_id("sensor", DOMAIN, _s.unique_id)
+            if old_eid and old_eid != new_eid:
+                try:
+                    reg.async_update_entity(old_eid, new_entity_id=new_eid)
+                except Exception as e:
+                    _LOGGER.warning("[HDS] 系统资源传感器实体重命名失败（%s → %s）: %s", old_eid, new_eid, e)
+            reg.async_get_or_create(domain="sensor", platform=DOMAIN,
+                                    unique_id=_s.unique_id, suggested_object_id=_oid)
+        except Exception as e:
+            _LOGGER.warning("[HDS] 系统资源传感器实体ID设置失败（%s）: %s", _oid, e)
+
     bdi = get_bridge_device_info(entry.entry_id)
     try:
         bridge_entities = get_bridge_entities_for_platform(hass, "sensor", bdi)
@@ -804,6 +838,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
     # db_viewer 访问地址：每 10 分钟低频刷新（HA 外部/内部地址变化时更新）
     async_track_time_interval(hass, db_viewer_url_sensor.async_trigger_refresh, timedelta(minutes=10))
+    # 系统资源占用传感器：每 30 秒刷新
+    async_track_time_interval(hass, cpu_sensor._async_refresh, timedelta(seconds=30))
+    async_track_time_interval(hass, mem_sensor._async_refresh, timedelta(seconds=30))
+    async_track_time_interval(hass, disk_sensor._async_refresh, timedelta(seconds=30))
 
     # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 分钟（整 30 分钟）更新 ──
     async def _delayed_first_refresh():

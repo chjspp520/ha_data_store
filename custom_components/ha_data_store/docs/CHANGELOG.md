@@ -1,5 +1,35 @@
 # 更新日志
 
+## 2026-09-02 — v3.1.0 新增系统资源占用传感器 + 系统/HA 基本信息采集
+
+### 📊 新增 3 个系统资源占用传感器（主值=使用率百分比，每 30 秒刷新）
+- **`system_resources.py`（新建）**：集中系统资源采集逻辑，提供 `CpuUsageSensor` / `MemoryUsageSensor` / `DiskUsageSensor` 三个传感器类，以及 `collect_system_info` / `collect_usage` 采集函数。
+- **固定实体 ID**（`sensor.py` `async_setup_entry` 内通过 registry 强制固定并兼容改名）：
+  - `sensor.ha_data_store_cpu_usage`：CPU 占用率（%）
+  - `sensor.ha_data_store_memory_usage`：内存占用率（%），attributes 附 `used_mb`/`total_mb`
+  - `sensor.ha_data_store_disk_usage`：硬盘已用率（%），attributes 附 `used_mb`/`total_mb`
+- 三者 attributes 均带 `type` / `percent` 字段；已接入 `async_track_time_interval` 每 30 秒刷新。
+
+### 🖥️ 系统/HA 基本信息采集
+- **`sensor.py`**：`DbViewerUrlSensor._fetch_url` 在 attributes 新增 `system` 子对象（每 10 分钟随 DB 地址低频刷新一并更新），包含：
+  - HA 侧：`ha_version` / `installation_type`（用官方 `homeassistant.helpers.system_info.async_get_system_info` 获取，失败时以 `.HA_VERSION` 文件兜底版本）/ `frontend_version`（读 `home-assistant-frontend` 包）/ `install_time`（近似=configuration.yaml mtime）/ `config_dir`
+  - CPU：`cpu_model` / `cpu_physical_cores` / `cpu_logical_cores` / `cpu_freq_mhz`
+  - 内存：`mem_total_mb`；硬盘整体：`disk_total_mb`（汇总所有真实本地磁盘分区）
+  - `uptime_seconds` / `uptime_text`（系统开机时长）、`updated_at`
+- psutil 为 HA 环境自带依赖，缺失时自动降级（相关字段返回 None / 传感器不报错），不影响集成其它功能。
+
+### 🌐 翻译
+- **`strings.json` / `translations/en.json`（`entity.sensor`）**、**`translations/zh-Hans.json`（`sensor`）**：新增 `cpu_usage` / `memory_usage` / `disk_usage` 实体名称翻译。
+
+### 依赖文件
+| 文件 | 改动 |
+|------|------|
+| `system_resources.py` | 新建：系统资源采集 + 3 个资源占用传感器类 |
+| `sensor.py` | 导入新传感器；`async_setup_entry` 注册 3 传感器 + 固定实体 ID + 30s 刷新；`DbViewerUrlSensor` 加 `system` attributes |
+| `const.py` | VERSION → 3.1.0 |
+| `manifest.json` | 版本 3.1.0 |
+| `strings.json` / `translations/*.json` | 新增 3 传感器名称翻译 |
+
 ## 2026-09-01 — v3.0.2 上报实体来源/设备/区域字段 + 实体健康实体固定 ID + 数据库浏览器列宽拖拽
 
 ### 🗄️ report_entities 表新增来源/设备/区域字段

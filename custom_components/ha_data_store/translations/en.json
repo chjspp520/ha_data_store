@@ -127,6 +127,15 @@
       },
       "db_viewer_url": {
         "name": "DB Viewer URL"
+      },
+      "cpu_usage": {
+        "name": "CPU Usage"
+      },
+      "memory_usage": {
+        "name": "Memory Usage"
+      },
+      "disk_usage": {
+        "name": "Disk Used"
       }
     },
     "button": {

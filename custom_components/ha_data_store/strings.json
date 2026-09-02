@@ -163,6 +163,15 @@
     "sensor": {
       "monitored_entities": {
         "name": "监控实体列表"
+      },
+      "cpu_usage": {
+        "name": "CPU 占用率"
+      },
+      "memory_usage": {
+        "name": "内存占用"
+      },
+      "disk_usage": {
+        "name": "硬盘已用"
       }
     }
   }
