@@ -79,7 +79,7 @@ PLATFORMS: list[str] = [
     "switch", "sensor", "button",
     "light", "climate", "cover", "fan", "lock",
     "number", "select", "binary_sensor", "vacuum",
-    "media_player",
+    "media_player", "text",
 ]
 
 
@@ -992,6 +992,21 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 entity_name     TEXT NOT NULL DEFAULT '',
                 extra_config    TEXT NOT NULL DEFAULT '{{}}',
                 created_at      TEXT NOT NULL DEFAULT ''
+            )
+            """,
+        )
+        # 14) 辅助元素(helper)持久化表 —— 原生 HA helper 导入为本集成自管实体
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS helper_entities (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id         TEXT NOT NULL UNIQUE,
+                source_type       TEXT NOT NULL DEFAULT '',
+                source_entity_id  TEXT NOT NULL DEFAULT '',
+                device_name       TEXT NOT NULL DEFAULT '',
+                icon              TEXT NOT NULL DEFAULT '',
+                extra_config      TEXT NOT NULL DEFAULT '{{}}',
+                created_at        TEXT NOT NULL DEFAULT ''
             )
             """,
         )
@@ -4073,6 +4088,12 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         BridgeEntitiesView,
         BridgeReloadView,
         VirtualDeviceView,
+        VirtualDeviceExportView,
+        VirtualDeviceImportView,
+        HelperScanView,
+        HelperExportView,
+        HelperImportView,
+        HelperView,
         HealthAddView,
         HealthTypesView,
         HealthDeleteView,
@@ -4130,6 +4151,12 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(BridgeEntitiesView(db_path))
     hass.http.register_view(BridgeReloadView(db_path))
     hass.http.register_view(VirtualDeviceView(db_path))
+    hass.http.register_view(VirtualDeviceExportView(db_path))
+    hass.http.register_view(VirtualDeviceImportView(db_path))
+    hass.http.register_view(HelperScanView(db_path))
+    hass.http.register_view(HelperExportView(db_path))
+    hass.http.register_view(HelperImportView(db_path))
+    hass.http.register_view(HelperView(db_path))
     hass.http.register_view(HealthAddView(db_path))
     hass.http.register_view(HealthTypesView(db_path))
     hass.http.register_view(HealthDeleteView(db_path))
@@ -4653,6 +4680,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.exception("[virtual] 恢复设备失败 %s", cfg.get("entity_id"))
             _LOGGER.info("[virtual] 已恢复 %d 个虚拟设备", len(saved))
     hass.async_create_background_task(_restore_virtual_devices(), "restore_virtual_devices")
+
+    # 启动时恢复已持久化的辅助元素（后台任务，不阻塞启动）
+    async def _restore_helper_entities():
+        from .helper_entities import HelperManager
+        hm = HelperManager(hass, entry.entry_id)
+        saved = await hass.async_add_executor_job(hm.load_from_db)
+        if saved:
+            _LOGGER.info("[helper] 正在恢复 %d 个辅助元素...", len(saved))
+            for cfg in saved:
+                try:
+                    hm.create_helper(cfg)
+                except Exception:
+                    _LOGGER.exception("[helper] 恢复辅助元素失败 %s", cfg.get("entity_id"))
+            _LOGGER.info("[helper] 已恢复 %d 个辅助元素", len(saved))
+    hass.async_create_background_task(_restore_helper_entities(), "restore_helper_entities")
 
     # 启动设备桥接（延迟后台，不阻塞 HA 启动）
     from .bridge import BridgeManager

@@ -344,6 +344,77 @@ class ReportedEntitiesHealthSensor(SensorEntity):
         self.async_write_ha_state()
 
 
+class HelperSummarySensor(SensorEntity):
+    """辅助元素统计传感器。
+
+    把「辅助元素」下所有实体聚合为一个新实体：
+      状态值        = 辅助元素个数
+      状态属性      = 每个辅助元素的明细列表（entity_id/name/icon/source_type/source_entity_id）
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "helper_summary"
+    _attr_icon = "mdi:puzzle"
+    _attr_native_unit_of_measurement = "个"
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_helper_summary"
+        # 强制固定实体 id：sensor.ha_data_store_helper
+        self.entity_id = "sensor.ha_data_store_helper"
+        self._attr_device_info = device_info
+        self._attr_native_value = 0
+        self._attr_extra_state_attributes = {}
+
+    def _load_data(self):
+        items = self._hass.data.get(DOMAIN, {}).get("helper_entities", []) or []
+        entities = []
+        for it in items:
+            inst_list = it.get("entities") or []
+            if not inst_list:
+                # 无实体实例兜底：用 item 自身字段
+                eid = it.get("entity_id") or ""
+                if not eid:
+                    continue
+                entities.append({
+                    "entity_id": eid,
+                    "name": it.get("device_name") or eid,
+                    "icon": "",
+                    "source_type": it.get("source_type") or "",
+                    "source_entity_id": it.get("source_entity_id") or "",
+                })
+                continue
+            for ent in inst_list:
+                eid = getattr(ent, "entity_id", None) or it.get("entity_id") or ""
+                if not eid:
+                    continue
+                name = getattr(ent, "_attr_name", None) or it.get("device_name") or eid
+                icon = getattr(ent, "_attr_icon", None) or ""
+                entities.append({
+                    "entity_id": eid,
+                    "name": name,
+                    "icon": icon,
+                    "source_type": it.get("source_type") or "",
+                    "source_entity_id": it.get("source_entity_id") or "",
+                })
+        # 按 entity_id 去重（同一实体多引用只保留一份）
+        seen = set()
+        unique = []
+        for x in entities:
+            if x["entity_id"] in seen:
+                continue
+            seen.add(x["entity_id"])
+            unique.append(x)
+        unique.sort(key=lambda x: (x["name"] or "").lower())
+        return {"total": len(unique), "entities": unique}
+
+    async def _async_refresh(self, now=None):
+        data = await self._hass.async_add_executor_job(self._load_data)
+        self._attr_native_value = data.get("total", 0)
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
+
+
 class TodayFamilyStatusSensor(SensorEntity):
     """今日家庭状态总结传感器。
 
@@ -742,6 +813,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     user_actions_sensor = UserActionsSensor(hass, device_info)
     automation_status_sensor = AutomationStatusSensor(hass, device_info)
     db_viewer_url_sensor = DbViewerUrlSensor(hass, device_info)
+    helper_summary_sensor = HelperSummarySensor(hass, device_info)
     cpu_sensor = CpuUsageSensor(hass, device_info)
     mem_sensor = MemoryUsageSensor(hass, device_info)
     disk_sensor = DiskUsageSensor(hass, device_info)
@@ -751,6 +823,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     hass.data.setdefault(DOMAIN, {})["automation_status_sensor"] = automation_status_sensor
     entities = [sensor, report_sensor, summary_sensor, user_actions_sensor,
                 automation_status_sensor, db_viewer_url_sensor,
+                helper_summary_sensor,
                 cpu_sensor, mem_sensor, disk_sensor]
     # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
     url, attrs = await db_viewer_url_sensor._fetch_url()
@@ -811,6 +884,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
         except Exception as e:
             _LOGGER.warning("[HDS] 系统资源传感器实体ID设置失败（%s）: %s", _oid, e)
 
+    # 辅助元素统计传感器：强制固定实体 ID 为 sensor.ha_data_store_helper
+    try:
+        reg = er.async_get(hass)
+        new_eid = "sensor.ha_data_store_helper"
+        old_eid = reg.async_get_entity_id("sensor", DOMAIN, helper_summary_sensor.unique_id)
+        if old_eid and old_eid != new_eid:
+            try:
+                reg.async_update_entity(old_eid, new_entity_id=new_eid)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 辅助元素统计传感器实体重命名失败（%s → %s）: %s", old_eid, new_eid, e)
+        reg.async_get_or_create(domain="sensor", platform=DOMAIN,
+                                unique_id=helper_summary_sensor.unique_id,
+                                suggested_object_id="ha_data_store_helper")
+    except Exception as e:
+        _LOGGER.warning("[HDS] 辅助元素统计传感器实体ID设置失败: %s", e)
+
     bdi = get_bridge_device_info(entry.entry_id)
     try:
         bridge_entities = get_bridge_entities_for_platform(hass, "sensor", bdi)
@@ -829,6 +918,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(entities)
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, report_sensor._async_refresh, timedelta(seconds=30))
+    async_track_time_interval(hass, helper_summary_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
     # 自动化状态传感器：定时轮询作为兜底；automation_logs 新数据由写日志回调触发；
     # automation.* 实体（ha_automation 节点）状态变化实时监听触发（2 秒防抖）

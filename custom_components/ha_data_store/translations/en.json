@@ -119,6 +119,9 @@
       "monitored_entities": {
         "name": "Monitored Entities"
       },
+      "helper_summary": {
+        "name": "Helper Summary"
+      },
       "reported_entities_health": {
         "name": "Frontend Card Entities Health"
       },

@@ -71,6 +71,9 @@ class AutomationStatusButton(ButtonEntity):
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
+    # 存储回调，供辅助元素动态创建
+    hass.data.setdefault(DOMAIN, {})["async_add_button"] = async_add_entities
+
     device_info = DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)},
         name="HA数据统一存储系统", manufacturer="HA数据统一存储系统",

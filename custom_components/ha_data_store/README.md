@@ -747,6 +747,12 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
 | `/api/ha_data_store/bridge_entities` | GET/POST/DELETE | 桥接实体配置管理 |
 | `/api/ha_data_store/bridge_reload` | POST | 重新加载所有桥接连接 |
 | `/api/ha_data_store/virtual_device` | GET/POST/DELETE | 虚拟设备管理 |
+| `/api/ha_data_store/virtual_device/export` | GET | 导出全部虚拟设备（配置 + 当前状态，跨机迁移用） |
+| `/api/ha_data_store/virtual_device/import` | POST | 导入虚拟设备并重建（body `{mode: skip\|overwrite, devices:[...]}`） |
+| `/api/ha_data_store/helper` | GET/POST/DELETE | 辅助元素列表/新建/删除 |
+| `/api/ha_data_store/helper/scan` | GET | 扫描原生 HA helper（可 `?include_binary_sensor=1`）生成可导出 item |
+| `/api/ha_data_store/helper/export` | GET | 导出已导入的辅助元素（配置 + 状态） |
+| `/api/ha_data_store/helper/import` | POST | 导入辅助元素并转为本集成实体（body `{mode: skip\|overwrite, items:[...]}`） |
 | `/api/ha_data_store/health_add` | POST | 添加健康记录（body 可选 `remark` 备注 / `description` 说明） |
 | `/api/ha_data_store/health_types` | GET/POST/DELETE | 健康数据类型管理 |
 | `/api/ha_data_store/batch_entity_state` | POST | 批量写入实体状态 |

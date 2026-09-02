@@ -1,5 +1,73 @@
 # 更新日志
 
+## 2026-09-03 — v3.3.1 辅助元素统计传感器 + 虚拟/辅助操作写日志
+
+### 📊 新增 `sensor.ha_data_store_helper`（辅助元素统计）
+- 状态值 = 当前辅助元素个数；
+- 状态属性 `entities[]` = 每个辅助元素的明细（entity_id/name/icon/source_type/source_entity_id），按 entity_id 去重并按名称排序；
+- 强制固定实体 ID：`sensor.ha_data_store_helper`（迁移旧 ID 逻辑与 `ha_data_store_automation` 一致）；
+- 每 30 秒自动刷新；新增 translations（zh-Hans/en `helper_summary`）。
+
+### 🧾 操作日志
+- 虚拟设备：创建（POST）、删除（DELETE）、导出（GET /export）、导入（POST /import）成功时写入本地日志文件；
+- 辅助元素：扫描（GET /scan）、导出（GET /export）、导入（POST /import）、新建（POST）、删除（DELETE）成功时写入本地日志文件；
+- 均含 key 实体/数量/mode 等明细，可在 db_viewer 日志查看器查看。
+
+### 版本
+| 文件 | 改动 |
+|------|------|
+| `sensor.py` | 新增 `HelperSummarySensor` + 注册/固定 ID/30s 轮询 |
+| `http_api.py` | 各虚拟设备/辅助元素写操作补 `_log_local` |
+| `const.py` / `manifest.json` | VERSION → 3.3.1 |
+
+## 2026-09-02 — v3.3.0 新增「辅助元素」功能：原生 HA helper 跨机迁移为本集成自管实体
+
+### 🧩 辅助元素功能（方案 Y）
+- 背景：HA 原生辅助元素（`input_*`/`counter`/`binary_sensor`）的配置存于 HA `.storage`，无法像虚拟设备那样由本集成直接管理。现提供「辅助元素」独立功能：A 机扫描原生 helper → 导出 JSON（配置 + 状态）→ B 机导入 → 转换为**本集成自管实体**（RestoreEntity，无需重启，状态自动回填并在重启后保持）。
+- **域映射（前缀变化，后段保留原名）**：
+  | 源 | 目标 | 保留 |
+  |------|------|------|
+  | `input_boolean` | `switch` | icon/name + on/off |
+  | `input_number` | `number` | min/max/step/unit + 当前值 |
+  | `counter` | `number` | min/max/step/initial + 计数 |
+  | `input_select` | `select` | options + 当前选项 |
+  | `input_button` | `button` | 配置（无状态） |
+  | `input_text` | `text` | 文本值 |
+  | `binary_sensor` | `binary_sensor` | on/off |
+- **`helper_entities.py`**（新增模块）：
+  - 7 个目标域实体类 `HelperSwitch/HelperBinarySensor/HelperNumber/HelperSelect/HelperButton/HelperText`（均 RestoreEntity，text 域依赖 HA text 组件）。
+  - `HelperManager`：create/delete/落库(`helper_entities` 表)/启动恢复/导出(配置+状态快照)/导入(skip|overwrite，含冲突保护：其它来源同名真实实体不可覆盖)/延迟状态回填。
+  - `async_scan_native_helpers()`：扫描原生 helper（input_boolean/input_number/counter/input_select/input_button/input_text，可加 binary_sensor），从 attributes 提取 min/max/step/options/icon 等参数。
+- **平台补丁**：`button.py` 补 `async_add_button` 回调；新增 `text.py` 平台文件；`PLATFORMS` 加入 `"text"`。
+- **`http_api.py`**：新增 `HelperScanView`（GET `/api/ha_data_store/helper/scan`）、`HelperExportView`（GET `/helper/export`）、`HelperImportView`（POST `/helper/import`）、`HelperView`（GET/**POST**/DELETE `/helper`，POST 支持前台新建）。
+- **`__init__.py`**：新增 `helper_entities` 建表、启动恢复任务、注册 4 个 View。
+- **`db_viewer.html`**：系统配置页新增「🧩 辅助元素」子页 —— 已导入列表(可删)、扫描并导出(可含 binary_sensor)、导出已导入项、导入文件(可覆盖同名)、**🆕 前台新建辅助元素**（选择类型/填写 ID/名称/图标/初始状态及参数，即时创建，无需重启）；新增 🧩 辅助元素 sub-tab 角标；系统监控页新增 🧩 辅助元素汇总卡片与明细表格。
+- **`README.md`**：API 表补 helper 4 个端点。
+
+### 版本
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION → 3.3.0 |
+| `manifest.json` | 版本 3.3.0 |
+
+## 2026-09-02 — v3.2.0 虚拟设备导出/导入（配置 + 状态），支持跨机迁移重建
+
+### 🔮 虚拟设备跨机迁移：导出 / 导入
+- 背景：A 机器创建虚拟设备后复制数据库到 B 机器，常因 SQLite WAL 未合并、状态不随库迁移等导致 B 上实体缺失或失效。现提供受控的**配置 + 状态**导出导入，不动整库文件。
+- **`virtual_devices.py`**：
+  - `async_export_devices()`：配置从 DB（`virtual_devices` 表，恢复失败也不漏）读取，状态从 HA 状态机（含 climate 附属温度传感器）采集，组装 `{schema_version, devices:[{config, state_snapshot}]}`。
+  - `async_import_devices(payload, mode)`：逐条校验并重建（复用 `create_device`）；`mode=skip` 跳过正在运行的相同实体，`mode=overwrite` 先删旧再建；返回 `{imported, skipped, failed[]}`。
+  - `_apply_snapshot_fields()` + `_MEDIA_ATTR_MAP`：按 13 种设备类型把 `{state, attributes}` 快照回填实体内部 `_attr_*` 字段；状态回填在实体注册完成后异步执行（`_flush_snapshots`），写回后进入 HA restore_state，**目标机后续重启状态仍保持**。
+- **`http_api.py`**：新增 `VirtualDeviceExportView`（GET `/api/ha_data_store/virtual_device/export`）、`VirtualDeviceImportView`（POST `/api/ha_data_store/virtual_device/import`，body `{mode, devices}`，受 db_edit 开关保护）。
+- **`__init__.py`**：注册上述两个 View。
+- **`db_viewer.html`**：🔮 虚拟设备页新增「导出 / 导入」区——导出下载 JSON、导入文件可勾选"覆盖同名"，完成后提示统计并自动刷新列表。
+
+### 版本
+| 文件 | 改动 |
+|------|------|
+| `const.py` | VERSION → 3.2.0 |
+| `manifest.json` | 版本 3.2.0 |
+
 ## 2026-09-02 — v3.1.0 新增系统资源占用传感器 + 系统/HA 基本信息采集
 
 ### 📊 新增 3 个系统资源占用传感器（主值=使用率百分比，每 30 秒刷新）
@@ -14,7 +82,7 @@
 - **`sensor.py`**：`DbViewerUrlSensor._fetch_url` 在 attributes 新增 `system` 子对象（每 10 分钟随 DB 地址低频刷新一并更新），包含：
   - HA 侧：`ha_version` / `installation_type`（用官方 `homeassistant.helpers.system_info.async_get_system_info` 获取，失败时以 `.HA_VERSION` 文件兜底版本）/ `frontend_version`（读 `home-assistant-frontend` 包）/ `install_time`（近似=configuration.yaml mtime）/ `config_dir`
   - CPU：`cpu_model` / `cpu_physical_cores` / `cpu_logical_cores` / `cpu_freq_mhz`
-  - 内存：`mem_total_mb`；硬盘整体：`disk_total_mb`（汇总所有真实本地磁盘分区）
+  - 内存：`mem_total_mb`；硬盘：`disk_total_mb`（仅统计 HA 运行盘——config 目录所在文件系统，不再累加所有分区，避免 ESXi 虚拟机/容器把宿主或多分区叠加偏大；`collect_usage` 磁盘已用率同样按运行盘口径）
   - `uptime_seconds` / `uptime_text`（系统开机时长）、`updated_at`
 - psutil 为 HA 环境自带依赖，缺失时自动降级（相关字段返回 None / 传感器不报错），不影响集成其它功能。
 

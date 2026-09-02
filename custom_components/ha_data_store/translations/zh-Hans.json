@@ -164,6 +164,9 @@
       "monitored_entities": {
         "name": "监控实体列表"
       },
+      "helper_summary": {
+        "name": "辅助元素统计"
+      },
       "reported_entities_health": {
         "name": "前端卡片实体健康"
       },

@@ -367,6 +367,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('vacuum')">🧹 扫地机器人<span class="sub-tab-badge" id="badge-vacuum"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('bridge')">🌉 设备桥接<span class="sub-tab-badge" id="badge-bridge"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('virtual')">🔮 虚拟设备<span class="sub-tab-badge" id="badge-virtual"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('helper')">🧩 辅助元素<span class="sub-tab-badge" id="badge-helper"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('media')">🎵 媒体播放列表<span class="sub-tab-badge" id="badge-media"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('xiaoai')">💬 小爱对话<span class="sub-tab-badge" id="badge-xiaoai"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('printer')">🖨️ 打印机配置<span class="sub-tab-badge" id="badge-printer"></span></button>
@@ -809,6 +810,20 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="virtualDeviceList"></div>
 
     <div class="section">
+      <h3>📦 导出 / 导入（备份迁移）</h3>
+      <div class="hint">把全部虚拟设备<strong>配置 + 当前状态</strong>导出为 JSON 文件；换机器/复制数据库后导入，即可自动重建实体并恢复状态。导入跳过正在运行的相同实体（勾选"覆盖"则删除重建）。</div>
+      <div class="form-actions" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn-green" onclick="exportVirtualDevices()">⬇️ 导出虚拟设备（配置+状态）</button>
+        <button class="btn-accent" onclick="document.getElementById('vdImportFile').click()">⬆️ 导入虚拟设备</button>
+        <input type="file" id="vdImportFile" accept=".json,application/json" style="display:none" onchange="importVirtualDevices(this)">
+        <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="vdImportOverwrite" style="width:auto;accent-color:var(--accent)"> 覆盖已存在的同名设备
+        </label>
+        <span class="hint" id="vdImportResult"></span>
+      </div>
+    </div>
+
+    <div class="section">
       <h3>🔮 创建虚拟设备</h3>
       <div class="hint">无需重启 HA，即时创建完全功能的虚拟设备。所有实体均使用 RestoreEntity，重启后自动恢复状态。</div>
       <div class="form-grid">
@@ -847,6 +862,66 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div class="form-actions" style="margin-top:12px">
         <button class="btn-green" onclick="createVirtualDevice()">✨ 立即创建</button>
         <span class="hint" style="margin-left:10px" id="vdHint">创建后无需重启 HA，立即可用</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 子面板: 辅助元素 -->
+  <div id="sub-helper" class="sub-panel">
+    <div id="helperList"></div>
+
+    <div class="section">
+      <h3>📦 导出 / 导入（跨机器迁移）</h3>
+      <div class="hint">导出：扫描当前 HA 系统中的原生辅助元素（<code>input_boolean/input_number/input_select/input_text/input_button/counter</code>），连同参数与当前状态生成 JSON 文件。<br>导入：把该 JSON 导入后转换为本集成自管实体（域前缀变化：<code>input_boolean→switch</code>、<code>input_number/counter→number</code>、<code>input_select→select</code>、<code>input_button→button</code>、<code>input_text→text</code>），无需重启，状态自动回填并在重启后保持。</div>
+      <div class="form-actions" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn-green" onclick="scanNativeHelpers()">🔍 扫描并导出辅助元素</button>
+        <button onclick="exportImportedHelpers()">⬇️ 导出已导入的辅助元素</button>
+        <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="helperScanIncludeBS" style="width:auto;accent-color:var(--accent)"> 含 binary_sensor（可能混入真实传感器）
+        </label>
+        <button class="btn-accent" onclick="document.getElementById('helperImportFile').click()">⬆️ 导入辅助元素</button>
+        <input type="file" id="helperImportFile" accept=".json,application/json" style="display:none" onchange="importHelpers(this)">
+        <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="helperImportOverwrite" style="width:auto;accent-color:var(--accent)"> 覆盖已存在的同名实体
+        </label>
+        <span class="hint" id="helperImportResult"></span>
+      </div>
+      <div id="helperScanResult" class="hint" style="margin-top:8px"></div>
+    </div>
+
+    <div class="section">
+      <h3>🆕 新建辅助元素</h3>
+      <div class="hint">在 HA 中即时创建一个本集成自管的辅助元素实体（RestoreEntity，重启自动恢复），无需通过原生 HA「辅助元素」再导入。</div>
+      <div class="form-grid">
+        <div>
+          <label>类型</label>
+          <select id="helperNewType" onchange="onHelperNewTypeChange()" style="width:100%">
+            <option value="input_boolean">开关 (input_boolean→switch)</option>
+            <option value="binary_sensor">二元状态 (binary_sensor)</option>
+            <option value="input_number">数值 (input_number→number)</option>
+            <option value="counter">计数器 (counter→number)</option>
+            <option value="input_select">下拉选择 (input_select→select)</option>
+            <option value="input_button">按钮 (input_button→button)</option>
+            <option value="input_text">文本 (input_text→text)</option>
+          </select>
+        </div>
+        <div>
+          <label>实体 ID（后段，如 test_flag）</label>
+          <input type="text" id="helperNewEntityId" placeholder="test_flag" style="width:100%">
+        </div>
+        <div>
+          <label>实体名称</label>
+          <input type="text" id="helperNewName" placeholder="如：测试开关" style="width:100%">
+        </div>
+        <div>
+          <label>图标 (mdi:xxx，可空)</label>
+          <input type="text" id="helperNewIcon" placeholder="mdi:lightbulb" style="width:100%">
+        </div>
+      </div>
+      <div id="helperNewExtraFields" style="display:none;margin-top:12px"></div>
+      <div class="form-actions" style="margin-top:12px">
+        <button class="btn-green" onclick="createHelper()">✨ 立即创建</button>
+        <span class="hint" style="margin-left:10px" id="helperNewHint">创建后无需重启 HA，立即可用</span>
       </div>
     </div>
   </div>
@@ -2960,6 +3035,7 @@ async function loadMonitor() {
       makeCard('push_target','🌐 实体→网络') +
       '<div class="summary-card c-online" id="bridgeCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🌉 桥接设备</div></div>' +
       '<div class="summary-card c-online" id="virtualCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🔮 虚拟设备</div></div>' +
+      '<div class="summary-card c-online" id="helperCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🧩 辅助元素</div></div>' +
       '<div class="summary-card c-online" id="xiaoaiCard"><div class="health-dot ' + (healthCls[(types.xiaoai||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.xiaoai||{}).count||0) + '</div><div class="lbl">💬 小爱对话</div></div>' +
       '<div class="summary-card c-online" id="printerCard"><div class="health-dot ' + (healthCls[(types.printer||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.printer||{}).count||0) + '</div><div class="lbl">🖨️ 打印机</div></div>';
 
@@ -3115,6 +3191,10 @@ async function loadMonitor() {
     html += '<h4 class="section-head title-good">🔮 虚拟设备 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="virtualStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="virtualTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
+    // -- 辅助元素 --
+    html += '<h4 class="section-head title-good">🧩 辅助元素 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="helperStat">加载中...</span></h4>';
+    html += '<div class="section-content collapsed"><div id="helperTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
+
     // -- 打印机监控 --
     let printerList = d.printer || [];
     let printerH = (types.printer||{}).health||'good';
@@ -3155,9 +3235,10 @@ async function loadMonitor() {
       });
     });
 
-    // 异步加载桥接和虚拟设备数据
+    // 异步加载桥接/虚拟设备/辅助元素数据
     loadMonitorBridge();
     loadMonitorVirtual();
+    loadMonitorHelper();
   } catch(e) {
     content.innerHTML = '<div class="empty">请求失败: ' + e + '</div>';
     document.getElementById('pagination').style.display = 'none';
@@ -3220,6 +3301,41 @@ async function loadMonitorVirtual() {
     devices.forEach(function(d) {
       html += '<tr><td>' + escHtml(d.entity_id) + '</td><td>' + escHtml(d.device_type) + '</td>' +
         '<td>' + escHtml(d.device_name) + '</td><td>' + d.entity_count + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    tbl.innerHTML = html;
+  } catch(e) { /* silent */ }
+}
+
+// 辅助元素类型显示名
+var HELPER_TYPE_LABEL = {
+  input_boolean: '开关', binary_sensor: '二元状态', input_number: '数值',
+  counter: '计数器', input_select: '下拉', input_button: '按钮', input_text: '文本'
+};
+
+async function loadMonitorHelper() {
+  try {
+    var resp = await fetch(HELPER_API);
+    var json = await resp.json();
+    var helpers = json.data || [];
+
+    var card = document.getElementById('helperCard');
+    if (card) card.querySelector('.num').textContent = helpers.length;
+
+    var stat = document.getElementById('helperStat');
+    if (stat) stat.textContent = helpers.length + ' 个辅助元素';
+
+    setSubTabBadge('helper', helpers.length);
+
+    var tbl = document.getElementById('helperTbl');
+    if (!tbl) return;
+    if (!helpers.length) { tbl.innerHTML = '<div class="empty">暂无辅助元素</div>'; return; }
+
+    var html = '<div class="table-wrap"><table><thead><tr><th>实体 ID</th><th>类型</th><th>名称</th><th>源实体</th></tr></thead><tbody>';
+    helpers.forEach(function(d) {
+      var typeLbl = HELPER_TYPE_LABEL[d.source_type] || d.source_type;
+      html += '<tr><td>' + escHtml(d.entity_id) + '</td><td>' + escHtml(typeLbl) + '</td>' +
+        '<td>' + escHtml(d.device_name) + '</td><td style="color:var(--text2)">' + escHtml(d.source_entity_id || '-') + '</td></tr>';
     });
     html += '</tbody></table></div>';
     tbl.innerHTML = html;
@@ -4360,6 +4476,7 @@ switchSubTab = function(name) {
   if (name === 'push') loadPushTargets();
   if (name === 'bridge') loadBridgeData();
   if (name === 'virtual') loadVirtualDevices();
+  if (name === 'helper') loadHelpers();
 };
 
 // ==============================
@@ -5098,6 +5215,327 @@ async function createVirtualDevice() {
     }
   } catch(e) {
     showToast('请求失败', false);
+  }
+}
+
+async function exportVirtualDevices() {
+  try {
+    var resp = await fetch(VD_API + '/export');
+    var json = await resp.json();
+    if (!json.success || !json.data) { showToast('导出失败: ' + (json.error || '未知错误'), false); return; }
+    var devices = json.data.devices || [];
+    if (!devices.length) { showToast('当前没有可导出的虚拟设备', false); return; }
+    var blob = new Blob([JSON.stringify(json.data, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    var d = new Date();
+    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+    a.download = 'virtual_devices_' + d.getFullYear() + pad(d.getMonth()+1) + pad(d.getDate()) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    showToast('✅ 已导出 ' + devices.length + ' 个虚拟设备（含状态）', true);
+  } catch(e) {
+    showToast('导出请求失败', false);
+  }
+}
+
+async function importVirtualDevices(input) {
+  var file = input.files && input.files[0];
+  input.value = '';  // 允许重复选择同一文件
+  if (!file) return;
+  var text;
+  try {
+    text = await file.text();
+  } catch(e) { showToast('读取文件失败', false); return; }
+
+  var payload;
+  try {
+    payload = JSON.parse(text);
+  } catch(e) {
+    showToast('文件不是合法 JSON', false);
+    return;
+  }
+  // 兼容直接数组 / {devices:[...]} 两种格式
+  var devices = Array.isArray(payload) ? payload : (payload && payload.devices);
+  if (!devices || !devices.length) {
+    showToast('文件中没有虚拟设备数据（需为 export 导出的 JSON）', false);
+    return;
+  }
+  var overwrite = document.getElementById('vdImportOverwrite').checked;
+  if (!confirm('确定导入 ' + devices.length + ' 个虚拟设备？\n模式：' + (overwrite ? '覆盖同名设备' : '跳过同名设备') + '\n导入后实体将自动创建/重建并恢复状态。')) return;
+
+  var resultSpan = document.getElementById('vdImportResult');
+  if (resultSpan) resultSpan.textContent = '导入中...';
+  try {
+    var resp = await fetch(VD_API + '/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: overwrite ? 'overwrite' : 'skip', devices: devices }),
+    });
+    var json = await resp.json();
+    if (!json.success) {
+      if (resultSpan) resultSpan.textContent = '';
+      showToast('导入失败: ' + (json.error || '未知错误'), false);
+      return;
+    }
+    var data = json.data || {};
+    var msg = '导入完成：新建 ' + (data.imported || 0) + '，跳过 ' + (data.skipped || 0);
+    if (data.failed && data.failed.length) {
+      msg += '，失败 ' + data.failed.length + '（详见控制台）';
+      console.warn('[virtual] 导入失败明细', data.failed);
+    }
+    if (resultSpan) resultSpan.textContent = msg;
+    showToast('✅ ' + msg, !(data.failed && data.failed.length));
+    // 状态回填是异步的，稍后刷新列表
+    setTimeout(loadVirtualDevices, 1500);
+  } catch(e) {
+    if (resultSpan) resultSpan.textContent = '';
+    showToast('导入请求失败', false);
+  }
+}
+
+// ==============================
+//  辅助元素管理（方案Y：原生 helper → 本集成自管实体）
+// ==============================
+const HELPER_API = '/api/ha_data_store/helper';
+
+// 新建辅助元素：目标域映射
+function helperTargetDomain(t) {
+  return { input_boolean: 'switch', binary_sensor: 'binary_sensor',
+           input_number: 'number', counter: 'number',
+           input_select: 'select', input_button: 'button',
+           input_text: 'text' }[t] || t;
+}
+
+function onHelperNewTypeChange() {
+  var t = document.getElementById('helperNewType').value;
+  var div = document.getElementById('helperNewExtraFields');
+  var hint = document.getElementById('helperNewHint');
+  if (hint) hint.textContent = '创建后无需重启 HA，立即可用';
+  if (t === 'input_boolean' || t === 'binary_sensor') {
+    div.style.display = 'block';
+    div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
+      '<div><label>初始状态</label><select id="helperNewState" style="width:100%"><option value="">OFF</option><option value="on">ON</option></select></div></div>';
+  } else if (t === 'input_number' || t === 'counter') {
+    div.style.display = 'block';
+    div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
+      '<div><label>最小值</label><input type="number" id="helperNewMin" value="0" style="width:100%"></div>' +
+      '<div><label>最大值</label><input type="number" id="helperNewMax" value="100" style="width:100%"></div>' +
+      '<div><label>步长</label><input type="number" id="helperNewStep" value="1" step="0.1" style="width:100%"></div>' +
+      '<div><label>单位</label><input type="text" id="helperNewUnit" placeholder="个/%" style="width:100%"></div>' +
+      '<div class="full"><label>初始值</label><input type="number" id="helperNewValue" style="width:100%"></div></div>';
+  } else if (t === 'input_select') {
+    div.style.display = 'block';
+    div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
+      '<div class="full"><label>选项（逗号分隔）</label><input type="text" id="helperNewOptions" value="选项1,选项2,选项3" style="width:100%"></div>' +
+      '<div><label>默认选项</label><input type="text" id="helperNewOptionDef" style="width:100%"></div></div>';
+  } else if (t === 'input_text') {
+    div.style.display = 'block';
+    div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
+      '<div class="full"><label>初始文本</label><input type="text" id="helperNewText" style="width:100%"></div></div>';
+  } else if (t === 'input_button') {
+    div.style.display = 'block';
+    div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
+      '<div class="hint">按钮无状态，创建后可在 HA 中触发 press 事件（用于场景/自动化）。</div></div>';
+  } else {
+    div.style.display = 'none';
+  }
+}
+
+async function createHelper() {
+  var t = document.getElementById('helperNewType').value;
+  var suffix = (document.getElementById('helperNewEntityId').value || '').trim();
+  if (!suffix || suffix.indexOf('.') >= 0) { showToast('请填写纯后段实体 ID（不含点）', false); return; }
+  var domain = helperTargetDomain(t);
+  var entityId = domain + '.' + suffix;
+  var body = {
+    source_type: t,
+    entity_id: entityId,
+    device_name: (document.getElementById('helperNewName').value || '').trim(),
+    icon: (document.getElementById('helperNewIcon').value || '').trim() || null,
+  };
+  // 按类型收集附加参数
+  if (t === 'input_boolean' || t === 'binary_sensor') {
+    body.state = document.getElementById('helperNewState') ? document.getElementById('helperNewState').value : '';
+  } else if (t === 'input_number' || t === 'counter') {
+    body.min = parseFloat(document.getElementById('helperNewMin').value) || 0;
+    body.max = parseFloat(document.getElementById('helperNewMax').value) || 100;
+    body.step = parseFloat(document.getElementById('helperNewStep').value) || 1;
+    body.unit = (document.getElementById('helperNewUnit').value || '').trim() || null;
+    var val = parseFloat(document.getElementById('helperNewValue').value);
+    if (!isNaN(val)) body.value = val;
+  } else if (t === 'input_select') {
+    var opts = (document.getElementById('helperNewOptions').value || '')
+      .split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+    if (!opts.length) { showToast('请至少填写一个选项', false); return; }
+    body.options = opts;
+    var def = (document.getElementById('helperNewOptionDef').value || '').trim();
+    if (def && opts.indexOf(def) >= 0) body.current_option = def;
+  } else if (t === 'input_text') {
+    body.value = document.getElementById('helperNewText') ? document.getElementById('helperNewText').value : '';
+  }
+
+  try {
+    var resp = await fetch(HELPER_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var json = await resp.json();
+    if (json.success) {
+      showToast('✅ 已创建 ' + entityId, true);
+      document.getElementById('helperNewEntityId').value = '';
+      document.getElementById('helperNewName').value = '';
+      document.getElementById('helperNewIcon').value = '';
+      loadHelpers();
+    } else {
+      showToast('创建失败: ' + (json.error || '未知错误'), false);
+    }
+  } catch(e) {
+    showToast('请求失败', false);
+  }
+}
+
+async function loadHelpers() {
+  var div = document.getElementById('helperList');
+  try {
+    var resp = await fetch(HELPER_API);
+    var json = await resp.json();
+    var items = json.data || [];
+    setSubTabBadge('helper', items.length);
+    if (!items.length) {
+      div.innerHTML = '<div class="hint">暂无辅助元素，可在下方扫描导入原生 HA 辅助元素。</div>';
+      return;
+    }
+    var html = '<h4>已导入的辅助元素 (' + items.length + '个)</h4>' +
+      '<div class="table-wrap"><table><thead><tr>' +
+      '<th>实体 ID</th><th>源类型</th><th>源实体</th><th>名称</th><th style="width:60px">操作</th>' +
+      '</tr></thead><tbody>';
+    items.forEach(function(d) {
+      html += '<tr>' +
+        '<td>' + escHtml(d.entity_id) + '</td>' +
+        '<td>' + escHtml(d.source_type) + '</td>' +
+        '<td>' + escHtml(d.source_entity_id) + '</td>' +
+        '<td>' + escHtml(d.device_name) + '</td>' +
+        '<td><button class="btn-del" onclick="delHelper(&quot;' + d.entity_id + '&quot;)">删除</button></td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    div.innerHTML = html;
+  } catch(e) {
+    div.innerHTML = '<div class="hint" style="color:var(--accent)">加载失败</div>';
+  }
+}
+
+async function delHelper(entityId) {
+  if (!confirm('确定删除辅助元素 ' + entityId + ' ？')) return;
+  try {
+    var resp = await fetch(HELPER_API + '?entity_id=' + encodeURIComponent(entityId), { method: 'DELETE' });
+    var json = await resp.json();
+    showToast(json.success ? (json.message || '已删除') : ('删除失败: ' + json.error), json.success);
+    if (json.success) loadHelpers();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+function downloadHelperJson(payload, prefix) {
+  var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  var d = new Date();
+  var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+  a.download = prefix + '_' + d.getFullYear() + pad(d.getMonth()+1) + pad(d.getDate()) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+
+async function scanNativeHelpers() {
+  var resultSpan = document.getElementById('helperScanResult');
+  var includeBS = document.getElementById('helperScanIncludeBS').checked;
+  if (resultSpan) resultSpan.textContent = '扫描中...';
+  try {
+    var url = HELPER_API + '/scan' + (includeBS ? '?include_binary_sensor=1' : '');
+    var resp = await fetch(url);
+    var json = await resp.json();
+    if (!json.success) {
+      if (resultSpan) resultSpan.textContent = '';
+      showToast('扫描失败: ' + (json.error || '未知错误'), false);
+      return;
+    }
+    var items = json.data || [];
+    if (!items.length) {
+      if (resultSpan) resultSpan.textContent = '';
+      showToast('未扫描到辅助元素实体', false);
+      return;
+    }
+    downloadHelperJson({ schema_version: 1, items: items }, 'helper_elements');
+    if (resultSpan) resultSpan.textContent = '✅ 扫描到 ' + items.length + ' 个辅助元素，已下载 JSON（可在另一台机器导入）。';
+    showToast('✅ 扫描并导出 ' + items.length + ' 个辅助元素', true);
+  } catch(e) {
+    if (resultSpan) resultSpan.textContent = '';
+    showToast('扫描请求失败', false);
+  }
+}
+
+async function exportImportedHelpers() {
+  try {
+    var resp = await fetch(HELPER_API + '/export');
+    var json = await resp.json();
+    if (!json.success || !json.data) { showToast('导出失败: ' + (json.error || '未知错误'), false); return; }
+    var items = (json.data.items) || [];
+    if (!items.length) { showToast('当前没有已导入的辅助元素', false); return; }
+    downloadHelperJson(json.data, 'helper_elements_exported');
+    showToast('✅ 已导出 ' + items.length + ' 个辅助元素（含状态）', true);
+  } catch(e) { showToast('导出请求失败', false); }
+}
+
+async function importHelpers(input) {
+  var file = input.files && input.files[0];
+  input.value = '';  // 允许重复选择同一文件
+  if (!file) return;
+  var text;
+  try { text = await file.text(); }
+  catch(e) { showToast('读取文件失败', false); return; }
+
+  var payload;
+  try { payload = JSON.parse(text); }
+  catch(e) { showToast('文件不是合法 JSON', false); return; }
+  var items = Array.isArray(payload) ? payload : (payload && payload.items);
+  if (!items || !items.length) {
+    showToast('文件中没有辅助元素数据（需为 scan/export 导出的 JSON）', false);
+    return;
+  }
+  var overwrite = document.getElementById('helperImportOverwrite').checked;
+  if (!confirm('确定导入 ' + items.length + ' 个辅助元素？\n模式：' + (overwrite ? '覆盖同名实体' : '跳过同名实体') + '\n导入后转换为本集成实体，并恢复状态。')) return;
+
+  var resultSpan = document.getElementById('helperImportResult');
+  if (resultSpan) resultSpan.textContent = '导入中...';
+  try {
+    var resp = await fetch(HELPER_API + '/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: overwrite ? 'overwrite' : 'skip', items: items }),
+    });
+    var json = await resp.json();
+    if (!json.success) {
+      if (resultSpan) resultSpan.textContent = '';
+      showToast('导入失败: ' + (json.error || '未知错误'), false);
+      return;
+    }
+    var data = json.data || {};
+    var msg = '导入完成：新建 ' + (data.imported || 0) + '，跳过 ' + (data.skipped || 0);
+    if (data.conflicted) msg += '，冲突 ' + data.conflicted;
+    if (data.failed && data.failed.length) {
+      msg += '，失败 ' + data.failed.length + '（详见控制台）';
+      console.warn('[helper] 导入失败明细', data.failed);
+    }
+    if (resultSpan) resultSpan.textContent = msg;
+    showToast('✅ ' + msg, !(data.failed && data.failed.length));
+    setTimeout(loadHelpers, 1500);
+  } catch(e) {
+    if (resultSpan) resultSpan.textContent = '';
+    showToast('导入请求失败', false);
   }
 }
 

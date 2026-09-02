@@ -33,35 +33,29 @@ except Exception:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# 磁盘整体大小：汇总系统中所有真实本地磁盘分区
+# 磁盘大小：统计运行盘（config 所在文件系统）容量
 # ---------------------------------------------------------------------------
-def _disk_total_usage() -> dict | None:
-    """汇总所有本地磁盘分区的总容量与已用，返回 (total_bytes, used_bytes)。"""
+def _disk_total_usage(mount: str | None = None) -> dict | None:
+    """统计运行盘容量与已用（mount 所在文件系统），返回 {total_bytes, used_bytes}。
+
+    仅统计 HA 运行盘（默认 config 目录 / 根文件系统所在挂载点），不叠加其它分区，
+    以如实反映实际分配给本机的磁盘（如 ESXi 虚拟机的真实容量）。
+    """
     if psutil is None:
         return None
-    try:
-        total = 0
-        used = 0
-        for part in psutil.disk_partitions(all=False):
-            # 跳过伪文件系统 / 特殊挂载点 / loop 设备，避免重复与虚报
-            fs = (part.fstype or "").lower()
-            dev = part.device or ""
-            if fs in ("tmpfs", "squashfs", "overlay", "proc", "sysfs", "devpts", "devtmpfs"):
-                continue
-            if fs.startswith("fuse") or dev.startswith("/dev/loop"):
-                continue
-            try:
-                u = psutil.disk_usage(part.mountpoint)
-                total += u.total
-                used += u.used
-            except Exception:
-                continue
-        if total <= 0:
-            return None
-        return {"total_bytes": total, "used_bytes": used}
-    except Exception as e:
-        _LOGGER.warning("[HDS] 汇总磁盘用量失败: %s", e)
-        return None
+    candidates = []
+    if mount:
+        candidates.append(mount)
+    candidates.append(os.path.sep)  # 兜底根文件系统
+    for c in candidates:
+        try:
+            u = psutil.disk_usage(c)
+            if u.total > 0:
+                return {"total_bytes": u.total, "used_bytes": u.used}
+        except Exception:
+            continue
+    _LOGGER.warning("[HDS] 读取运行盘磁盘用量失败(mount=%s)", mount)
+    return None
 
 
 def _cpu_model() -> str | None:
@@ -221,8 +215,8 @@ def _collect_hardware_sync(hass) -> dict:
     else:
         info["mem_total_mb"] = None
 
-    # 硬盘整体大小
-    disk = _disk_total_usage()
+    # 硬盘大小：统计运行盘（config 所在文件系统）
+    disk = _disk_total_usage(config_dir)
     if disk:
         info["disk_total_mb"] = round(disk["total_bytes"] / 1048576)
     else:
@@ -248,11 +242,12 @@ async def async_collect_system_info(hass) -> dict:
     return info
 
 
-def collect_usage() -> dict | None:
+def collect_usage(mount: str | None = None) -> dict | None:
     """采集三类资源占用率（同步，供 executor 调用）。
 
     返回 { cpu_percent, mem_percent, mem_used_mb, mem_total_mb,
             disk_percent, disk_used_mb, disk_total_mb }；psutil 缺失时返回 None。
+    mount：磁盘统计口径，传 config 目录即只统计运行盘；None 则统计根文件系统。
     """
     if psutil is None:
         return None
@@ -271,7 +266,7 @@ def collect_usage() -> dict | None:
         result["mem_used_mb"] = None
         result["mem_total_mb"] = None
     try:
-        disk = _disk_total_usage()
+        disk = _disk_total_usage(mount)
         if disk:
             total = disk["total_bytes"]
             used = disk["used_bytes"]
@@ -301,6 +296,7 @@ class _SystemUsageSensor(SensorEntity):
 
     def __init__(self, hass, device_info):
         self._hass = hass
+        self._config_dir = getattr(getattr(hass, "config", None), "config_dir", None)
         self._attr_device_info = device_info
         self._attr_unique_id = f"{DOMAIN}_{self._metric}_usage"
         self._attr_native_value = None
@@ -321,7 +317,7 @@ class _SystemUsageSensor(SensorEntity):
         raise NotImplementedError
 
     def _load(self) -> None:
-        usage = collect_usage()
+        usage = collect_usage(self._config_dir)
         if not usage:
             # psutil 缺失：标记不可用
             self._attr_native_value = None

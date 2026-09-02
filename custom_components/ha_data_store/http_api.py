@@ -7599,6 +7599,10 @@ class VirtualDeviceView(_BaseDBView):
             entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
             mgr = VirtualDeviceManager(hass, entry_id)
             result = mgr.create_device(config)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[virtual] POST 创建虚拟设备 entity_id=%s device_type=%s entity_count=%s",
+                         entity_id, device_type, result.get("entity_count"))
             return self.json({"success": True, "data": result})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -7619,8 +7623,314 @@ class VirtualDeviceView(_BaseDBView):
             mgr = VirtualDeviceManager(hass, entry_id)
             ok = mgr.delete_device(entity_id)
             if ok:
+                _lg = _log_local()
+                if _lg:
+                    _lg.info("[virtual] DELETE 删除虚拟设备 entity_id=%s", entity_id)
                 return self.json({"success": True, "message": f"虚拟设备 {entity_id} 已删除"})
             return self.json({"success": False, "error": "设备未找到"}, status_code=404)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ===========================================================================
+#  虚拟设备导出 API — VirtualDeviceExportView                                  #
+# ===========================================================================
+class VirtualDeviceExportView(_BaseDBView):
+    """导出全部虚拟设备（配置 + 当前状态快照）。
+
+    GET /api/ha_data_store/virtual_device/export
+    → { "success": true, "data": { schema_version, devices: [{config, state_snapshot}] } }
+    """
+
+    url = "/api/ha_data_store/virtual_device/export"
+    name = "api:ha_data_store:virtual_device_export"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        try:
+            from .virtual_devices import VirtualDeviceManager
+            entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+            mgr = VirtualDeviceManager(hass, entry_id)
+            payload = await mgr.async_export_devices()
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[virtual] GET 导出虚拟设备 count=%d",
+                         len((payload or {}).get("devices") or []))
+            return self.json({"success": True, "data": payload})
+        except Exception as exc:
+            _LOGGER.exception("[virtual] 导出虚拟设备失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ===========================================================================
+#  虚拟设备导入 API — VirtualDeviceImportView                                  #
+# ===========================================================================
+class VirtualDeviceImportView(_BaseDBView):
+    """导入虚拟设备（配置 + 可选状态快照），自动重建实体。
+
+    POST /api/ha_data_store/virtual_device/import
+    Body: { "mode": "skip"|"overwrite", "devices": [{config, state_snapshot}] }
+    mode 缺省为 skip：目标 entity_id 正在运行时跳过，不覆盖现有设备。
+    """
+
+    url = "/api/ha_data_store/virtual_device/import"
+    name = "api:ha_data_store:virtual_device_import"
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+
+        if not isinstance(body, dict) or not isinstance(body.get("devices"), list):
+            return self.json({"success": False, "error": "body.devices 必须为数组"}, status_code=400)
+
+        mode = (body.get("mode") or "skip").strip()
+        if mode not in ("skip", "overwrite"):
+            return self.json({"success": False, "error": f"mode 仅支持 skip/overwrite，收到: {mode}"}, status_code=400)
+
+        try:
+            from .virtual_devices import VirtualDeviceManager
+            entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+            mgr = VirtualDeviceManager(hass, entry_id)
+            result = await mgr.async_import_devices(body, mode)
+            failed = result.get("failed") or []
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[virtual] POST 导入虚拟设备 mode=%s total=%d imported=%d skipped=%d failed=%d",
+                         mode, len((body.get("devices")) or []), result.get("imported", 0),
+                         result.get("skipped", 0), len(failed))
+            return self.json({
+                "success": True,
+                "data": result,
+                "message": f"导入完成：新建 {result.get('imported', 0)}，跳过 {result.get('skipped', 0)}"
+                           + (f"，失败 {len(failed)}" if failed else ""),
+            })
+        except Exception as exc:
+            _LOGGER.exception("[virtual] 导入虚拟设备失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ===========================================================================
+#  辅助元素 API — 扫描 / 导出 / 导入 / 列表删除                                 #
+# ===========================================================================
+class HelperScanView(_BaseDBView):
+    """扫描当前系统中原生 HA 辅助元素(helper)实体，生成可导出 item。
+
+    GET /api/ha_data_store/helper/scan?include_binary_sensor=1
+    → { "success": true, "data": [{config, state_snapshot}, ...] }
+    """
+
+    url = "/api/ha_data_store/helper/scan"
+    name = "api:ha_data_store:helper_scan"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        try:
+            from .helper_entities import async_scan_native_helpers
+            include_bs = (request.query.get("include_binary_sensor") or "").strip() == "1"
+            items = await async_scan_native_helpers(hass, include_binary_sensor=include_bs)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[helper] GET 扫描辅助元素 include_binary_sensor=%s count=%d",
+                         include_bs, len(items))
+            return self.json({"success": True, "data": items, "count": len(items)})
+        except Exception as exc:
+            _LOGGER.exception("[helper] 扫描辅助元素失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class HelperExportView(_BaseDBView):
+    """导出本集成已创建的辅助元素（配置 + 当前状态）。
+
+    GET /api/ha_data_store/helper/export
+    → { "success": true, "data": {schema_version, items:[{config, state_snapshot}]} }
+    """
+
+    url = "/api/ha_data_store/helper/export"
+    name = "api:ha_data_store:helper_export"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        try:
+            from .helper_entities import HelperManager
+            entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+            mgr = HelperManager(hass, entry_id)
+            payload = await mgr.async_export_items()
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[helper] GET 导出辅助元素 count=%d",
+                         len((payload or {}).get("items") or []))
+            return self.json({"success": True, "data": payload})
+        except Exception as exc:
+            _LOGGER.exception("[helper] 导出辅助元素失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class HelperImportView(_BaseDBView):
+    """导入辅助元素 JSON，自动创建为本集成自管实体并回填状态。
+
+    POST /api/ha_data_store/helper/import
+    Body: { "mode": "skip"|"overwrite", "items": [{config, state_snapshot}] }
+    """
+
+    url = "/api/ha_data_store/helper/import"
+    name = "api:ha_data_store:helper_import"
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+        if not isinstance(body, dict) or not isinstance(body.get("items"), list):
+            return self.json({"success": False, "error": "body.items 必须为数组"}, status_code=400)
+
+        mode = (body.get("mode") or "skip").strip()
+        if mode not in ("skip", "overwrite"):
+            return self.json({"success": False, "error": f"mode 仅支持 skip/overwrite，收到: {mode}"}, status_code=400)
+
+        try:
+            from .helper_entities import HelperManager
+            entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+            mgr = HelperManager(hass, entry_id)
+            result = await mgr.async_import_items(body, mode)
+            failed = result.get("failed") or []
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[helper] POST 导入辅助元素 mode=%s total=%d imported=%d skipped=%d conflicted=%d failed=%d",
+                         mode, len((body.get("items")) or []), result.get("imported", 0),
+                         result.get("skipped", 0), result.get("conflicted", 0), len(failed))
+            return self.json({
+                "success": True,
+                "data": result,
+                "message": f"导入完成：新建 {result.get('imported', 0)}，跳过 {result.get('skipped', 0)}"
+                           + (f"，冲突 {result.get('conflicted', 0)}" if result.get('conflicted') else "")
+                           + (f"，失败 {len(failed)}" if failed else ""),
+            })
+        except Exception as exc:
+            _LOGGER.exception("[helper] 导入辅助元素失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class HelperView(_BaseDBView):
+    """列出 / 新建 / 删除本集成已创建的辅助元素。
+
+    GET    /api/ha_data_store/helper        → 列出运行中辅助元素
+    POST   /api/ha_data_store/helper        → 新建辅助元素
+    DELETE /api/ha_data_store/helper?entity_id= → 删除
+    """
+
+    url = "/api/ha_data_store/helper"
+    name = "api:ha_data_store:helper"
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return self.json({"success": False, "error": "body 必须为 JSON 对象"}, status_code=400)
+
+        entity_id = (body.get("entity_id") or "").strip()
+        source_type = (body.get("source_type") or "").strip()
+        if not entity_id or not source_type:
+            return self.json({"success": False, "error": "缺少 entity_id / source_type"}, status_code=400)
+
+        try:
+            from .helper_entities import HelperManager
+            entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+            mgr = HelperManager(hass, entry_id)
+
+            # 已存在则返回冲突
+            if hass.states.get(entity_id) is not None:
+                return self.json({"success": False, "error": f"实体 {entity_id} 已存在"}, status_code=409)
+
+            config = {
+                "source_type": source_type,
+                "source_entity_id": body.get("source_entity_id") or entity_id,
+                "entity_id": entity_id,
+                "device_name": (body.get("device_name") or "").strip(),
+                "icon": (body.get("icon") or "").strip() or None,
+                "value": body.get("value"),
+                "min": body.get("min"),
+                "max": body.get("max"),
+                "step": body.get("step"),
+                "unit": body.get("unit"),
+                "options": body.get("options"),
+                "current_option": body.get("current_option"),
+            }
+            # 开关类初始状态：state === "on" → True
+            if source_type in ("input_boolean", "binary_sensor"):
+                config["initial_on"] = (body.get("state") == "on")
+            created = mgr.create_helper(config)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[helper] POST 新建辅助元素 entity_id=%s source_type=%s", entity_id, source_type)
+            return self.json({"success": True, "data": {"entity_id": entity_id},
+                              "message": f"已创建辅助元素 {entity_id}"})
+        except Exception as exc:
+            _LOGGER.exception("[helper] 新建辅助元素失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        items = hass.data.get(DOMAIN, {}).get("helper_entities", [])
+        data = [{"entity_id": d["entity_id"], "source_type": d["source_type"],
+                  "source_entity_id": d["source_entity_id"], "device_name": d["device_name"],
+                  "entity_count": d.get("entity_count", 1)}
+                 for d in items]
+        return self.json({"success": True, "data": data})
+
+    async def delete(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        entity_id = request.query.get("entity_id", "").strip()
+        if not entity_id:
+            return self.json({"success": False, "error": "缺少 entity_id 参数"}, status_code=400)
+        try:
+            from .helper_entities import HelperManager
+            entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+            mgr = HelperManager(hass, entry_id)
+            ok = mgr.delete_helper(entity_id)
+            if ok:
+                _lg = _log_local()
+                if _lg:
+                    _lg.info("[helper] DELETE 删除辅助元素 entity_id=%s", entity_id)
+                return self.json({"success": True, "message": f"辅助元素 {entity_id} 已删除"})
+            return self.json({"success": False, "error": "辅助元素未找到"}, status_code=404)
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
 

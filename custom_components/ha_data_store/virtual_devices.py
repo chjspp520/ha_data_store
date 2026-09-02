@@ -1306,6 +1306,124 @@ class VirtualDeviceManager:
         self._entry_id = entry_id
         self._db_path = hass.data.get(DOMAIN, {}).get("db_path", "")
 
+    def _find_inmem_item(self, entity_id: str) -> dict | None:
+        """在运行中的虚拟设备追踪列表里按主实体 ID 查找设备项。"""
+        vd_list = self._hass.data.get(DOMAIN, {}).get("virtual_devices", [])
+        for item in vd_list:
+            if item["entity_id"] == entity_id:
+                return item
+        return None
+
+    async def async_export_devices(self) -> dict:
+        """导出全部虚拟设备（配置 + 当前状态快照）。
+
+        配置读取在 executor 中完成（DB 查询不阻塞事件循环），
+        状态读取在事件循环中完成（hass.states 需在主线程访问）。
+        返回结构：{"schema_version": 1, "devices": [{"config": {...}, "state_snapshot": {entity_id: {state, attributes}}}]
+        """
+        saved = await self._hass.async_add_executor_job(self.load_from_db)
+        devices = []
+        for cfg in saved:
+            eid = cfg.get("entity_id") or ""
+            item = self._find_inmem_item(eid)
+            entities = (item or {}).get("entities") or []
+            snapshot: dict = {}
+            for ent in entities:
+                ent_id = getattr(ent, "entity_id", None)
+                if not ent_id:
+                    continue
+                st = self._hass.states.get(ent_id)
+                if st is None:
+                    continue
+                snapshot[ent_id] = {
+                    "state": st.state,
+                    "attributes": dict(st.attributes),
+                }
+            devices.append({"config": cfg, "state_snapshot": snapshot})
+        return {"schema_version": 1, "devices": devices}
+
+    async def async_import_devices(self, payload: dict | None, mode: str = "skip") -> dict:
+        """导入虚拟设备列表（配置 + 可选状态快照），并重建实体。
+
+        导入数据格式与 export_devices() 输出一致：
+          {"devices": [{"config": {...}, "state_snapshot": {...}}]}
+
+        mode:
+          - "skip"      默认；目标 entity_id 正在运行时跳过（不覆盖现有设备）
+          - "overwrite" 目标已运行的先删除再按导入配置重建
+        状态快照在实体注册完成后异步写回（实体均为 RestoreEntity，
+        写回后会进入 HA restore_state，后续重启仍能保持）。
+        """
+        devices = (payload or {}).get("devices")
+        if not isinstance(devices, list):
+            raise ValueError("payload.devices 必须为数组")
+        if mode not in ("skip", "overwrite"):
+            raise ValueError(f"mode 仅支持 skip/overwrite，收到: {mode!r}")
+
+        result: dict = {"imported": 0, "skipped": 0, "failed": []}
+        pending_apply: list[tuple[Any, dict]] = []
+
+        for dev in devices:
+            cfg = ((dev or {}).get("config")) or {}
+            snap = ((dev or {}).get("state_snapshot")) or {}
+            if not isinstance(cfg, dict) or not isinstance(snap, dict):
+                snap = {}
+            eid = cfg.get("entity_id") or ""
+            try:
+                if not eid or not cfg.get("device_type"):
+                    raise ValueError("缺少 entity_id / device_type")
+                running_ids = {
+                    it["entity_id"]
+                    for it in self._hass.data.get(DOMAIN, {}).get("virtual_devices", [])
+                }
+                if eid in running_ids:
+                    if mode == "skip":
+                        result["skipped"] += 1
+                        continue
+                    # overwrite：先摘除旧设备（registry/state/DB 行），随后重建
+                    self.delete_device(eid)
+                self.create_device(cfg)
+                result["imported"] += 1
+                item = self._find_inmem_item(eid)
+                if item and snap:
+                    for ent in (item.get("entities") or []):
+                        ent_id = getattr(ent, "entity_id", None)
+                        if ent_id and ent_id in snap:
+                            pending_apply.append((ent, snap[ent_id]))
+            except Exception as exc:
+                result["failed"].append({"entity_id": eid, "error": str(exc)})
+                _LOGGER.warning("[virtual] 导入设备失败 %s: %s", eid, exc)
+
+        if pending_apply:
+            self._hass.async_create_task(self._flush_snapshots(pending_apply))
+        return result
+
+    async def _flush_snapshots(self, pending_apply: list[tuple[Any, dict]]) -> None:
+        """等待实体注册完成后，把导入的状态快照写回实体并刷到 HA。"""
+        for ent, snap in pending_apply:
+            ready = False
+            for _ in range(50):  # 最多等待约 5 秒
+                if getattr(ent, "hass", None) is not None:
+                    ready = True
+                    break
+                await asyncio.sleep(0.1)
+            if not ready:
+                _LOGGER.warning(
+                    "[virtual] 导入状态超时（实体未注册，跳过状态回填）: %s",
+                    getattr(ent, "entity_id", "?"),
+                )
+                continue
+            try:
+                _apply_snapshot_fields(ent, snap)
+                # async_write_ha_state 是同步方法（内部会调度实际写状态），不能 await
+                ent.async_write_ha_state()
+            except Exception:
+                _LOGGER.warning(
+                    "[virtual] 导入状态写回失败: %s",
+                    getattr(ent, "entity_id", "?"),
+                    exc_info=True,
+                )
+
     def _save_to_db(self, config: dict) -> None:
         if not self._db_path:
             return
@@ -1505,3 +1623,171 @@ class VirtualDeviceManager:
                 "number": "数值", "select": "选择器",
                 "vacuum": "扫地机器人",
                 "media": "媒体播放器", "speaker": "音响/音箱"}.get(t, t)
+
+
+# =========================================================================== #
+#  导入状态回填：把导出快照的 {state, attributes} 写回实体内部字段                   #
+# =========================================================================== #
+# 媒体播放器（VirtualMedia / VirtualSpeaker）属性键 → 内部 _attr_* 字段映射
+_MEDIA_ATTR_MAP: dict[str, str] = {
+    "volume_level": "_attr_volume_level",
+    "is_volume_muted": "_attr_is_volume_muted",
+    "source": "_attr_source",
+    "sound_mode": "_attr_sound_mode",
+    "media_title": "_attr_media_title",
+    "media_artist": "_attr_media_artist",
+    "media_album_name": "_attr_media_album_name",
+    "media_image_url": "_attr_media_image_url",
+    "media_content_id": "_attr_media_content_id",
+    "media_content_type": "_attr_media_content_type",
+    "media_duration": "_attr_media_duration",
+    "media_position": "_attr_media_position",
+    "media_position_updated_at": "_attr_media_position_updated_at",
+    "shuffle": "_attr_shuffle",
+    "repeat": "_attr_repeat",
+    "app_id": "_attr_app_id",
+    "app_name": "_attr_app_name",
+}
+
+
+def _parse_media_state(value: Any) -> MediaPlayerState:
+    """把快照里的媒体状态字符串安全转回 MediaPlayerState。"""
+    if not value:
+        return MediaPlayerState.OFF
+    try:
+        return MediaPlayerState(str(value))
+    except ValueError:
+        return MediaPlayerState.OFF
+
+
+def _apply_snapshot_fields(entity: Any, snapshot: dict) -> None:
+    """按实体类型把 {state, attributes} 快照写回实体内部 _attr_* 字段。
+
+    仅修改内部字段，不负责 async_write_ha_state（由调用方统一刷新），
+    便于在实体 add 完成后再调用。
+    """
+    state = snapshot.get("state")
+    attrs = snapshot.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    # 虚拟开关
+    if isinstance(entity, VirtualSwitch):
+        entity._attr_is_on = state == "on"
+
+    # 虚拟灯光（ON/OFF + 亮度）
+    elif isinstance(entity, VirtualLight):
+        entity._attr_is_on = state == "on"
+        brightness = attrs.get("brightness")
+        if brightness is not None:
+            try:
+                entity._attr_brightness = int(brightness)
+            except (TypeError, ValueError):
+                pass
+            entity._attr_color_mode = ColorMode.BRIGHTNESS if entity._attr_is_on else ColorMode.ONOFF
+        else:
+            entity._attr_color_mode = ColorMode.ONOFF
+
+    # 虚拟空调
+    elif isinstance(entity, VirtualClimate):
+        hvac = state or attrs.get("hvac_mode")
+        if hvac:
+            try:
+                entity._attr_hvac_mode = HVACMode(str(hvac))
+            except ValueError:
+                pass
+        try:
+            cur = attrs.get("current_temperature")
+            if cur is not None:
+                entity._attr_current_temperature = float(cur)
+        except (TypeError, ValueError):
+            pass
+        try:
+            target = attrs.get("temperature", attrs.get("target_temperature"))
+            if target is not None:
+                entity._attr_target_temperature = float(target)
+        except (TypeError, ValueError):
+            pass
+        if attrs.get("fan_mode") is not None:
+            entity._attr_fan_mode = attrs["fan_mode"]
+        if attrs.get("swing_mode") is not None:
+            entity._attr_swing_mode = attrs["swing_mode"]
+
+    # 空调模拟温度传感器
+    elif isinstance(entity, VirtualClimateSensor):
+        try:
+            if state is not None:
+                entity._attr_native_value = float(state)
+        except (TypeError, ValueError):
+            pass
+
+    # 虚拟窗帘
+    elif isinstance(entity, VirtualCover):
+        entity._attr_is_closed = state == "closed"
+        pos = attrs.get("current_position")
+        if pos is not None:
+            try:
+                entity._attr_current_cover_position = int(pos)
+            except (TypeError, ValueError):
+                pass
+
+    # 虚拟风扇
+    elif isinstance(entity, VirtualFan):
+        entity._attr_is_on = state == "on"
+        pct = attrs.get("percentage")
+        if pct is not None:
+            try:
+                entity._attr_percentage = int(pct)
+            except (TypeError, ValueError):
+                pass
+
+    # 虚拟门锁
+    elif isinstance(entity, VirtualLock):
+        entity._attr_is_locked = state == "locked"
+
+    # 虚拟传感器
+    elif isinstance(entity, VirtualSensor):
+        if state is not None and state not in ("unknown", "unavailable"):
+            try:
+                entity._attr_native_value = float(state)
+            except (TypeError, ValueError):
+                entity._attr_native_value = state
+
+    # 虚拟二元传感器
+    elif isinstance(entity, VirtualBinarySensor):
+        entity._attr_is_on = state == "on"
+
+    # 虚拟数值
+    elif isinstance(entity, VirtualNumber):
+        try:
+            if state is not None:
+                entity._attr_native_value = float(state)
+        except (TypeError, ValueError):
+            pass
+
+    # 虚拟选择器
+    elif isinstance(entity, VirtualSelect):
+        if state in (entity._attr_options or []):
+            entity._attr_current_option = state
+
+    # 虚拟扫地机器人
+    elif isinstance(entity, VirtualVacuum):
+        if state in (STATE_CLEANING, STATE_DOCKED, STATE_PAUSED,
+                     STATE_RETURNING, STATE_IDLE, STATE_ERROR):
+            entity._attr_state = state
+        if attrs.get("battery_level") is not None:
+            try:
+                entity._attr_battery_level = int(attrs["battery_level"])
+            except (TypeError, ValueError):
+                pass
+        if attrs.get("fan_speed") is not None:
+            entity._attr_fan_speed = attrs["fan_speed"]
+        if attrs.get("status") is not None:
+            entity._attr_status = attrs["status"]
+
+    # 虚拟媒体 / 音响
+    elif isinstance(entity, (VirtualMedia, VirtualSpeaker)):
+        entity._attr_state = _parse_media_state(state)
+        for key, attr_name in _MEDIA_ATTR_MAP.items():
+            if key in attrs and attrs[key] is not None:
+                setattr(entity, attr_name, attrs[key])
