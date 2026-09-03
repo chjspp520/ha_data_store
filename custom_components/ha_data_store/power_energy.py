@@ -8,6 +8,12 @@
        sensor.ha_data_store_{id_slug}_yearly_ele   本年累计 (kWh，由日数据实时聚合)
   3. 每天一条记录持久化到 power_energy_daily 表（每 60s 落盘），
      月/年通过当日行 + 内存累计实时算出，不单独建月/年表。
+  4. 三个传感器状态属性附加历史列表（全量、不含 0 值占位）：
+       daylist    [{day, usage}, ...]  — 每日用电（日用电实体）
+       monthlist  [{month, usage}, ...] — 每月用电（月用电实体）
+       yearlist   [{year, usage}, ...]  — 每年用电（年用电实体）
+     列表在 60s 落盘时/跨日重置时从日表重建缓存，
+     实体刷新时把「今天/本月/当年」实时值并入尾项（与 state 保持一致）。
 
 积分口径：两次成功采样之间认为功率恒定；
 空窗处理：unavailable/unknown 不累计并重置基线；采样间隔异常(>10min)丢弃该空窗。
@@ -94,6 +100,28 @@ def _power_to_kw(value: float, unit: str | None) -> float:
     return value / 1000.0
 
 
+def _merge_period_list(
+    cache: list[dict[str, object]], field: str, key: str, value: float
+) -> list[dict[str, object]]:
+    """把当前周期（日/月/年）的实时累计值并入列表尾项。
+
+    - value > 0：尾项若是 key 则覆盖 usage，否则尾部追加新条目；
+    - value <= 0：当前周期暂无数据，尾项若恰为 key 则移除（无数据不占位）。
+
+    返回全新列表，避免污染缓存与已写出的 state 属性。
+    field/key 示例：日 ("day", "2026-09-03")、月 ("month", "2026-09")、年 ("year", "2026")。
+    """
+    items = [dict(x) for x in cache]
+    if value > 0:
+        if items and items[-1].get(field) == key:
+            items[-1]["usage"] = round(value, 3)
+        else:
+            items.append({field: key, "usage": round(value, 3)})
+    elif items and items[-1].get(field) == key:
+        items.pop()
+    return items
+
+
 class PowerDailySensor(SensorEntity):
     """今日用电量传感器（固定 ID）。"""
 
@@ -117,15 +145,17 @@ class PowerDailySensor(SensorEntity):
 
     def refresh_from_mgr(self) -> None:
         cfg = self._cfg
-        cur = self._mgr.state_of(cfg["entity_id"])
+        eid = cfg["entity_id"]
+        cur = self._mgr.state_of(eid)
         self._attr_native_value = round(cur["daily"], 3)
         self._attr_extra_state_attributes = {
             "room": cfg.get("room") or "",
             "device_name": cfg.get("device_name") or "",
-            "source_entity": cfg["entity_id"],
+            "source_entity": eid,
             "period": "daily",
             "date": cur["date"],
             "updated_at": _now_str(),
+            "daylist": self._mgr.period_list_of(eid, "day", cur["date"], cur["daily"]),
         }
         self.async_write_ha_state()
 
@@ -152,15 +182,17 @@ class PowerMonthlySensor(SensorEntity):
 
     def refresh_from_mgr(self) -> None:
         cfg = self._cfg
-        cur = self._mgr.state_of(cfg["entity_id"])
+        eid = cfg["entity_id"]
+        cur = self._mgr.state_of(eid)
         self._attr_native_value = round(cur["monthly"], 3)
         self._attr_extra_state_attributes = {
             "room": cfg.get("room") or "",
             "device_name": cfg.get("device_name") or "",
-            "source_entity": cfg["entity_id"],
+            "source_entity": eid,
             "period": "monthly",
             "date": cur["date"],
             "updated_at": _now_str(),
+            "monthlist": self._mgr.period_list_of(eid, "month", cur["date"][:7], cur["monthly"]),
         }
         self.async_write_ha_state()
 
@@ -187,15 +219,17 @@ class PowerYearlySensor(SensorEntity):
 
     def refresh_from_mgr(self) -> None:
         cfg = self._cfg
-        cur = self._mgr.state_of(cfg["entity_id"])
+        eid = cfg["entity_id"]
+        cur = self._mgr.state_of(eid)
         self._attr_native_value = round(cur["yearly"], 3)
         self._attr_extra_state_attributes = {
             "room": cfg.get("room") or "",
             "device_name": cfg.get("device_name") or "",
-            "source_entity": cfg["entity_id"],
+            "source_entity": eid,
             "period": "yearly",
             "date": cur["date"],
             "updated_at": _now_str(),
+            "yearlist": self._mgr.period_list_of(eid, "year", cur["date"][:4], cur["yearly"]),
         }
         self.async_write_ha_state()
 
@@ -319,6 +353,52 @@ class PowerEnergyManager:
         year_prefix = date[:4]
         st["month_base"] = self._sum_before(cfg["entity_id"], month_prefix, date)
         st["year_base"] = self._sum_before(cfg["entity_id"], year_prefix, date)
+
+    # ---------- 日/月/年列表缓存 ---------- #
+    def _rebuild_lists(self, entity_id: str, st: dict) -> None:
+        """从日表重建日/月/年列表缓存（仅计 kwh>0 的行，无数据日期不占位）。
+
+        在 60s 落盘与跨日重置后调用（executor 线程）；缓存缺失时
+        period_list_of 会在实体刷新时懒重建兜底（覆盖重启后首个刷新）。
+        """
+        day_items: list[dict] = []
+        month_acc: dict[str, float] = {}
+        year_acc: dict[str, float] = {}
+        if self._db_path:
+            conn = _open_db(self._db_path)
+            try:
+                rows = conn.execute(
+                    f"SELECT date, kwh FROM {TABLE_POWER_ENERGY_DAILY} "
+                    "WHERE entity_id = ? AND kwh > 0 ORDER BY date",
+                    (entity_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+            for date, kwh in rows:
+                v = float(kwh)
+                day_items.append({"day": date, "usage": round(v, 3)})
+                m = date[:7]
+                month_acc[m] = month_acc.get(m, 0.0) + v
+                y = date[:4]
+                year_acc[y] = year_acc.get(y, 0.0) + v
+        st["_lists"] = {
+            "day": day_items,
+            "month": [{"month": m, "usage": round(v, 3)}
+                      for m, v in sorted(month_acc.items())],
+            "year": [{"year": y, "usage": round(v, 3)}
+                     for y, v in sorted(year_acc.items())],
+        }
+
+    def period_list_of(
+        self, entity_id: str, field: str, key: str, value: float
+    ) -> list[dict[str, object]]:
+        """返回某实体的日/月/年列表：缓存 + 当前周期实时值并入尾项。"""
+        st = self._meters.get(entity_id)
+        if not st:
+            return []
+        if "_lists" not in st:
+            self._rebuild_lists(entity_id, st)
+        return _merge_period_list(st["_lists"].get(field, []), field, key, value)
 
     # ---------- 运行时状态 ---------- #
     def state_of(self, entity_id: str) -> dict:
@@ -478,6 +558,8 @@ class PowerEnergyManager:
             self._persist_day(cfg_row, st["date"], st["cur"])
             # 顺带重算月/年基数（date 已是最新）
             self.recompute_bases(cfg_row, st["date"])
+            # 重建日/月/年列表缓存（当前日期行刚已落盘）
+            self._rebuild_lists(eid, st)
 
     def _config_of(self, entity_id: str) -> dict | None:
         for cfg in self.load_configs():
