@@ -1,6 +1,83 @@
 # 更新日志
 
-## 2026-09-03 — v3.3.1 辅助元素统计传感器 + 虚拟/辅助操作写日志
+## 2026-09-03 — v3.4.0 功率→用电计量：登记功率实体自动生成日/月/年用电量实体
+
+### ⚡ 用电计量模块
+- 需求：根据功率自动计算日/月/年用电量并入库，支持自定义查询。
+- 在 db_viewer「系统配置 → ⚡ 用电计量」子页登记功率实体（填：功率实体 ID、设备名称、房间、ID 段、单位 W/kW），保存后即时生成 3 个固定 ID 传感器：
+  - `sensor.ha_data_store_{id}_daily_ele`    今日累计 (kWh)
+  - `sensor.ha_data_store_{id}_monthly_ele`  本月累计（由日数据实时聚合）
+  - `sensor.ha_data_store_{id}_yearly_ele`   本年累计（由日数据实时聚合）
+- **`power_energy.py`**（新增模块）：`PowerEnergyManager` + 3 个传感器类。
+  - 每 10 秒采样功率实体当前功率，按「时间差 × 功率」积分（功率单位支持 W/kW，登记单位优先、其次自动读实体 unit_of_measurement）；
+  - `unavailable/unknown` 不累计并重置基线；采样间隔 >5 分钟丢弃该空窗（防 HA 停机误算）；
+  - 每天一条落盘 `power_energy_daily`（每 60 秒内存累计写库，含跨日自动分账）；月/年不建表，由当日行 + 历史日 SUM 实时得出；
+  - 重启自动恢复登记实体，内存累计从当日已落盘值续算；
+  - 卸载前自动落盘。
+- **`__init__.py`**：新增 `power_meter_configs`、`power_energy_daily` 建表；启动/卸载接入 `PowerEnergyManager`；注册 PowerEnergyView。
+- **`http_api.py`**：`PowerEnergyView`（GET 查询 `type=configs|query` + `kind=daily|monthly|yearly|range|latest`，支持 entity_id/room/date/month/year/start/end 过滤；POST 登记/删除，含写日志）。
+- **`db_viewer.html`**：新增「⚡ 用电计量」子页 —— 登记表单（含单位下拉）、已登记列表（可删）、用电量查询（最新/某日/某月/某年/日期段 + 房间筛选）。
+- **`const.py`**：新增 2 个表名常量；**`manifest.json`** 版本 3.4.0。
+
+### 🔧 v3.4.0 增强与修复（同日追加）
+- **建表兜底**：修复 `_init_database` 引用 `TABLE_POWER_METER_CONFIGS`/`TABLE_POWER_ENERGY_DAILY` 未 import 导致 NameError；`power_energy.py` 新增 `ensure_tables()`/`_open_db()`，所有 DB 入口自动建表；http_api 查询前 ensure。
+- **启动注册修复**：`async_start()` 不再把 `restore_all()` 放 executor（平台 add_cb 必须在事件循环线程），消除 `loop is not the running loop` / coroutine never awaited。
+- **实体命名**：三个用电实体名称改为 `{device_name} 日用电 / 月用电 / 年用电`（不再都叫 device_name）。
+- **kWh 精度**：实体值 `round(_,3)`，落盘 `power_energy_daily.kwh` 保留 3 位小数。
+- **统一设备**：所有用电计量实体并入同一 HA 设备「用电计量」（原每登记一设备）。
+- **统计传感器**：新增 `sensor.ha_data_store_all_power`（全部用电量统计，固定 ID）：状态 = 用电实体个数，attributes `entities[]` = 每个实体的 entity_id/name/icon/room/device/power_entity，30s 刷新。
+- **全局实例修复**：PowerEnergyView POST 改用全局 `power_energy_manager`，新增登记立即可被采样与 all_power 统计（此前临时实例导致新增不被感知）。
+- **数据浏览器**：`power_energy_daily` 加入用户表（默认可见）；`power_meter_configs` 不作为用户表。
+- **API 工具**：查询类型新增「⚡ 用电计量」分组（登记列表/最新/某日/某月/某年/日期段），拼装 `/api/ha_data_store/power_energy` URL。
+- **系统监控**：新增 ⚡ 用电计量汇总卡片与明细表 + 用电计量 sub-tab 角标；「系统配置」各列表（设备类/传感器类/辅助元素/用电计量）新增**全选 + 批量删除**。
+- **🧹 设备清理**：新增 `DeviceCleanView`（GET 扫描/POST 清理，`/api/ha_data_store/devices/cleanup`），按 entity_registry device_id 计数判定"空设备"并排除 entry 主设备；删除前解除 config entry 关联、以最终是否仍在 registry 判定成功。UI 从系统监控移入「系统配置」新增「🧹 设备清理」sub-tab。
+
+### 版本
+| 文件 | 改动 |
+|------|------|
+| `power_energy.py` | 新增用电计量核心模块（积分/日表/3 实体/统一设备/ensure_tables） |
+| `sensor.py` | 新增 `sensor.ha_data_store_all_power` 统计实体 |
+| `http_api.py` | PowerEnergyView 查询/登记/删除（全局实例）+ DeviceCleanView 设备清理 |
+| `__init__.py` | 建表 + 启停接入 + 注册 View + const import 修复 |
+| `db_viewer.html` | ⚡ 用电计量子页 + 系统监控卡片 + 全选批量删除 + 🧹 设备清理 tab + 用户表 |
+| `const.py` / `manifest.json` | VERSION → 3.4.0 |
+
+## 2026-09-03 — v3.3.1 虚拟设备/辅助元素导出导入、实体跨机迁移与统计监控
+
+> 本版本将 v3.2.0（虚拟设备导出/导入）与 v3.3.0（辅助元素功能）合并发布为 v3.3.1，包含自虚拟设备管理以来的一揽子新能力。
+
+### 🔮 虚拟设备导出 / 导入（配置 + 状态）
+- 背景：A 机器创建虚拟设备后复制数据库到 B 机器，常因 SQLite WAL 未合并、状态不随库迁移等导致 B 上实体缺失或失效。现提供受控的**配置 + 状态**导出导入，不动整库文件。
+- **`virtual_devices.py`**：
+  - `async_export_devices()`：配置从 DB（`virtual_devices` 表，恢复失败也不漏）读取，状态从 HA 状态机（含 climate 附属温度传感器）采集，组装 `{schema_version, devices:[{config, state_snapshot}]}`；
+  - `async_import_devices(payload, mode)`：逐条校验并重建（复用 `create_device`）；`mode=skip` 跳过正在运行的相同实体，`mode=overwrite` 先删旧再建；返回 `{imported, skipped, failed[]}`；
+  - `_apply_snapshot_fields()` + `_MEDIA_ATTR_MAP`：按 13 种设备类型把 `{state, attributes}` 快照回填实体内部 `_attr_*` 字段；状态回填在实体注册完成后异步执行（`_flush_snapshots`），写回后进入 HA restore_state，**目标机后续重启状态仍保持**。
+- **`http_api.py`**：新增 `VirtualDeviceExportView`（GET `/api/ha_data_store/virtual_device/export`）、`VirtualDeviceImportView`（POST `/api/ha_data_store/virtual_device/import`，body `{mode, devices}`，受 db_edit 开关保护）。
+- **`__init__.py`**：注册上述两个 View。
+- **`db_viewer.html`**：🔮 虚拟设备页新增「导出 / 导入」区——导出下载 JSON、导入文件可勾选"覆盖同名"，完成后提示统计并自动刷新列表。
+
+### 🧩 辅助元素功能（原生 HA helper 跨机迁移为本集成自管实体）
+- 背景：HA 原生辅助元素（`input_*`/`counter`/`binary_sensor`）的配置存于 HA `.storage`，无法像虚拟设备那样由本集成直接管理。现提供「辅助元素」独立功能：A 机扫描原生 helper → 导出 JSON（配置 + 状态）→ B 机导入 → 转换为**本集成自管实体**（RestoreEntity，无需重启，状态自动回填并在重启后保持）。
+- **域映射（前缀变化，后段保留原名）**：
+
+  | 源 | 目标 | 保留 |
+  |------|------|------|
+  | `input_boolean` | `switch` | icon/name + on/off |
+  | `input_number` | `number` | min/max/step/unit + 当前值 |
+  | `counter` | `number` | min/max/step/initial + 计数 |
+  | `input_select` | `select` | options + 当前选项 |
+  | `input_button` | `button` | 配置（无状态） |
+  | `input_text` | `text` | 文本值 |
+  | `binary_sensor` | `binary_sensor` | on/off |
+
+- **`helper_entities.py`**（新增模块）：
+  - 7 个目标域实体类 `HelperSwitch/HelperBinarySensor/HelperNumber/HelperSelect/HelperButton/HelperText`（均 RestoreEntity，text 域依赖 HA text 组件）；
+  - `HelperManager`：create/delete/落库(`helper_entities` 表)/启动恢复/导出(配置+状态快照)/导入(skip|overwrite，含冲突保护：其它来源同名真实实体不可覆盖)/延迟状态回填；
+  - `async_scan_native_helpers()`：扫描原生 helper（input_boolean/input_number/counter/input_select/input_button/input_text，可加 binary_sensor），从 attributes 提取 min/max/step/options/icon 等参数。
+- **平台补丁**：`button.py` 补 `async_add_button` 回调；新增 `text.py` 平台文件；`PLATFORMS` 加入 `"text"`。
+- **`http_api.py`**：新增 `HelperScanView`（GET `/api/ha_data_store/helper/scan`）、`HelperExportView`（GET `/helper/export`）、`HelperImportView`（POST `/helper/import`）、`HelperView`（GET/**POST**/DELETE `/helper`，POST 支持前台新建）。
+- **`__init__.py`**：新增 `helper_entities` 建表、启动恢复任务、注册 4 个 View。
+- **`db_viewer.html`**：系统配置页新增「🧩 辅助元素」子页 —— 已导入列表(可删)、扫描并导出(可含 binary_sensor)、导出已导入项、导入文件(可覆盖同名)、**🆕 前台新建辅助元素**（选择类型/填写 ID/名称/图标/初始状态及参数，即时创建，无需重启）；新增 🧩 辅助元素 sub-tab 角标；系统监控页新增 🧩 辅助元素汇总卡片与明细表格。
 
 ### 📊 新增 `sensor.ha_data_store_helper`（辅助元素统计）
 - 状态值 = 当前辅助元素个数；
@@ -16,57 +93,14 @@
 ### 版本
 | 文件 | 改动 |
 |------|------|
+| `virtual_devices.py` | 新增导出收集/状态快照应用/异步导入方法 |
+| `helper_entities.py` | 新增辅助元素实体类 + HelperManager + 扫描函数 |
 | `sensor.py` | 新增 `HelperSummarySensor` + 注册/固定 ID/30s 轮询 |
-| `http_api.py` | 各虚拟设备/辅助元素写操作补 `_log_local` |
+| `http_api.py` | 虚拟设备/辅助元素各 View + 操作写 `_log_local` |
+| `__init__.py` | helper 建表、启动恢复、注册 Views、PLATFORMS 加 text |
+| `button.py` / `text.py` | 补注册 `async_add_button` / 新增 text 平台 |
+| `db_viewer.html` | 虚拟设备/辅助元素页 + 系统监控卡片 + 角标 |
 | `const.py` / `manifest.json` | VERSION → 3.3.1 |
-
-## 2026-09-02 — v3.3.0 新增「辅助元素」功能：原生 HA helper 跨机迁移为本集成自管实体
-
-### 🧩 辅助元素功能（方案 Y）
-- 背景：HA 原生辅助元素（`input_*`/`counter`/`binary_sensor`）的配置存于 HA `.storage`，无法像虚拟设备那样由本集成直接管理。现提供「辅助元素」独立功能：A 机扫描原生 helper → 导出 JSON（配置 + 状态）→ B 机导入 → 转换为**本集成自管实体**（RestoreEntity，无需重启，状态自动回填并在重启后保持）。
-- **域映射（前缀变化，后段保留原名）**：
-  | 源 | 目标 | 保留 |
-  |------|------|------|
-  | `input_boolean` | `switch` | icon/name + on/off |
-  | `input_number` | `number` | min/max/step/unit + 当前值 |
-  | `counter` | `number` | min/max/step/initial + 计数 |
-  | `input_select` | `select` | options + 当前选项 |
-  | `input_button` | `button` | 配置（无状态） |
-  | `input_text` | `text` | 文本值 |
-  | `binary_sensor` | `binary_sensor` | on/off |
-- **`helper_entities.py`**（新增模块）：
-  - 7 个目标域实体类 `HelperSwitch/HelperBinarySensor/HelperNumber/HelperSelect/HelperButton/HelperText`（均 RestoreEntity，text 域依赖 HA text 组件）。
-  - `HelperManager`：create/delete/落库(`helper_entities` 表)/启动恢复/导出(配置+状态快照)/导入(skip|overwrite，含冲突保护：其它来源同名真实实体不可覆盖)/延迟状态回填。
-  - `async_scan_native_helpers()`：扫描原生 helper（input_boolean/input_number/counter/input_select/input_button/input_text，可加 binary_sensor），从 attributes 提取 min/max/step/options/icon 等参数。
-- **平台补丁**：`button.py` 补 `async_add_button` 回调；新增 `text.py` 平台文件；`PLATFORMS` 加入 `"text"`。
-- **`http_api.py`**：新增 `HelperScanView`（GET `/api/ha_data_store/helper/scan`）、`HelperExportView`（GET `/helper/export`）、`HelperImportView`（POST `/helper/import`）、`HelperView`（GET/**POST**/DELETE `/helper`，POST 支持前台新建）。
-- **`__init__.py`**：新增 `helper_entities` 建表、启动恢复任务、注册 4 个 View。
-- **`db_viewer.html`**：系统配置页新增「🧩 辅助元素」子页 —— 已导入列表(可删)、扫描并导出(可含 binary_sensor)、导出已导入项、导入文件(可覆盖同名)、**🆕 前台新建辅助元素**（选择类型/填写 ID/名称/图标/初始状态及参数，即时创建，无需重启）；新增 🧩 辅助元素 sub-tab 角标；系统监控页新增 🧩 辅助元素汇总卡片与明细表格。
-- **`README.md`**：API 表补 helper 4 个端点。
-
-### 版本
-| 文件 | 改动 |
-|------|------|
-| `const.py` | VERSION → 3.3.0 |
-| `manifest.json` | 版本 3.3.0 |
-
-## 2026-09-02 — v3.2.0 虚拟设备导出/导入（配置 + 状态），支持跨机迁移重建
-
-### 🔮 虚拟设备跨机迁移：导出 / 导入
-- 背景：A 机器创建虚拟设备后复制数据库到 B 机器，常因 SQLite WAL 未合并、状态不随库迁移等导致 B 上实体缺失或失效。现提供受控的**配置 + 状态**导出导入，不动整库文件。
-- **`virtual_devices.py`**：
-  - `async_export_devices()`：配置从 DB（`virtual_devices` 表，恢复失败也不漏）读取，状态从 HA 状态机（含 climate 附属温度传感器）采集，组装 `{schema_version, devices:[{config, state_snapshot}]}`。
-  - `async_import_devices(payload, mode)`：逐条校验并重建（复用 `create_device`）；`mode=skip` 跳过正在运行的相同实体，`mode=overwrite` 先删旧再建；返回 `{imported, skipped, failed[]}`。
-  - `_apply_snapshot_fields()` + `_MEDIA_ATTR_MAP`：按 13 种设备类型把 `{state, attributes}` 快照回填实体内部 `_attr_*` 字段；状态回填在实体注册完成后异步执行（`_flush_snapshots`），写回后进入 HA restore_state，**目标机后续重启状态仍保持**。
-- **`http_api.py`**：新增 `VirtualDeviceExportView`（GET `/api/ha_data_store/virtual_device/export`）、`VirtualDeviceImportView`（POST `/api/ha_data_store/virtual_device/import`，body `{mode, devices}`，受 db_edit 开关保护）。
-- **`__init__.py`**：注册上述两个 View。
-- **`db_viewer.html`**：🔮 虚拟设备页新增「导出 / 导入」区——导出下载 JSON、导入文件可勾选"覆盖同名"，完成后提示统计并自动刷新列表。
-
-### 版本
-| 文件 | 改动 |
-|------|------|
-| `const.py` | VERSION → 3.2.0 |
-| `manifest.json` | 版本 3.2.0 |
 
 ## 2026-09-02 — v3.1.0 新增系统资源占用传感器 + 系统/HA 基本信息采集
 

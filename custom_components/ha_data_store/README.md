@@ -753,6 +753,8 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
 | `/api/ha_data_store/helper/scan` | GET | 扫描原生 HA helper（可 `?include_binary_sensor=1`）生成可导出 item |
 | `/api/ha_data_store/helper/export` | GET | 导出已导入的辅助元素（配置 + 状态） |
 | `/api/ha_data_store/helper/import` | POST | 导入辅助元素并转为本集成实体（body `{mode: skip\|overwrite, items:[...]}`） |
+| `/api/ha_data_store/power_energy` | GET | 用电量查询：`type=configs` 或 `type=query&kind=daily\|monthly\|yearly\|range\|latest`（支持 entity_id/room/date/month/year/start/end 过滤） |
+| `/api/ha_data_store/power_energy` | POST | 登记/删除功率计量（body `{action: create\|delete, entity_id, ...}`） |
 | `/api/ha_data_store/health_add` | POST | 添加健康记录（body 可选 `remark` 备注 / `description` 说明） |
 | `/api/ha_data_store/health_types` | GET/POST/DELETE | 健康数据类型管理 |
 | `/api/ha_data_store/batch_entity_state` | POST | 批量写入实体状态 |

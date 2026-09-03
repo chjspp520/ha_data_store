@@ -54,6 +54,8 @@ from .const import (
     TABLE_MEDIA_NOW_PLAYING,
     TABLE_AUTOMATIONS,
     TABLE_AUTOMATION_LOGS,
+    TABLE_POWER_METER_CONFIGS,
+    TABLE_POWER_ENERGY_DAILY,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -7933,6 +7935,376 @@ class HelperView(_BaseDBView):
             return self.json({"success": False, "error": "辅助元素未找到"}, status_code=404)
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ===========================================================================
+#  功率→用电计量 API — PowerEnergyView                                        #
+# ===========================================================================
+class PowerEnergyView(_BaseDBView):
+    """功率→用电计量：登记配置管理 + 用电量查询。
+
+    GET  /api/ha_data_store/power_energy
+         ?type=configs                          → 已登记功率配置列表
+         ?type=query&kind=daily&date=YYYY-MM-DD[&entity_id=][&room=]   → 某日各功率电量
+         ?type=query&kind=monthly&month=YYYY-MM[&entity_id=][&room=]   → 某月各日汇总
+         ?type=query&kind=yearly&year=YYYY[&entity_id=][&room=]        → 某年各月汇总
+         ?type=query&kind=range&start=YYYY-MM-DD&end=YYYY-MM-DD[&entity_id=][&room=] → 区间逐日
+         ?type=query&kind=latest[&entity_id=][&room=]                  → 最新一条日记录
+    POST body:
+         { action: "create", entity_id, device_name, room, id_slug, unit }   → 新增登记
+         { action: "delete", entity_id }                                     → 删除登记
+    """
+
+    url = "/api/ha_data_store/power_energy"
+    name = "api:ha_data_store:power_energy"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        db_path = self._db_path
+        q = request.query
+        qtype = (q.get("type") or "configs").strip()
+
+        try:
+            if qtype == "configs":
+                from .power_energy import PowerEnergyManager
+                mgr = PowerEnergyManager(hass, hass.data.get(DOMAIN, {}).get("entry_id", ""))
+                configs = await self._exec_in_executor(hass, mgr.load_configs)
+                return self.json({"success": True, "data": configs})
+
+            if qtype == "query":
+                # 兜底建表（防止数据库尚未初始化时查询报 no such table）
+                from .power_energy import ensure_tables
+                await self._exec_in_executor(hass, ensure_tables, db_path)
+
+                kind = (q.get("kind") or "daily").strip()
+                entity_id = (q.get("entity_id") or "").strip()
+                room = (q.get("room") or "").strip()
+                filters = "1=1"
+                args = []
+                if entity_id:
+                    filters += " AND entity_id = ?"
+                    args.append(entity_id)
+                if room:
+                    filters += " AND room = ?"
+                    args.append(room)
+
+                from .power_energy import PowerEnergyManager
+                mgr = PowerEnergyManager(hass, hass.data.get(DOMAIN, {}).get("entry_id", ""))
+
+                if kind == "daily":
+                    date = (q.get("date") or "").strip()
+                    if not date:
+                        return self.json({"success": False, "error": "缺少 date (YYYY-MM-DD)"}, status_code=400)
+                    data = await self._exec_in_executor(
+                        hass, self._query_rows, db_path, date, filters, args)
+                    return self.json({"success": True, "kind": "daily", "data": data})
+
+                if kind == "monthly":
+                    month = (q.get("month") or "").strip()
+                    if not month:
+                        return self.json({"success": False, "error": "缺少 month (YYYY-MM)"}, status_code=400)
+                    prefix = month + "-"
+                    data = await self._exec_in_executor(
+                        hass, self._query_rows_like, db_path, prefix, filters, args)
+                    return self.json({"success": True, "kind": "monthly", "month": month, "data": data})
+
+                if kind == "yearly":
+                    year = (q.get("year") or "").strip()
+                    if not year:
+                        return self.json({"success": False, "error": "缺少 year (YYYY)"}, status_code=400)
+                    prefix = year + "-"
+                    data = await self._exec_in_executor(
+                        hass, self._query_rows_like, db_path, prefix, filters, args)
+                    return self.json({"success": True, "kind": "yearly", "year": year, "data": data})
+
+                if kind == "range":
+                    start = (q.get("start") or "").strip()
+                    end = (q.get("end") or "").strip()
+                    if not start or not end:
+                        return self.json({"success": False, "error": "缺少 start/end (YYYY-MM-DD)"}, status_code=400)
+                    data = await self._exec_in_executor(
+                        hass, self._query_rows_range, db_path, start, end, filters, args)
+                    return self.json({"success": True, "kind": "range", "data": data})
+
+                if kind == "latest":
+                    data = await self._exec_in_executor(
+                        hass, self._query_latest, db_path, filters, args)
+                    return self.json({"success": True, "kind": "latest", "data": data})
+
+                return self.json({"success": False, "error": f"未知 kind: {kind}"}, status_code=400)
+
+            return self.json({"success": False, "error": f"未知 type: {qtype}"}, status_code=400)
+        except Exception as exc:
+            _LOGGER.exception("[power] 查询用电量失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return self.json({"success": False, "error": "body 必须为 JSON 对象"}, status_code=400)
+
+        action = (body.get("action") or "").strip()
+        from .power_energy import PowerEnergyManager
+        # 必须使用全局 manager 实例：登记后需同步进全局 _meters，
+        # 否则 tick 采样与 all_power 统计看不到新登记
+        mgr = hass.data.get(DOMAIN, {}).get("power_energy_manager")
+        if mgr is None:
+            mgr = PowerEnergyManager(hass, hass.data.get(DOMAIN, {}).get("entry_id", ""))
+            hass.data.setdefault(DOMAIN, {})["power_energy_manager"] = mgr
+
+        if action == "create":
+            entity_id = (body.get("entity_id") or "").strip()
+            id_slug = (body.get("id_slug") or "").strip()
+            if not entity_id:
+                return self.json({"success": False, "error": "缺少 entity_id（功率实体）"}, status_code=400)
+            if not id_slug:
+                return self.json({"success": False, "error": "缺少 id_slug（英文 ID 段）"}, status_code=400)
+            cfg = {
+                "entity_id": entity_id,
+                "device_name": (body.get("device_name") or "").strip(),
+                "room": (body.get("room") or "").strip(),
+                "id_slug": id_slug,
+                "unit": (body.get("unit") or "W").strip() or "W",
+                "enabled": True,
+            }
+            # 若功率实体已登记过，先删除旧配置与旧实体（含日表），再重新登记
+            existing = await self._exec_in_executor(hass, mgr.load_configs)
+            exists = any((c.get("entity_id") == entity_id) for c in existing)
+            if exists:
+                mgr.unregister_entities({"entity_id": entity_id})
+                await self._exec_in_executor(hass, mgr.remove_config, entity_id)
+
+            await self._exec_in_executor(hass, mgr.save_config, cfg)
+            # 注意 register_entities 涉及平台 add_cb，必须在事件循环中调用
+            mgr.register_entities(cfg)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[power] 登记功率计量 entity_id=%s slug=%s", entity_id, id_slug)
+            return self.json({"success": True, "message": f"已登记功率计量 {entity_id}",
+                              "data": {"entity_id": entity_id, "id_slug": id_slug}})
+
+        if action == "delete":
+            entity_id = (body.get("entity_id") or "").strip()
+            if not entity_id:
+                return self.json({"success": False, "error": "缺少 entity_id"}, status_code=400)
+            mgr.unregister_entities({"entity_id": entity_id})
+            await self._exec_in_executor(hass, mgr.remove_config, entity_id)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[power] 删除功率计量 entity_id=%s", entity_id)
+            return self.json({"success": True, "message": f"已删除功率计量 {entity_id}"})
+
+        return self.json({"success": False, "error": f"未知 action: {action}"}, status_code=400)
+
+    # ---------- 查询辅助（executor 内执行） ---------- #
+    @staticmethod
+    def _query_rows(db_path: str, date: str, filters: str, args: list) -> list:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"SELECT entity_id, device_name, room, date, kwh, updated_at "
+                f"FROM {TABLE_POWER_ENERGY_DAILY} WHERE {filters} AND date = ? ORDER BY kwh DESC",
+                (*args, date),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _query_rows_like(db_path: str, prefix: str, filters: str, args: list) -> list:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"SELECT entity_id, device_name, room, date, kwh, updated_at "
+                f"FROM {TABLE_POWER_ENERGY_DAILY} WHERE {filters} AND date LIKE ? ORDER BY date",
+                (*args, prefix + "%"),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _query_rows_range(db_path: str, start: str, end: str, filters: str, args: list) -> list:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"SELECT entity_id, device_name, room, date, kwh, updated_at "
+                f"FROM {TABLE_POWER_ENERGY_DAILY} WHERE {filters} AND date >= ? AND date <= ? ORDER BY date",
+                (*args, start, end),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _query_latest(db_path: str, filters: str, args: list) -> dict | None:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                f"SELECT entity_id, device_name, room, date, kwh, updated_at "
+                f"FROM {TABLE_POWER_ENERGY_DAILY} WHERE {filters} "
+                f"ORDER BY date DESC, id DESC LIMIT 1",
+                args,
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+# ===========================================================================
+#  设备清理 API — DeviceCleanView（清理本集成下无实体的空设备）                #
+# ===========================================================================
+class DeviceCleanView(_BaseDBView):
+    """清理本集成下没有任何实体的「空设备」。
+
+    GET  /api/ha_data_store/devices/cleanup        → 预览（dry-run）空设备列表
+    POST /api/ha_data_store/devices/cleanup { confirm: true }
+                                                  → 真删并返回被删列表
+    """
+
+    url = "/api/ha_data_store/devices/cleanup"
+    name = "api:ha_data_store:devices_cleanup"
+
+    def _list_empty_devices(self, hass: HomeAssistant) -> list[dict]:
+        """仅筛选本集成创建的空设备。
+
+        判定规则：
+          1. device.identifiers 至少有一个以本集成 domain 开头；
+          2. 排除 entry 主设备（identifier == (DOMAIN, entry_id) 的设备）；
+          3. 通过 entity_registry 统计挂在该 device_id 上的实体数 == 0 才算"空"。
+        """
+        from homeassistant.helpers import device_registry as dr
+        from homeassistant.helpers import entity_registry as er
+        drg = dr.async_get(hass)
+        erg = er.async_get(hass)
+
+        # 统计每个 device_id 关联的实体数（entity.device_id 是 entity_id 所属 device）
+        device_entity_count: dict[str, int] = {}
+        for ent in erg.entities.values():
+            did = getattr(ent, "device_id", None)
+            if did:
+                device_entity_count[did] = device_entity_count.get(did, 0) + 1
+
+        # 排除 entry 主设备（identifier == (DOMAIN, entry_id)）
+        entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+
+        result = []
+        for device in list(drg.devices.values()):
+            ids = set(device.identifiers or set())
+            if not any(ident and ident[0] == DOMAIN for ident in ids):
+                continue
+            # 排除 entry 主设备
+            if (DOMAIN, entry_id) in ids:
+                continue
+            # 实体计数（entity_registry 按 device_id 关联）
+            cnt = device_entity_count.get(device.id, 0)
+            if cnt > 0:
+                continue
+            result.append({
+                "id": device.id,
+                "name": device.name or device.name_by_user or "(未命名)",
+                "identifiers": [list(i) for i in ids],
+                "disabled": bool(getattr(device, "disabled_by", None)),
+            })
+        return result
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        try:
+            empty = self._list_empty_devices(hass)
+            return self.json({"success": True, "data": empty, "count": len(empty)})
+        except Exception as exc:
+            _LOGGER.exception("[devices] 列出空设备失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        confirm = bool(body.get("confirm"))
+        if not confirm:
+            return self.json({"success": False, "error": "缺少 confirm=true，未执行清理"}, status_code=400)
+
+        # 先做预览（同一函数）
+        empty = self._list_empty_devices(hass)
+        removed: list[dict] = []
+        failed: list[dict] = []
+        if empty:
+            from homeassistant.helpers import device_registry as dr
+            registry = dr.async_get(hass)
+            entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
+            for d in empty:
+                try:
+                    # 先解除设备与本集成 config entry 的关联，否则 async_remove 会被拒。
+                    # 注意：解除关联后，若设备无任何实体/其它 config entry，
+                    # HA 会自动把它从 device registry 移除；此时 async_remove 会抛
+                    # “设备不存在”，但实际清理已成功 —— 因此以“最终不在 registry”为准。
+                    if d["id"] not in registry.devices:
+                        removed.append(d)   # 已被自动移除，视为成功
+                        continue
+                    if entry_id:
+                        try:
+                            registry.async_update_device(
+                                device_id=d["id"],
+                                remove_config_entry_id=entry_id,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        registry.async_remove(d["id"])
+                    except Exception:
+                        pass
+                    # 以最终状态判定成功/失败
+                    if d["id"] in registry.devices:
+                        failed.append(d)
+                    else:
+                        removed.append(d)
+                except Exception:
+                    _LOGGER.warning("[devices] 删除设备失败 %s", d.get("id"), exc_info=True)
+                    failed.append(d)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[devices] 清理空设备: 成功 %d, 失败 %d", len(removed), len(failed))
+        return self.json({
+            "success": True,
+            "count": len(empty),
+            "removed": removed,
+            "failed": failed,
+            "message": f"已清理 {len(removed)} 个空设备" + (f"，失败 {len(failed)}" if failed else "")
+                       + ("" if empty else "，无空设备需要清理"),
+        })
 
 
 # ===========================================================================

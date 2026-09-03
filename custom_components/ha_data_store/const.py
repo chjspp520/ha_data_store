@@ -31,6 +31,8 @@ TABLE_MEDIA_QUEUE = "media_queue"
 TABLE_MEDIA_NOW_PLAYING = "media_now_playing"
 TABLE_AUTOMATIONS = "automations"
 TABLE_AUTOMATION_LOGS = "automation_logs"
+TABLE_POWER_METER_CONFIGS = "power_meter_configs"
+TABLE_POWER_ENERGY_DAILY = "power_energy_daily"
 
 # 传感器类：每种指标独立建表，表名前缀
 ENV_TABLE_PREFIX = "env_"
@@ -105,4 +107,4 @@ AUTOMATION_LOG_RETENTION_DAYS = 30  # 执行记录保留天数（自动清理）
 AUTOMATION_LOG_CLEANUP_EVERY = 60   # 每 N 次 tick 清理一次过期执行记录
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "3.3.1"
+VERSION = "3.4.0"

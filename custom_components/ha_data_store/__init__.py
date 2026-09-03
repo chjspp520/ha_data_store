@@ -53,6 +53,8 @@ from .const import (
     TABLE_MEDIA_NOW_PLAYING,
     TABLE_AUTOMATIONS,
     TABLE_AUTOMATION_LOGS,
+    TABLE_POWER_METER_CONFIGS,
+    TABLE_POWER_ENERGY_DAILY,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -1007,6 +1009,37 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 icon              TEXT NOT NULL DEFAULT '',
                 extra_config      TEXT NOT NULL DEFAULT '{{}}',
                 created_at        TEXT NOT NULL DEFAULT ''
+            )
+            """,
+        )
+        # 15) 功率→用电计量：登记表（用户前台登记功率实体）
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_POWER_METER_CONFIGS} (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id         TEXT NOT NULL UNIQUE,
+                device_name       TEXT NOT NULL DEFAULT '',
+                room              TEXT NOT NULL DEFAULT '',
+                id_slug           TEXT NOT NULL DEFAULT '',
+                unit              TEXT NOT NULL DEFAULT 'W',
+                enabled           INTEGER NOT NULL DEFAULT 1,
+                created_at        TEXT NOT NULL DEFAULT '',
+                updated_at        TEXT NOT NULL DEFAULT ''
+            )
+            """,
+        )
+        # 16) 功率→用电计量：每日用电量表（每实体每天一行）
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_POWER_ENERGY_DAILY} (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id         TEXT NOT NULL,
+                device_name       TEXT NOT NULL DEFAULT '',
+                room              TEXT NOT NULL DEFAULT '',
+                date              TEXT NOT NULL,
+                kwh               REAL NOT NULL DEFAULT 0,
+                updated_at        TEXT NOT NULL DEFAULT '',
+                UNIQUE(entity_id, date)
             )
             """,
         )
@@ -4094,6 +4127,8 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         HelperExportView,
         HelperImportView,
         HelperView,
+        PowerEnergyView,
+        DeviceCleanView,
         HealthAddView,
         HealthTypesView,
         HealthDeleteView,
@@ -4157,6 +4192,8 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(HelperExportView(db_path))
     hass.http.register_view(HelperImportView(db_path))
     hass.http.register_view(HelperView(db_path))
+    hass.http.register_view(PowerEnergyView(db_path))
+    hass.http.register_view(DeviceCleanView(db_path))
     hass.http.register_view(HealthAddView(db_path))
     hass.http.register_view(HealthTypesView(db_path))
     hass.http.register_view(HealthDeleteView(db_path))
@@ -4696,6 +4733,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("[helper] 已恢复 %d 个辅助元素", len(saved))
     hass.async_create_background_task(_restore_helper_entities(), "restore_helper_entities")
 
+    # 启动功率→用电计量（后台：恢复登记实体 + 30s 采样积分）
+    from .power_energy import PowerEnergyManager
+    power_manager = PowerEnergyManager(hass, entry.entry_id)
+    hass.data[DOMAIN]["power_energy_manager"] = power_manager
+
+    async def _start_power_energy():
+        await asyncio.sleep(2)  # 等平台全部就绪
+        try:
+            await power_manager.async_start()
+        except Exception:
+            _LOGGER.exception("[power] 用电计量启动失败")
+    hass.async_create_background_task(_start_power_energy(), "start_power_energy")
+
     # 启动设备桥接（延迟后台，不阻塞 HA 启动）
     from .bridge import BridgeManager
     bridge_manager = BridgeManager(hass, db_path, entry.entry_id)
@@ -4725,6 +4775,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_manager = hass.data.get(DOMAIN, {}).get("automation_manager")
     if automation_manager:
         automation_manager.stop()
+
+    # 停止功率→用电计量（落盘后取消采样）
+    power_manager = hass.data.get(DOMAIN, {}).get("power_energy_manager")
+    if power_manager:
+        try:
+            await power_manager.async_stop()
+        except Exception:
+            _LOGGER.exception("[power] 用电计量停止异常")
 
     for key in ("cancel_bus_listener", "cancel_env_poll", "cancel_attr_poll", "cancel_file_src", "cancel_api_src", "cancel_midnight_split", "cancel_correction_scan", "cancel_daily_summary"):
         cancel = hass.data.get(DOMAIN, {}).get(key)

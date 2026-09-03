@@ -368,6 +368,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('bridge')">🌉 设备桥接<span class="sub-tab-badge" id="badge-bridge"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('virtual')">🔮 虚拟设备<span class="sub-tab-badge" id="badge-virtual"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('helper')">🧩 辅助元素<span class="sub-tab-badge" id="badge-helper"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('power')">⚡ 用电计量<span class="sub-tab-badge" id="badge-power"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('devclean')">🧹 设备清理<span class="sub-tab-badge" id="badge-devclean"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('media')">🎵 媒体播放列表<span class="sub-tab-badge" id="badge-media"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('xiaoai')">💬 小爱对话<span class="sub-tab-badge" id="badge-xiaoai"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('printer')">🖨️ 打印机配置<span class="sub-tab-badge" id="badge-printer"></span></button>
@@ -926,6 +928,78 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 用电计量 -->
+  <div id="sub-power" class="sub-panel">
+    <div class="section">
+      <h3>⚡ 登记功率实体</h3>
+      <div class="hint">登记一个持续上报功率的实体（state 数值为当前功率）。系统每 30 秒采样积分，自动生成三个累计实体（kWh）：<code>sensor.ha_data_store_{id}_daily_ele</code>、<code>..._monthly_ele</code>、<code>..._yearly_ele</code>，并按天存储到数据库。</div>
+      <div class="form-grid">
+        <div>
+          <label>功率实体 ID</label>
+          <input type="text" id="pmEntityId" placeholder="sensor.xxx_power" style="width:100%">
+        </div>
+        <div>
+          <label>设备名称</label>
+          <input type="text" id="pmDeviceName" placeholder="如：空调" style="width:100%">
+        </div>
+        <div>
+          <label>房间</label>
+          <input type="text" id="pmRoom" placeholder="如：客厅" style="width:100%">
+        </div>
+        <div>
+          <label>ID 段（英文小写，用于实体名）</label>
+          <input type="text" id="pmIdSlug" placeholder="ke_ting_ac" style="width:100%">
+        </div>
+        <div>
+          <label>单位</label>
+          <select id="pmUnit" style="width:100%">
+            <option value="W">W</option>
+            <option value="kW">kW</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end">
+          <button class="btn-green" onclick="createPowerMeter()">✨ 登记并生成实体</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>📋 已登记的功率计量</h3>
+      <div id="powerMeterList"><div class="hint">加载中...</div></div>
+    </div>
+
+    <div class="section">
+      <h3>🔍 用电量查询</h3>
+      <div class="form-grid" style="grid-template-columns:auto auto 1fr auto;align-items:end">
+        <div><label>类型</label><select id="pmQKind" style="width:110px" onchange="onPmQKindChange()">
+          <option value="latest">最新</option>
+          <option value="daily">某日</option>
+          <option value="monthly">某月</option>
+          <option value="yearly">某年</option>
+          <option value="range">日期段</option>
+        </select></div>
+        <div><label id="pmQDateLabel">日期</label><input type="text" id="pmQDate" placeholder="YYYY-MM-DD" style="width:170px"></div>
+        <div><label>房间（可空）</label><input type="text" id="pmQRoom" placeholder="全部" style="width:120px"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" onclick="queryPowerEnergy()">🔍 查询</button></div>
+      </div>
+      <div id="pmQueryResult" class="hint" style="margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- 子面板: 设备清理 -->
+  <div id="sub-devclean" class="sub-panel">
+    <div class="section">
+      <h3>🧹 设备清理</h3>
+      <div class="hint">扫描并清理本集成下"没有任何实体"的空设备（仅清理 identifiers 包含本集成 domain 且非主设备的空设备，安全）。</div>
+      <div class="form-actions" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn" onclick="scanEmptyDevices()">🔍 扫描空设备</button>
+        <button class="btn-del" onclick="cleanupEmptyDevices()">🧹 清理空设备</button>
+        <span class="hint" id="emptyDeviceResult"></span>
+      </div>
+      <div id="emptyDeviceList" class="hint" style="margin-top:8px"></div>
+    </div>
+  </div>
+
   <!-- 子面板: 媒体播放列表 -->
   <div id="sub-media" class="sub-panel">
     <div class="section">
@@ -1182,6 +1256,14 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="user_actions_entity_summary">🏆 实体操作次数排行</option>
           <option value="user_actions_user_summary">👤 按用户汇总</option>
           <option value="user_actions_entity_last_today">⚡ 实体当日最后一条记录</option>
+        </optgroup>
+        <optgroup label="⚡ 用电计量">
+          <option value="power_configs">登记列表</option>
+          <option value="power_latest">最新日记录</option>
+          <option value="power_daily">某日用电量</option>
+          <option value="power_monthly">某月用电量</option>
+          <option value="power_yearly">某年用电量</option>
+          <option value="power_range">日期段用电量</option>
         </optgroup>
         <optgroup label="🤖 自动化">
           <option value="auto_list">自动化列表</option>
@@ -1818,7 +1900,8 @@ function isUserTable(name) {
       || name === 'media_playlists' || name === 'media_songs' || name === 'media_queue' || name === 'media_now_playing'
       || name === 'xiaoai_conversations'
       || name === 'printer_daily'
-      || name === 'report_entities' || name === 'user_actions' || name === 'automation_logs';
+      || name === 'report_entities' || name === 'user_actions' || name === 'automation_logs'
+      || name === 'power_energy_daily';
 }
 
 function populateTableSelect() {
@@ -3036,6 +3119,7 @@ async function loadMonitor() {
       '<div class="summary-card c-online" id="bridgeCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🌉 桥接设备</div></div>' +
       '<div class="summary-card c-online" id="virtualCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🔮 虚拟设备</div></div>' +
       '<div class="summary-card c-online" id="helperCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🧩 辅助元素</div></div>' +
+      '<div class="summary-card c-online" id="powerCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">⚡ 用电计量</div></div>' +
       '<div class="summary-card c-online" id="xiaoaiCard"><div class="health-dot ' + (healthCls[(types.xiaoai||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.xiaoai||{}).count||0) + '</div><div class="lbl">💬 小爱对话</div></div>' +
       '<div class="summary-card c-online" id="printerCard"><div class="health-dot ' + (healthCls[(types.printer||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.printer||{}).count||0) + '</div><div class="lbl">🖨️ 打印机</div></div>';
 
@@ -3195,6 +3279,10 @@ async function loadMonitor() {
     html += '<h4 class="section-head title-good">🧩 辅助元素 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="helperStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="helperTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
+    // -- 用电计量 --
+    html += '<h4 class="section-head title-good">⚡ 用电计量 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="powerStat">加载中...</span></h4>';
+    html += '<div class="section-content collapsed"><div id="powerTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
+
     // -- 打印机监控 --
     let printerList = d.printer || [];
     let printerH = (types.printer||{}).health||'good';
@@ -3235,10 +3323,11 @@ async function loadMonitor() {
       });
     });
 
-    // 异步加载桥接/虚拟设备/辅助元素数据
+    // 异步加载桥接/虚拟设备/辅助元素/用电计量数据
     loadMonitorBridge();
     loadMonitorVirtual();
     loadMonitorHelper();
+    loadMonitorPower();
   } catch(e) {
     content.innerHTML = '<div class="empty">请求失败: ' + e + '</div>';
     document.getElementById('pagination').style.display = 'none';
@@ -3340,6 +3429,82 @@ async function loadMonitorHelper() {
     html += '</tbody></table></div>';
     tbl.innerHTML = html;
   } catch(e) { /* silent */ }
+}
+
+async function loadMonitorPower() {
+  try {
+    var resp = await fetch(POWER_API + '?type=configs');
+    var json = await resp.json();
+    var meters = json.data || [];
+
+    var card = document.getElementById('powerCard');
+    if (card) card.querySelector('.num').textContent = meters.length;
+
+    var stat = document.getElementById('powerStat');
+    if (stat) stat.textContent = meters.length + ' 个功率计量';
+
+    setSubTabBadge('power', meters.length);
+
+    var tbl = document.getElementById('powerTbl');
+    if (!tbl) return;
+    if (!meters.length) { tbl.innerHTML = '<div class="empty">暂无功率计量</div>'; return; }
+
+    var html = '<div class="table-wrap"><table><thead><tr><th>功率实体</th><th>设备名称</th><th>房间</th><th>ID段</th><th>单位</th></tr></thead><tbody>';
+    meters.forEach(function(d) {
+      html += '<tr><td>' + escHtml(d.entity_id) + '</td><td>' + escHtml(d.device_name || '') + '</td>' +
+        '<td>' + escHtml(d.room || '') + '</td><td>' + escHtml(d.id_slug || '') + '</td>' +
+        '<td>' + escHtml(d.unit || 'W') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    tbl.innerHTML = html;
+  } catch(e) { /* silent */ }
+}
+
+async function scanEmptyDevices() {
+  var out = document.getElementById('emptyDeviceList');
+  out.textContent = '扫描中...';
+  try {
+    var resp = await fetch('/api/ha_data_store/devices/cleanup');
+    var json = await resp.json();
+    if (!json.success) { out.textContent = ''; showToast('扫描失败: ' + (json.error || '未知错误'), false); return; }
+    var arr = json.data || [];
+    if (!arr.length) { out.textContent = '✓ 没有空设备，无需清理'; return; }
+    var html = '<div class="hint" style="margin-bottom:6px">发现 <b style="color:var(--accent)">' + arr.length + '</b> 个空设备：</div>' +
+      '<div class="table-wrap"><table><thead><tr><th>设备名</th><th>标识符</th><th>已禁用</th></tr></thead><tbody>';
+    arr.forEach(function(d) {
+      var idents = (d.identifiers || []).map(function(i) { return i.join(':') }).join(', ');
+      html += '<tr><td>' + escHtml(d.name) + '</td>' +
+        '<td style="font-size:12px;color:var(--text2)">' + escHtml(idents) + '</td>' +
+        '<td>' + (d.disabled ? '是' : '否') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    out.innerHTML = html;
+  } catch(e) { out.textContent = ''; showToast('请求失败', false); }
+}
+
+async function cleanupEmptyDevices() {
+  var out = document.getElementById('emptyDeviceResult');
+  // 先扫描（GET）获取当前空设备列表用于确认
+  try {
+    var resp = await fetch('/api/ha_data_store/devices/cleanup');
+    var json = await resp.json();
+    if (!json.success || !json.data || !json.data.length) {
+      showToast('没有空设备，无需清理', true);
+      return;
+    }
+    if (!confirm('确认清理 ' + json.data.length + ' 个空设备？\n（仅清理本集成下无实体的设备）')) return;
+    var r2 = await fetch('/api/ha_data_store/devices/cleanup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    var j2 = await r2.json();
+    if (j2.success) {
+      showToast('✅ ' + (j2.message || ('已清理 ' + j2.count + ' 个')), true);
+      scanEmptyDevices();
+    } else {
+      showToast('清理失败: ' + (j2.error || '未知错误'), false);
+    }
+  } catch(e) { showToast('请求失败', false); }
 }
 
 function buildEntityTable(ents) {
@@ -3483,7 +3648,13 @@ async function loadEntities(cat) {
       return;
     }
 
-    let html = '<div class="table-wrap"><table><thead><tr>';
+    const catArg = cat || 'device';
+    let html = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+      '<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="checkbox" class="tab-all" onchange="toggleTabAll(this,\'list-' + catArg + '\')"> 全选</label>' +
+      '<button class="btn-del" onclick="batchDelEntities(\'' + catArg + '\')">🗑 删除选中</button>' +
+      '<span class="hint" id="batchCnt-list-' + catArg + '">共 ' + ents.length + ' 条</span></div>';
+    html += '<div class="table-wrap"><table id="list-' + catArg + '"><thead><tr>';
+    html += '<th style="width:30px"><input type="checkbox" onclick="toggleTabAll(this,\'list-' + catArg + '\')"></th>';
     ['实体ID', '名称', '类别', '指标', '房间', '状态', '启用', '频率(分钟)', '上次更新', '操作'].forEach(h => {
       html += '<th>' + h + '</th>';
     });
@@ -3493,6 +3664,7 @@ async function loadEntities(cat) {
       const catLabel = e.category === 'device' ? '设备' : (e.category === 'attribute' ? '属性' : '环境');
       const metric = e.metric_type || (e.power_entity || '-');
       html += '<tr>';
+      html += '<td><input type="checkbox" class="row-check" value="' + escAttr(e.entity_id) + '" onchange="updateBatchCnt(\'list-' + catArg + '\')"></td>';
       html += '<td>' + escHtml(e.entity_id) + '</td>';
       html += '<td>' + escHtml(e.device_name || e.friendly_name || '-') + '</td>';
       html += '<td>' + escHtml(catLabel) + '</td>';
@@ -3502,7 +3674,7 @@ async function loadEntities(cat) {
       html += '<td style="color:' + (e.enabled ? 'var(--green)' : 'var(--accent)') + '">' + (e.enabled ? '是' : '否') + '</td>';
       html += '<td>' + (e.category === 'device' ? '<span style="color:var(--green)">实时</span>' : (e.collect_interval || 30) + '分钟') + '</td>';
       html += '<td style="font-size:12px;color:var(--text2)">' + fmtTime(e.last_data_time) + '</td>';
-      html += '<td><button class="btn-del" onclick="delEntity(\'' + escAttr(e.entity_id) + '\',\'' + escAttr(cat || 'device') + '\')">删除</button></td>';
+      html += '<td><button class="btn-del" onclick="delEntity(\'' + escAttr(e.entity_id) + '\',\'' + escAttr(catArg) + '\')">删除</button></td>';
       html += '</tr>';
     });
 
@@ -3515,6 +3687,46 @@ async function loadEntities(cat) {
 
 function toggleAll(cb) {
   document.querySelectorAll('.ent-check').forEach(c => c.checked = cb.checked);
+}
+
+// 表内全选（作用于指定表格的所有行选框）
+function toggleTabAll(cb, tableId) {
+  const tbl = tableId ? document.getElementById(tableId) : null;
+  const rows = tbl ? tbl.querySelectorAll('.row-check') : document.querySelectorAll('.row-check');
+  rows.forEach(c => c.checked = cb.checked);
+  updateBatchCnt(tableId);
+}
+
+function getSelectedEntities(tableId) {
+  const out = [];
+  const tbl = tableId ? document.getElementById(tableId) : null;
+  const boxes = tbl ? tbl.querySelectorAll('.row-check') : document.querySelectorAll('.row-check');
+  boxes.forEach(c => { if (c.checked && c.value) out.push(c.value); });
+  return out;
+}
+
+function updateBatchCnt(tableId) {
+  if (tableId) {
+    const n = getSelectedEntities(tableId).length;
+    const span = document.getElementById('batchCnt-' + tableId);
+    if (span) span.textContent = '已选 ' + n + ' 条';
+  }
+}
+
+async function batchDelEntities(cat) {
+  const ids = getSelectedEntities('list-' + cat);
+  if (!ids.length) { showToast('请先勾选要删除的实体', false); return; }
+  if (!confirm('确定删除选中的 ' + ids.length + ' 个' + (cat === 'device' ? '设备' : '传感器') + '实体？')) return;
+  let ok = 0, fail = 0;
+  for (const eid of ids) {
+    try {
+      const resp = await fetch(CONFIG_API + '?entity_id=' + encodeURIComponent(eid), { method: 'DELETE' });
+      const json = await resp.json();
+      if (json.success) ok++; else fail++;
+    } catch(e) { fail++; }
+  }
+  showToast('批量删除完成：成功 ' + ok + '，失败 ' + fail, fail === 0);
+  loadEntities(cat);
 }
 
 async function delEntity(entityId, cat) {
@@ -4477,6 +4689,7 @@ switchSubTab = function(name) {
   if (name === 'bridge') loadBridgeData();
   if (name === 'virtual') loadVirtualDevices();
   if (name === 'helper') loadHelpers();
+  if (name === 'power') loadPowerMeters();
 };
 
 // ==============================
@@ -5409,11 +5622,16 @@ async function loadHelpers() {
       return;
     }
     var html = '<h4>已导入的辅助元素 (' + items.length + '个)</h4>' +
-      '<div class="table-wrap"><table><thead><tr>' +
-      '<th>实体 ID</th><th>源类型</th><th>源实体</th><th>名称</th><th style="width:60px">操作</th>' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+      '<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="checkbox" class="tab-all" onchange="toggleTabAll(this,\'helperTable\')"> 全选</label>' +
+      '<button class="btn-del" onclick="batchDelHelpers()">🗑 删除选中</button>' +
+      '<span class="hint" id="batchCnt-helperTable">共 ' + items.length + ' 条</span></div>' +
+      '<div class="table-wrap"><table id="helperTable"><thead><tr>' +
+      '<th style="width:30px"></th><th>实体 ID</th><th>源类型</th><th>源实体</th><th>名称</th><th style="width:60px">操作</th>' +
       '</tr></thead><tbody>';
     items.forEach(function(d) {
       html += '<tr>' +
+        '<td><input type="checkbox" class="row-check" value="' + escAttr(d.entity_id) + '" onchange="updateBatchCnt(\'helperTable\')"></td>' +
         '<td>' + escHtml(d.entity_id) + '</td>' +
         '<td>' + escHtml(d.source_type) + '</td>' +
         '<td>' + escHtml(d.source_entity_id) + '</td>' +
@@ -5436,6 +5654,22 @@ async function delHelper(entityId) {
     showToast(json.success ? (json.message || '已删除') : ('删除失败: ' + json.error), json.success);
     if (json.success) loadHelpers();
   } catch(e) { showToast('请求失败', false); }
+}
+
+async function batchDelHelpers() {
+  const ids = getSelectedEntities('helperTable');
+  if (!ids.length) { showToast('请先勾选要删除的辅助元素', false); return; }
+  if (!confirm('确定删除选中的 ' + ids.length + ' 个辅助元素？')) return;
+  let ok = 0, fail = 0;
+  for (const eid of ids) {
+    try {
+      const resp = await fetch(HELPER_API + '?entity_id=' + encodeURIComponent(eid), { method: 'DELETE' });
+      const json = await resp.json();
+      if (json.success) ok++; else fail++;
+    } catch(e) { fail++; }
+  }
+  showToast('批量删除完成：成功 ' + ok + '，失败 ' + fail, fail === 0);
+  loadHelpers();
 }
 
 function downloadHelperJson(payload, prefix) {
@@ -5537,6 +5771,174 @@ async function importHelpers(input) {
     if (resultSpan) resultSpan.textContent = '';
     showToast('导入请求失败', false);
   }
+}
+
+// ==============================
+//  用电计量管理
+// ==============================
+const POWER_API = '/api/ha_data_store/power_energy';
+
+async function loadPowerMeters() {
+  var div = document.getElementById('powerMeterList');
+  try {
+    var resp = await fetch(POWER_API + '?type=configs');
+    var json = await resp.json();
+    var items = json.data || [];
+    setSubTabBadge('power', items.length);
+    if (!items.length) {
+      div.innerHTML = '<div class="hint">暂无登记，请在上方添加功率实体。</div>';
+      return;
+    }
+    var html = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+      '<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="checkbox" class="tab-all" onchange="toggleTabAll(this,\'powerMeterTable\')"> 全选</label>' +
+      '<button class="btn-del" onclick="batchDeletePowerMeters()">🗑 删除选中</button>' +
+      '<span class="hint" id="batchCnt-powerMeterTable">共 ' + items.length + ' 条</span></div>' +
+      '<div class="table-wrap"><table id="powerMeterTable"><thead><tr>' +
+      '<th style="width:30px"></th><th>功率实体</th><th>设备名称</th><th>房间</th><th>ID 段</th><th>单位</th>' +
+      '<th>生成实体</th><th style="width:60px">操作</th></tr></thead><tbody>';
+    items.forEach(function(d) {
+      var s = d.id_slug || '';
+      html += '<tr>' +
+        '<td><input type="checkbox" class="row-check" value="' + escAttr(d.entity_id) + '" onchange="updateBatchCnt(\'powerMeterTable\')"></td>' +
+        '<td>' + escHtml(d.entity_id) + '</td>' +
+        '<td>' + escHtml(d.device_name || '') + '</td>' +
+        '<td>' + escHtml(d.room || '') + '</td>' +
+        '<td>' + escHtml(s) + '</td>' +
+        '<td>' + escHtml(d.unit || 'W') + '</td>' +
+        '<td style="font-size:11px;color:var(--text2)">' + escHtml('sensor.ha_data_store_' + s + '_daily_ele') + '</td>' +
+        '<td><button class="btn-del" onclick="deletePowerMeter(&quot;' + d.entity_id + '&quot;)">删除</button></td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    div.innerHTML = html;
+  } catch(e) {
+    div.innerHTML = '<div class="hint" style="color:var(--accent)">加载失败</div>';
+  }
+}
+
+async function createPowerMeter() {
+  var entityId = (document.getElementById('pmEntityId').value || '').trim();
+  var idSlug = (document.getElementById('pmIdSlug').value || '').trim();
+  if (!entityId) { showToast('请填写功率实体 ID', false); return; }
+  if (!idSlug) { showToast('请填写 ID 段（英文小写）', false); return; }
+  if (!/^[a-z0-9_]+$/.test(idSlug)) { showToast('ID 段只能含小写字母/数字/下划线', false); return; }
+  var body = {
+    action: 'create',
+    entity_id: entityId,
+    device_name: (document.getElementById('pmDeviceName').value || '').trim(),
+    room: (document.getElementById('pmRoom').value || '').trim(),
+    id_slug: idSlug,
+    unit: document.getElementById('pmUnit').value,
+  };
+  try {
+    var resp = await fetch(POWER_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    var json = await resp.json();
+    if (json.success) {
+      showToast('✅ ' + (json.message || '已登记'), true);
+      document.getElementById('pmEntityId').value = '';
+      document.getElementById('pmDeviceName').value = '';
+      document.getElementById('pmRoom').value = '';
+      document.getElementById('pmIdSlug').value = '';
+      loadPowerMeters();
+    } else {
+      showToast('登记失败: ' + (json.error || '未知错误'), false);
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function deletePowerMeter(entityId) {
+  if (!confirm('确定删除功率计量 ' + entityId + ' ？\n将同时删除其日用电量表数据。')) return;
+  try {
+    var resp = await fetch(POWER_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete', entity_id: entityId }),
+    });
+    var json = await resp.json();
+    showToast(json.success ? (json.message || '已删除') : ('删除失败: ' + json.error), json.success);
+    if (json.success) loadPowerMeters();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function batchDeletePowerMeters() {
+  const ids = getSelectedEntities('powerMeterTable');
+  if (!ids.length) { showToast('请先勾选要删除的功率计量', false); return; }
+  if (!confirm('确定删除选中的 ' + ids.length + ' 个功率计量？\n将同时删除其日用电量表数据。')) return;
+  let ok = 0, fail = 0;
+  for (const eid of ids) {
+    try {
+      const resp = await fetch(POWER_API, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', entity_id: eid }),
+      });
+      const json = await resp.json();
+      if (json.success) ok++; else fail++;
+    } catch(e) { fail++; }
+  }
+  showToast('批量删除完成：成功 ' + ok + '，失败 ' + fail, fail === 0);
+  loadPowerMeters();
+}
+
+function onPmQKindChange() {
+  var kind = document.getElementById('pmQKind').value;
+  var lbl = document.getElementById('pmQDateLabel');
+  var inp = document.getElementById('pmQDate');
+  if (kind === 'daily') { lbl.textContent = '日期'; inp.placeholder = 'YYYY-MM-DD'; }
+  else if (kind === 'monthly') { lbl.textContent = '月份'; inp.placeholder = 'YYYY-MM'; }
+  else if (kind === 'yearly') { lbl.textContent = '年份'; inp.placeholder = 'YYYY'; }
+  else if (kind === 'range') { lbl.textContent = '起始日'; inp.placeholder = 'YYYY-MM-DD（自动查其后30天）'; }
+  else { lbl.textContent = '日期'; inp.placeholder = '无需填写'; inp.value=''; }
+}
+
+function escJsonTable(arr, kind) {
+  if (!arr || !arr.length) return '<div class="empty">无数据</div>';
+  var html = '<div class="table-wrap"><table><thead><tr>' +
+    '<th>实体</th><th>名称</th><th>房间</th><th>日期</th><th>用电量(kWh)</th>' +
+    '</tr></thead><tbody>';
+  arr.forEach(function(r) {
+    html += '<tr><td>' + escHtml(r.entity_id || '') + '</td>' +
+      '<td>' + escHtml(r.device_name || '') + '</td>' +
+      '<td>' + escHtml(r.room || '') + '</td>' +
+      '<td>' + escHtml(r.date || '') + '</td>' +
+      '<td>' + escHtml(r.kwh != null ? r.kwh : '') + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  return html;
+}
+
+async function queryPowerEnergy() {
+  var kind = document.getElementById('pmQKind').value;
+  var out = document.getElementById('pmQueryResult');
+  var params = 'type=query&kind=' + encodeURIComponent(kind);
+  var room = (document.getElementById('pmQRoom').value || '').trim();
+  if (room) params += '&room=' + encodeURIComponent(room);
+  var rawDate = (document.getElementById('pmQDate').value || '').trim();
+  if (kind === 'daily') {
+    if (!rawDate) { showToast('请输入日期 YYYY-MM-DD', false); return; }
+    params += '&date=' + encodeURIComponent(rawDate);
+  } else if (kind === 'monthly') {
+    if (!rawDate) { showToast('请输入月份 YYYY-MM', false); return; }
+    params += '&month=' + encodeURIComponent(rawDate);
+  } else if (kind === 'yearly') {
+    if (!rawDate) { showToast('请输入年份 YYYY', false); return; }
+    params += '&year=' + encodeURIComponent(rawDate);
+  } else if (kind === 'range') {
+    if (!rawDate) { showToast('请输入起始日期 YYYY-MM-DD', false); return; }
+    params += '&start=' + encodeURIComponent(rawDate);
+    // 结束日期取开始日期 + 30 天
+    var endDt = new Date(rawDate + 'T00:00:00');
+    endDt.setDate(endDt.getDate() + 30);
+    var end = endDt.getFullYear() + '-' + String(endDt.getMonth()+1).padStart(2,'0') + '-' + String(endDt.getDate()).padStart(2,'0');
+    params += '&end=' + encodeURIComponent(end);
+  }
+  out.textContent = '查询中...';
+  try {
+    var resp = await fetch(POWER_API + '?' + params);
+    var json = await resp.json();
+    if (!json.success) { out.textContent = ''; showToast('查询失败: ' + (json.error || '未知错误'), false); return; }
+    out.innerHTML = escJsonTable(json.data, kind);
+  } catch(e) { out.textContent = ''; showToast('查询请求失败', false); }
 }
 
 // ==============================
@@ -6071,6 +6473,8 @@ function onApiTypeChange() {
   const isAutoApi = qt.startsWith('auto_');
   // 实体上报 RESTful API（自动化实体列表，无参数仅 key）
   const isReportAutoEntities = qt === 'report_auto_entities';
+  // 用电计量 RESTful API（独立路径 /power_energy）
+  const isPowerApi = qt.startsWith('power_');
   // 用户动作查询组
   const isUserActionDaily = qt === 'user_actions_daily';
   const isUserActionRange = qt === 'user_actions_range';
@@ -6455,6 +6859,22 @@ function onApiTypeChange() {
     document.getElementById('apiDateMode').value = isAutoDate ? 'single' : 'none';
     onDateModeChange();
     _showAutoApiRows(qt);
+  } else if (isPowerApi) {
+    // 用电计量：显示 实体ID / 房间 / 单日期（daily 填日期、monthly 填 YYYY-MM、yearly 填 YYYY、range 填起始日）
+    _hideAllApiFormRows();
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = '';
+    if (qt === 'power_configs') {
+      // 登记列表无需实体/房间/日期
+      document.getElementById('apiEntityId').parentNode.style.display = 'none';
+      document.getElementById('apiRoom').parentNode.style.display = 'none';
+      document.getElementById('apiDateMode').parentNode.style.display = 'none';
+      onDateModeChange();
+    } else {
+      document.getElementById('apiDateMode').parentNode.style.display = '';
+      document.getElementById('apiDateMode').value = 'single';
+      onDateModeChange();
+    }
   } else if (isUserAction) {
     // 用户动作查询组：显示实体/日期/月份/limit，隐藏表格/offset/orderBy/fields
     document.getElementById('apiEntityId').parentNode.style.display = '';
@@ -6889,6 +7309,42 @@ function generateApiUrl() {
     let reUrl = BASE_PATH + '/api/ha_data_store/report/auto_entities';
     if (selectedApiKey) reUrl += '?key=' + encodeURIComponent(selectedApiKey);
     document.getElementById('apiUrlOutput').value = reUrl;
+    return;
+  }
+
+  // 用电计量 API（独立 RESTful 路径 /api/ha_data_store/power_energy）
+  if (qt.startsWith('power_')) {
+    const pBase = BASE_PATH + '/api/ha_data_store/power_energy';
+    const room = (document.getElementById('apiRoom') ? document.getElementById('apiRoom').value : '').trim();
+    const srcEntity = (document.getElementById('apiEntityId') ? document.getElementById('apiEntityId').value : '').trim();
+    const d = (document.getElementById('apiDateSingle') ? document.getElementById('apiDateSingle').value : '')
+      || (document.getElementById('apiDate') ? document.getElementById('apiDate').value : '');
+    let qs = '';
+    if (qt === 'power_configs') {
+      qs = 'type=configs';
+    } else {
+      qs = 'type=query&kind=' + (qt === 'power_latest' ? 'latest' :
+        qt === 'power_daily' ? 'daily' : qt === 'power_monthly' ? 'monthly' :
+        qt === 'power_yearly' ? 'yearly' : 'range');
+      if (srcEntity) qs += '&entity_id=' + encodeURIComponent(srcEntity);
+      if (room) qs += '&room=' + encodeURIComponent(room);
+      if (qt === 'power_latest') { /* latest 无需日期 */ }
+      else if (qt === 'power_daily') { if (d) qs += '&date=' + encodeURIComponent(d); }
+      else if (qt === 'power_monthly') { if (d) qs += '&month=' + encodeURIComponent(d); }
+      else if (qt === 'power_yearly') { if (d) qs += '&year=' + encodeURIComponent(d); }
+      else if (qt === 'power_range') {
+        if (d) {
+          qs += '&start=' + encodeURIComponent(d);
+          const eDt = new Date(d + 'T00:00:00');
+          eDt.setDate(eDt.getDate() + 30);
+          const e = eDt.getFullYear() + '-' + String(eDt.getMonth()+1).padStart(2,'0') + '-' + String(eDt.getDate()).padStart(2,'0');
+          qs += '&end=' + encodeURIComponent(e);
+        }
+      }
+    }
+    let pUrl = pBase + '?' + qs;
+    if (selectedApiKey) pUrl += '&key=' + encodeURIComponent(selectedApiKey);
+    document.getElementById('apiUrlOutput').value = pUrl;
     return;
   }
 
