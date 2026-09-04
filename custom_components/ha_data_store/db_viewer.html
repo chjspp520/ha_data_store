@@ -237,6 +237,7 @@
     <button class="btn-accent" onclick="initDbViewer()" style="font-size:12px;padding:6px 12px">🔄 刷新</button>
     <button id="btnBatchDel" class="btn-batch-del hidden" onclick="batchDeleteRows()" title="批量删除选中的数据行">🗑 批量删除</button>
     <button class="btn-accent" onclick="deleteSelectedTable()" style="background:#c0392b;border-color:#c0392b;font-size:12px;padding:6px 12px" title="删除当前选中表（需管理员密码）">🗑 删表</button>
+    <button class="btn-accent" onclick="openCreateTableModal()" style="background:#2ecc71;border-color:#2ecc71;font-size:12px;padding:6px 12px" title="新建自定义数据表">➕ 新建表</button>
     <button class="btn-accent" onclick="openAlterTablePanel()" style="background:#16a085;border-color:#16a085;font-size:12px;padding:6px 12px" title="查看/添加/删除当前表的字段">🧬 字段管理</button>
     <button id="btnVacuum" class="btn-accent" onclick="vacuumDatabase()" style="background:var(--orange);border-color:var(--orange);font-size:12px;padding:6px 12px" title="压缩数据库文件">🗜 压缩</button>
     <button class="btn-accent" onclick="showUnclosedToday()" style="background:#8e44ad;border-color:#8e44ad;font-size:12px;padding:6px 12px" title="查找当日有on_time但没有off_time的记录">⚠ 未关闭记录</button>
@@ -327,6 +328,40 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button onclick="refreshAlterColumns()" style="padding:4px 10px;font-size:12px">🔄 刷新</button>
   </div>
   <div id="alterColumns" style="max-height:calc(85vh - 260px);overflow:auto;border:1px solid var(--border);border-radius:6px"></div>
+</div>
+
+<!-- 新建表模态框 -->
+<div id="createTableOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:999" onclick="if(event.target===this)closeCreateTableModal()"></div>
+<div id="createTableModal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 20px;z-index:1000;width:82%;max-width:880px;max-height:86vh;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.6)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <h4 style="color:var(--accent);margin:0">➕ 新建数据表</h4>
+    <button onclick="closeCreateTableModal()" style="background:transparent;border:none;color:var(--text2);cursor:pointer;font-size:18px;padding:0 4px">✕</button>
+  </div>
+  <div style="margin:4px 0 10px;font-size:12px;color:var(--text2);background:var(--bg);padding:8px;border-radius:6px;border:1px dashed var(--border)">
+    ⚠️ 建表依赖全局「数据库修改」开关。表名/字段名仅支持英文字母、数字、下划线；创建后该表即可在「数据库浏览」与「查询构造器」中使用，随数据库一起迁移。
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+    <div style="flex:1;min-width:220px">
+      <label>表名 *</label>
+      <input id="createTableName" placeholder="如 my_custom_log" style="width:100%;padding:6px;font-size:13px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-family:monospace">
+    </div>
+    <label style="display:flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap">
+      <input type="checkbox" id="createAutoId" checked onchange="createAutoIdChanged()"> 附加自增主键 <code>id</code>
+    </label>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <b style="font-size:13px">字段定义：</b>
+    <button class="btn-green" onclick="createAddColRow()" style="padding:4px 12px;font-size:12px">＋ 添加字段</button>
+  </div>
+  <div id="createColHeader" style="display:grid;grid-template-columns:1fr 130px 70px 140px 40px;gap:6px;padding:0 4px;font-size:12px;color:var(--text2);margin-bottom:4px">
+    <span>字段名</span><span>类型</span><span>主键</span><span>默认值(可空)</span><span></span>
+  </div>
+  <div id="createColRows" style="max-height:calc(86vh - 260px);overflow:auto;padding:2px 0"></div>
+  <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:12px">
+    <span id="createTableStatus" style="font-size:12px;color:var(--text2);margin-right:auto"></span>
+    <button onclick="closeCreateTableModal()" style="padding:6px 14px">取消</button>
+    <button class="btn-green" onclick="doCreateTable()" style="padding:6px 20px">💾 创建表</button>
+  </div>
 </div>
 
 <!-- ================================================ -->
@@ -1161,6 +1196,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
   <div class="sub-tabs" style="margin:16px 0 8px">
     <button class="api-sub-tab-btn active" onclick="switchApiSubTab('gen')">🔗 API 地址生成器</button>
     <button class="api-sub-tab-btn" onclick="switchApiSubTab('routes')">🛠 自定义路由管理</button>
+    <button class="api-sub-tab-btn" onclick="switchApiSubTab('builder')">🧩 查询构造器</button>
   </div>
   <div id="apisub-gen" class="api-sub-panel active">
   <div class="section" style="margin-bottom:10px">
@@ -1677,6 +1713,44 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="routeListWrap" style="border:1px solid var(--border);border-radius:6px;overflow:auto;max-height:360px"></div>
   </div>
   </div>
+
+  <!-- 🧩 查询构造器 面板 -->
+  <div id="apisub-builder" class="api-sub-panel">
+  <style>
+    /* 覆盖全局 select min-width:220px，避免在构造器的多列行中溢出重叠 */
+    #apisub-builder select, #apisub-builder input, #apisub-builder button {
+      min-width: 0; box-sizing: border-box;
+    }
+    /* 行内控件统一紧凑高度，避免与全局 padding 混排导致高低不齐 */
+    #apisub-builder .bld-row select, #apisub-builder .bld-row input {
+      padding: 5px 6px; font-size: 12px;
+    }
+    #apisub-builder .bld-row label { display: inline-flex; }
+    /* 动态行：弹性排列，窄屏自动换行，不重叠 */
+    #apisub-builder .bld-row {
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+      margin: 0 0 8px 0;
+    }
+    #apisub-builder .bld-row > * { flex: 0 0 auto; min-width: 0; }
+    #apisub-builder .bld-sel  { flex: 1 1 170px; }
+    #apisub-builder .bld-selx { flex: 0 0 120px; }
+    #apisub-builder .bld-op   { flex: 0 0 96px; }
+    #apisub-builder .bld-val  { flex: 1 1 150px; }
+    #apisub-builder .bld-val2 { flex: 1 1 190px; }
+    #apisub-builder .bld-pick { flex: 0 0 110px; }
+    #apisub-builder .bld-del  { flex: 0 0 30px; }
+    #apisub-builder .bld-pn   { flex: 1 1 150px; }
+    #apisub-builder .bld-pt   { flex: 0 0 140px; }
+    #apisub-builder .bld-pd   { flex: 0 0 180px; }
+    #apisub-builder .bld-pr   { flex: 0 0 52px; }
+    #apisub-builder .bld-ps   { flex: 2 1 190px; }
+  </style>
+  <div class="section" style="margin-top:0">
+    <div id="builderErr" style="display:none;background:rgba(248,81,73,.12);border:1px solid rgba(248,81,73,.5);color:#f85149;padding:8px 12px;border-radius:6px;margin:8px 0;font-size:12px"></div>
+    <div id="builderOk" style="display:none;background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.5);color:#3fb950;padding:8px 12px;border-radius:6px;margin:8px 0;font-size:12px"></div>
+    <div id="bldRoot"></div>
+  </div>
+  </div>
 </div>
 
 <!-- ================================================ -->
@@ -1894,14 +1968,16 @@ const FILTER_OPS = [
 ];
 
 function isUserTable(name) {
-  if (name === 'attr_type_defs') return false;
-  return name.startsWith('attr_') || name === 'device_history' || name.startsWith('env_')
-      || name === 'health_records'
-      || name === 'media_playlists' || name === 'media_songs' || name === 'media_queue' || name === 'media_now_playing'
-      || name === 'xiaoai_conversations'
-      || name === 'printer_daily'
-      || name === 'report_entities' || name === 'user_actions' || name === 'automation_logs'
-      || name === 'power_energy_daily';
+  // 黑名单：内部/配置/系统表不视为用户数据表，其余（含自建表）均为用户表
+  if (!name) return false;
+  const low = name.toLowerCase();
+  if (low.startsWith('sqlite_') || low.startsWith('_sqlite_')) return false;
+  if (low.endsWith('_configs') || low.endsWith('_type_defs')) return false;
+  const internal = {
+    'api_keys': 1, 'api_settings': 1, 'custom_routes': 1,
+    'health_records': 0,
+  };
+  return !internal[name];
 }
 
 function populateTableSelect() {
@@ -2116,11 +2192,14 @@ async function loadCustomRoutes() {
     const json = await resp.json();
     if (!json.success) { wrap.innerHTML = '<div class="empty">' + (json.error||'加载失败') + '</div>'; return; }
     const routes = json.data || [];
+    const isFull = json.full !== false;
     window.__customRoutesCache = routes;
-    if (!routes.length) { wrap.innerHTML = '<div class="empty">暂无自定义路由，点击「➕ 新建路由」创建</div>'; return; }
+    if (!routes.length) { wrap.innerHTML = '<div class="empty">暂无自定义路由，可用「🧩 查询构造器」可视化创建，或「➕ 新建路由」手写 SQL</div>'; return; }
     let html = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
       + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">接口路径</th>'
       + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">描述</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">来源</th>'
+      + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">状态</th>'
       + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">SQL</th>'
       + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">调用地址</th>'
       + '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px">操作</th>'
@@ -2128,23 +2207,54 @@ async function loadCustomRoutes() {
     for (const r of routes) {
       const path = (r.route_path || '').toString();
       const desc = (r.description || '').toString();
+      const isBuilder = (r.source === 'builder');
+      const sourceLabel = isBuilder ? '<span style="color:var(--accent)">🧩 构造器</span>' : '<span style="color:var(--text2)">✍️ 手写</span>';
+      const on = r.enabled === 1 || r.enabled === true || r.enabled === undefined;
+      const stateLabel = on
+        ? '<span style="color:#3fb950;cursor:pointer" onclick="toggleCustomRoute(\'' + path.replace(/'/g,'') + '\',0)" title="点击停用">● 启用</span>'
+        : '<span style="color:#f85149;cursor:pointer" onclick="toggleCustomRoute(\'' + path.replace(/'/g,'') + '\',1)" title="点击启用">○ 停用</span>';
       const sql = (r.sql_statement || '').toString();
+      const sqlShow = isFull ? (isBuilder && !sql ? '<span style="color:var(--text2);font-style:italic">运行时动态生成</span>' : (sql.length > 40 ? sql.slice(0, 37) + '...' : sql))
+        : '<span style="color:var(--text2)">—</span>';
       const callUrl = '/api/ha_data_store/custom/' + path;
-      const shortSql = sql.length > 70 ? sql.slice(0, 67) + '...' : sql;
+      const editBtn = isBuilder
+        ? '<button onclick="builderEditRoute(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#7d5fff;border-color:#7d5fff;color:#fff;border-radius:5px;cursor:pointer;margin-right:4px">🧩 构造器编辑</button>'
+        : '<button onclick="editRouteForm(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#2980b9;border-color:#2980b9;color:#fff;border-radius:5px;cursor:pointer;margin-right:4px">✏️ 编辑</button>';
       html += '<tr>'
         + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:12px;color:var(--green)">' + path + '</td>'
         + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + desc + '</td>'
-        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;color:var(--text2)">' + shortSql + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + sourceLabel + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + stateLabel + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;color:var(--text2)">' + sqlShow + '</td>'
         + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;color:var(--text2)">' + callUrl + '</td>'
         + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap">'
-        + '<button onclick="editRouteForm(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#2980b9;border-color:#2980b9;color:#fff;border-radius:5px;cursor:pointer;margin-right:4px">✏️ 编辑</button>'
-        + '<button onclick="deleteCustomRoute(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#c0392b;border-color:#c0392b;color:#fff;border-radius:5px;cursor:pointer">🗑 删除</button>'
+        + editBtn
+        + '<button onclick="deleteCustomRoute(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#c0392b;border-color:#c0392b;color:#fff;border-radius:5px;cursor:pointer;margin-left:4px">🗑 删除</button>'
         + '</td></tr>';
     }
     html += '</tbody></table>';
     wrap.innerHTML = html;
     if (st) st.textContent = '共 ' + routes.length + ' 条';
   } catch(e) { wrap.innerHTML = '<div class="empty">请求失败</div>'; }
+}
+
+async function toggleCustomRoute(path, enable) {
+  if (!path) return;
+  try {
+    const resp = await fetch(ROUTES_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_path: path, enabled: enable ? 1 : 0 }),
+    });
+    const json = await resp.json();
+    if (json.success) {
+      showToast(json.message || (enable ? '已启用' : '已停用'), true);
+      loadCustomRoutes();
+      if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
+    } else {
+      showToast('操作失败: ' + (json.error || '未知错误'), false);
+    }
+  } catch(e) { showToast('请求失败', false); }
 }
 
 function newRouteForm() {
@@ -2160,6 +2270,11 @@ function editRouteForm(path) {
   // 若无缓存先加载，再回填表单
   const doEdit = () => {
     const routes = (window.__customRoutesCache || []).find(r => r.route_path === path);
+    // 构造器来源的路由 → 交给可视化构造器编辑
+    if (routes && routes.source === 'builder') {
+      builderEditRoute(path);
+      return;
+    }
     document.getElementById('routeFormWrap').style.display = 'block';
     if (routes) {
       document.getElementById('routePath').value = routes.route_path;
@@ -2261,6 +2376,33 @@ function renderCustomRouteParams(path) {
     return;
   }
   const sql = route.sql_statement || '';
+  // 优先用 param_schema（构造器发布：带默认值/说明/必填），否则从 SQL :name 提取
+  let schema = null;
+  try { schema = (route.param_schema && typeof route.param_schema === 'string') ? JSON.parse(route.param_schema) : null; }
+  catch (e) { schema = null; }
+  if (schema && Array.isArray(schema) && schema.length) {
+    for (const p of schema) {
+      const nm = String(p.name || '').trim();
+      if (!nm) continue;
+      const wrap = document.createElement('div');
+      const label = document.createElement('div');
+      const req = p.required ? '<span style="color:#f85149"> *</span>' : '';
+      const typeLabel = p.type ? ' <span style="color:var(--text2);opacity:.7">(' + escHtml(p.type) + ')</span>' : '';
+      label.style.cssText = 'font-size:11px;color:var(--text2);margin-bottom:2px';
+      label.innerHTML = escHtml(nm) + req + typeLabel + (p.desc ? ' — ' + escHtml(p.desc) : '');
+      const input = document.createElement('input');
+      input.setAttribute('data-name', nm);
+      input.placeholder = p.desc || nm;
+      input.value = (p.default !== undefined && p.default !== '') ? p.default : '';
+      input.style.cssText = 'width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box';
+      input.oninput = generateApiUrl;
+      wrap.appendChild(label);
+      wrap.appendChild(input);
+      box.appendChild(wrap);
+    }
+    generateApiUrl();
+    return;
+  }
   const m = sql.match(/[:@$]([A-Za-z_][A-Za-z0-9_]*)/g);
   if (!m) {
     box.innerHTML = '<div style="font-size:12px;color:var(--orange);grid-column:1/-1">该 SQL 未使用命名占位符（:name），无法自动生成参数框。请改用 :name 写法或直接手写 URL。</div>';
@@ -3885,6 +4027,9 @@ function switchApiSubTab(name) {
   // 切换到路由管理时刷新列表
   if (name === 'routes' && typeof loadCustomRoutes === 'function') {
     loadCustomRoutes();
+  }
+  if (name === 'builder' && typeof builderTabOpen === 'function') {
+    builderTabOpen();
   }
 }
 
@@ -8216,6 +8361,892 @@ switchTab = function(name) {
 
 initDbViewer();
 loadMonitor();
+
+// ==============================
+//  🧩 查询构造器 v2 —— 直观版
+// ==============================
+const CATALOG_API = '/api/ha_data_store/query_catalog';
+const TEST_API = '/api/ha_data_store/routes/test';
+let BLD_CATALOG = null;      // 表目录
+let BLD_COLUMNS = [];        // 当前表列 [{name,type}]
+let BLD_COLS_INFO = {};      // name->type
+let BLD_EDIT_PATH = '';      // 正在编辑的路由（空=新建）
+let BLD_TEST_VALS = {};      // 试运行参数值 name->value
+
+function bxEsc(s) {
+  return String(s === undefined || s === null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function bldCard(title, hint, bodyHtml) {
+  return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:10px 0">'
+    + '<div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:4px">' + title + '</div>'
+    + (hint ? '<div style="font-size:11px;color:var(--text2);margin-bottom:10px">' + hint + '</div>' : '')
+    + bodyHtml + '</div>';
+}
+function bxFieldTypeOf(colName) { return (BLD_COLS_INFO[colName] || '').toUpperCase(); }
+function bxIsNum(colName) { const t = bxFieldTypeOf(colName); return /INT|REAL|NUM|DOUBLE|BOOL/.test(t); }
+function bxIsTime(colName) {
+  // 类型为日期/时间，或列名含 time/date，或整列名恰为 day/month/year/日期字段
+  const t = bxFieldTypeOf(colName);
+  if (/TIME|DATE/.test(t)) return true;
+  if (/time|date/i.test(colName)) return true;
+  return /^(on_|off_)?(time|date|datetime|day|month|year)$/i.test(colName)
+      || /(time|date|datetime)$/i.test(colName);
+}
+function bxFirstCol(pred) { const c = (BLD_COLUMNS || []).find(pred); return c ? c.name : ''; }
+
+function bldErr(msg) {
+  const eb = document.getElementById('builderErr');
+  const ok = document.getElementById('builderOk');
+  if (eb) { eb.textContent = msg || ''; eb.style.display = msg ? 'block' : 'none'; }
+  if (ok) { ok.textContent = ''; ok.style.display = 'none'; }
+}
+function bldOk(msg) {
+  const eb = document.getElementById('builderErr');
+  const ok = document.getElementById('builderOk');
+  if (eb) { eb.textContent = ''; eb.style.display = 'none'; }
+  if (ok) { ok.textContent = msg || ''; ok.style.display = msg ? 'block' : 'none'; }
+}
+
+function bldState() {
+  const path = document.getElementById('bldPath').value.trim();
+  const desc = document.getElementById('bldDesc').value.trim();
+  const limit = Math.max(1, Math.min(parseInt(document.getElementById('bldLimit').value) || 1000, 2000));
+  const enabled = document.getElementById('bldEnabled').checked ? 1 : 0;
+  return { path: path, desc: desc, limit: limit, enabled: enabled };
+}
+
+// ---------- 基础渲染 ----------
+function bldOptionHtml(sel, selVal, prefix) {
+  let h = '<option value="">' + (prefix || '-- 选择 --') + '</option>';
+  (BLD_COLUMNS || []).forEach(function (c) {
+    h += '<option value="' + bxEsc(c.name) + '"' + (c.name === selVal ? ' selected' : '') + '>' + bxEsc(c.name) + ' (' + bxEsc(c.type || '') + ')</option>';
+  });
+  return h;
+}
+function bldFieldOptions(selVal) {
+  let h = '';
+  (BLD_COLUMNS || []).forEach(function (c) {
+    h += '<option value="' + bxEsc(c.name) + '"' + (c.name === selVal ? ' selected' : '') + '>' + bxEsc(c.name) + ' (' + bxEsc(c.type || '') + ')</option>';
+  });
+  return h;
+}
+
+function bldOpsFor(colName) {
+  if (!colName) return [];
+  if (bxIsNum(colName)) return [['eq', '='], ['neq', '≠'], ['gt', '>'], ['gte', '≥'], ['lt', '<'], ['lte', '≤'], ['null', '为空']];
+  if (bxIsTime(colName)) return [['between', '🕐 时间段(起,止)'], ['eq', '='], ['neq', '≠'], ['gt', '>'], ['gte', '≥'], ['lt', '<'], ['lte', '≤'], ['null', '为空']];
+  return [['eq', '='], ['neq', '≠'], ['like', '包含 LIKE'], ['not_like', '不包含'], ['in', '多值 IN'], ['null', '为空']];
+}
+function bldParamTypeHint(colName, op) {
+  if (op === 'like' || op === 'not_like') return 'like';
+  if (op === 'in') return 'list';
+  if (bxIsNum(colName)) {
+    const t = bxFieldTypeOf(colName);
+    return /BOOL/.test(t) ? 'bool' : (/INT/.test(t) ? 'integer' : 'real');
+  }
+  if (bxIsTime(colName)) return 'datetime';
+  return 'text';
+}
+function bldPlaceholderForType(pt) {
+  return { text: '如 sensor.abc', like: '如 %客厅%', list: '如 a,b', integer: '如 1', real: '如 25.5',
+    bool: '1/0', datetime: '2026-09-01 00:00:00', date: '2026-09-01', time: '21:00' }[pt] || '';
+}
+
+let BLD_RENDER_KEY = '';
+
+function builderRender() {
+  const root = document.getElementById('bldRoot');
+  if (!root) return;
+  // 尽量保留已在输入的值（再次渲染时）
+  const hadPath = !!document.getElementById('bldPath');
+  const st = hadPath ? bldState() : { path: '', desc: '', limit: 1000, enabled: 1 };
+  let h = '';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px">'
+    + '<h3 style="margin:0">🧩 查询构造器（可视化）</h3>'
+    + (BLD_EDIT_PATH ? '<span style="font-size:12px;color:var(--text2)">编辑定义：<code>' + bxEsc(BLD_EDIT_PATH) + '</code></span>' : '')
+    + '<button class="btn-accent" onclick="builderNew()" style="padding:5px 12px">🆕 新建定义</button></div>'
+    + '<div class="hint" style="margin-top:4px">流程：<b>① 选表 → ② 配置动态参数（前端通过 URL 传值的过滤条件）→ ③ 排序/返回上限 → ④ 汇总信息 → ⑤ 试运行并发布</b>。'
+    + '发布后用 <code>GET /api/ha_data_store/custom/{path}?key=xx&amp;参数=值</code> 调用；未传且未填默认值的可选参数会自动跳过该过滤。定义存 <code>custom_routes</code> 表，随数据库迁移。</div>';
+
+  // 0 基本信息
+  h += bldCard('⓪ 接口基本信息', '', ''
+    + '<div style="display:grid;grid-template-columns:1fr 1fr 130px 100px;gap:8px;align-items:end">'
+    + '<div><label>接口路径 route_path *</label><input id="bldPath" value="' + bxEsc(st.path) + '" placeholder="如 room_temp_history" style="font-family:monospace"></div>'
+    + '<div><label>名称 / 描述</label><input id="bldDesc" value="' + bxEsc(st.desc) + '" placeholder="接口用途说明"></div>'
+    + '<div><label>返回上限</label><input id="bldLimit" type="number" value="' + st.limit + '" min="1" max="2000"></div>'
+    + '<label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="bldEnabled"' + (st.enabled ? ' checked' : '') + '> 启用发布</label>'
+    + '</div>');
+
+  // ① 数据表 + 输出字段
+  h += bldCard('① 数据表与返回字段', '选择要查询的表；返回字段默认全部，也可按需勾选。',
+    '<div style="margin-bottom:10px"><label>数据表 *</label><select id="bldTable" onchange="bldOnTableChange()">' + bldTablesHtml() + '</select></div>'
+    + '<div><label>返回字段（不勾选 = 返回全部）</label>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:4px 16px;border:1px solid var(--border);border-radius:6px;padding:8px;max-height:150px;overflow:auto;margin-top:6px" id="bldFieldsBox"></div></div>');
+
+  // ② 动态参数
+  h += bldCard('② 动态参数（运行时可传值的过滤条件）',
+    '每行是一个“过滤条件 + 参数”：选择字段与比较方式后，值来源选<b>“前端传参”</b>即为动态参数（发布后前端用 <code>?参数名=值</code> 传入，未传且无默认值时该条件自动跳过）；选“固定值”则写死。',
+    '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">'
+    + '<button class="btn-green" onclick="bldAddFilter(false)" style="font-size:12px">＋ 添加过滤/参数</button>'
+    + '<button class="btn-green" onclick="bldAddTimeRange()" style="font-size:12px">＋ 时间段（起止）</button>'
+    + '<label style="display:flex;gap:5px;align-items:center;font-size:12px;color:var(--text2)">时间字段'
+    + '<select id="bldTimeColSel" style="min-width:130px;padding:4px 6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></select></label>'
+    + '</div>'
+    + '<div style="font-size:11px;color:var(--text2);margin-bottom:6px">点「时间段」会用上面选中的<b>时间字段</b>生成一个 between 条件；列表已优先排时间/日期型字段。</div>'
+    + '<div id="bldFiltRows"></div>'
+    + '<div id="bldFiltEmpty" style="font-size:12px;color:var(--text2);padding:2px 0">（暂无过滤条件）</div>');
+
+  // ③ 排序 / 上限
+  h += bldCard('③ 排序', '返回条数上限在 ⓪ 基本信息中设置。', ''
+    + '<div style="display:grid;grid-template-columns:1fr 110px;gap:8px;align-items:end">'
+    + '<div><label>排序字段（可选）</label><select id="bldOrderCol">' + bldOptionHtml('', st.orderCol || '') + '</select></div>'
+    + '<div><label>方向</label><select id="bldOrderDir"><option value="DESC"' + (st.orderDir === 'DESC' ? ' selected' : '') + '>降序</option><option value="ASC"' + (st.orderDir === 'ASC' ? ' selected' : '') + '>升序</option></select></div>'
+    + '</div>');
+
+  // ④ 汇总
+  h += bldCard('④ 汇总信息（附加在返回结果中）', '勾选“总条数”后，接口会额外返回匹配总数；合计/平均等对数值字段生效。',
+    '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="bldSumCount" checked> 返回总条数 count</label>'
+    + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px"><b style="font-size:12px">数值汇总：</b><button class="btn-filter" onclick="bldAddAggRow()" style="font-size:12px">＋ 添加</button></div>'
+    + '<div id="bldAggRows"></div>');
+
+  // ⑤ 试运行 / 发布
+  h += bldCard('⑤ 试运行并发布', '动态参数的试运行值自动取自“默认值”，可在此临时覆盖后再执行。',
+    '<div id="bldTestParams"></div>'
+    + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0">'
+    + '<button class="btn-green" onclick="builderRunTest()" style="padding:7px 18px">▶ 试运行</button>'
+    + '<button class="btn-green" onclick="builderSave()" style="padding:7px 20px">💾 发布保存</button>'
+    + '<span style="font-size:12px;color:var(--text2)" id="bldStatus"></span></div>'
+    + '<div style="margin-bottom:6px"><label>生成的 SQL（试运行后自动更新，只读）</label>'
+    + '<textarea id="bldSqlPreview" readonly style="width:100%;height:56px;padding:6px;font-family:monospace;font-size:12px;background:#0d1117;color:var(--green);border:1px solid var(--border);border-radius:6px;resize:vertical;box-sizing:border-box;margin-top:4px"></textarea></div>'
+    + '<div id="bldTestResult" style="max-height:280px;overflow:auto"></div>');
+
+  root.innerHTML = h;
+  // 数据表
+  const tbl = document.getElementById('bldTable');
+  if (tbl.value === '') tbl.value = st.table || '';
+  // 输出字段
+  bldRenderFields();
+  // 已保存数据回填
+  if (BLD_EDIT_PATH && st.qd) bldRestoreQd(st.qd);
+  if (!tbl.value) bldOnTableChange();
+}
+
+function bldTablesHtml() {
+  if (!BLD_CATALOG || !BLD_CATALOG.length) return '<option value="">（先加载目录…）</option>';
+  let h = '<option value="">-- 选择数据表 --</option>';
+  (BLD_CATALOG || []).forEach(function (g) {
+    h += '<optgroup label="' + bxEsc(g.label || g.key) + '">';
+    (g.tables || []).forEach(function (t) {
+      h += '<option value="' + bxEsc(t.name) + '">' + bxEsc(t.name) + '（' + (t.count || 0) + ' 条）</option>';
+    });
+    h += '</optgroup>';
+  });
+  return h;
+}
+
+function bldCurrentTable() { const t = document.getElementById('bldTable'); return t ? t.value : ''; }
+
+function bldSetColumns(table) {
+  BLD_COLUMNS = [];
+  BLD_COLS_INFO = {};
+  if (!table) return;
+  (BLD_CATALOG || []).forEach(function (g) {
+    const t = (g.tables || []).find(function (x) { return x.name === table; });
+    if (t) {
+      BLD_COLUMNS = t.columns || [];
+      (BLD_COLUMNS || []).forEach(function (c) { BLD_COLS_INFO[c.name] = c.type; });
+    }
+  });
+}
+
+function bldRenderFields() {
+  const box = document.getElementById('bldFieldsBox');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!BLD_COLUMNS.length) { box.innerHTML = '<span style="font-size:12px;color:var(--text2)">请先选择数据表</span>'; return; }
+  (BLD_COLUMNS || []).forEach(function (c) {
+    const l = document.createElement('label');
+    l.style.cssText = 'display:inline-flex;gap:5px;align-items:center;font-size:12px;cursor:pointer;white-space:nowrap';
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.className = 'bld-selcol';
+    chk.value = c.name;
+    chk.checked = false;
+    l.appendChild(chk);
+    l.appendChild(document.createTextNode(c.name + ' · ' + (c.type || '')));
+    box.appendChild(l);
+  });
+}
+
+function bldOnTableChange() {
+  const tbl = bldCurrentTable();
+  bldSetColumns(tbl);
+  bldRenderFields();
+  document.getElementById('bldFiltRows').innerHTML = '';
+  bldFiltEmpty();
+  // 排序字段重列
+  const oc = document.getElementById('bldOrderCol');
+  if (oc) oc.innerHTML = bldOptionHtml('', oc.value);
+  // 重置聚合默认
+  document.getElementById('bldAggRows').innerHTML = '';
+  // 重建参数行里的字段下拉
+  bldRefreshFilterFields();
+  // 时间段“时间字段”下拉
+  bldRefreshTimeColSel();
+}
+
+// 时间段所用的时间字段下拉：时间/日期型列优先并默认选中，否则全部列出让用户手动挑
+function bldRefreshTimeColSel() {
+  const sel = document.getElementById('bldTimeColSel');
+  if (!sel) return;
+  const cols = (BLD_COLUMNS || []);
+  if (!cols.length) { sel.innerHTML = '<option value="">（无字段）</option>'; return; }
+  const timeCols = cols.filter(function (c) { return bxIsTime(c.name); });
+  const others = cols.filter(function (c) { return !bxIsTime(c.name); });
+  const ordered = timeCols.concat(others);
+  let h = '';
+  ordered.forEach(function (c) {
+    h += '<option value="' + bxEsc(c.name) + '">' + bxEsc(c.name) + (bxIsTime(c.name) ? '（时间/日期）' : '') + '</option>';
+  });
+  sel.innerHTML = h;
+  // 默认选第一个时间型字段（无则第一个非 id 字段，允许用户再改）
+  let prefer = timeCols.length ? timeCols[0].name
+    : (others.find(function (c) { return c.name !== 'id'; }) || others[0] || {}).name;
+  if (prefer) sel.value = prefer;
+}
+
+function bldFiltEmpty() {
+  const box = document.getElementById('bldFiltRows');
+  const e = document.getElementById('bldFiltEmpty');
+  if (e) e.style.display = box && box.childElementCount ? 'none' : 'block';
+}
+
+function bldFilterBlockHtml() {
+  return '<div class="frow" style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:rgba(255,255,255,.015)">'
+    + '<div class="bld-row" style="margin-bottom:6px">'
+    + '<select class="f-field bld-sel" onchange="bldOnFiltFieldChange(this)"></select>'
+    + '<select class="f-op bld-op" onchange="bldOnFiltOpChange(this)"></select>'
+    + '<select class="f-src" style="flex:0 0 110px" onchange="bldOnFiltSrcChange(this)">'
+    + '<option value="param">📥 前端传参（动态）</option><option value="fixed">🔒 固定值</option></select>'
+    + '<button type="button" class="bld-del" onclick="bldDelFilter(this)" title="删除该条件" style="padding:3px 6px;font-size:12px;background:#c0392b;color:#fff;border:none;border-radius:5px;cursor:pointer">✕</button>'
+    + '</div>'
+    + '<div class="f-paramrow bld-row">'
+    + '<input class="f-param bld-pn" placeholder="参数名(URL ?参数=) 如 entity_id" style="font-family:monospace" title="前端调用时 ?参数=值">'
+    + '<input class="f-default bld-pd" placeholder="默认值(可空)" style="font-family:monospace">'
+    + '<span class="b-between-sep" style="display:none;font-size:12px;color:var(--text2)">至</span>'
+    + '<input class="f-param2 bld-pn" placeholder="止参数名" style="font-family:monospace;display:none" title="结束时间参数名（?止参数=值）">'
+    + '<input class="f-default2 bld-pd" placeholder="默认止值" style="font-family:monospace;display:none">'
+    + '<label class="bld-pr" style="display:flex;gap:4px;align-items:center;white-space:nowrap;font-size:12px;color:var(--text2)"><input type="checkbox" class="f-req"> 必填</label>'
+    + '<input class="f-desc bld-ps" placeholder="说明（显示在调用页）">'
+    + '</div>'
+    + '<div class="f-fixedrow bld-row" style="display:none">'
+    + '<input class="f-value bld-val2" placeholder="固定值（时间段用 起,止 分隔）">'
+    + '</div></div>';
+}
+
+function bldOnFiltFieldChange(sel) {
+  const row = sel.closest('.frow');
+  bldFillOps(row);
+  bldRefreshHints(row);
+}
+function bldOnFiltOpChange(sel) { bldRefreshHints(sel.closest('.frow')); }
+function bldOnFiltSrcChange(sel) {
+  const row = sel.closest('.frow');
+  const isParam = sel.value === 'param';
+  row.querySelector('.f-paramrow').style.display = isParam ? '' : 'none';
+  row.querySelector('.f-fixedrow').style.display = isParam ? 'none' : '';
+  bldRefreshHints(row);
+}
+function bldFillOps(row) {
+  const field = row.querySelector('.f-field').value;
+  const ops = bldOpsFor(field);
+  const os = row.querySelector('.f-op');
+  const cur = os.value;
+  os.innerHTML = '';
+  ops.forEach(function (o) {
+    const op = document.createElement('option');
+    op.value = o[0]; op.textContent = o[1];
+    if (o[0] === cur || (!cur && o[0] === 'eq')) op.selected = true;
+    os.appendChild(op);
+  });
+}
+function bldRefreshHints(row) {
+  const field = row.querySelector('.f-field').value;
+  const op = row.querySelector('.f-op').value;
+  const isParam = row.querySelector('.f-src').value === 'param';
+  const isBetween = op === 'between';
+  const paramInput = row.querySelector('.f-param');
+  if (!field) return;
+  // 自动补参数名（以字段名为基础）
+  if (!paramInput.value) paramInput.value = field;
+  // 时间段：自动给出起/止两个参数名（start_time -> end_time）
+  if (isBetween) {
+    const p1 = (paramInput.value || '').trim();
+    const p2i = row.querySelector('.f-param2');
+    if (!p2i.value) {
+      if (p1 === 'start_time') p2i.value = 'end_time';
+      else if (/^(from|begin|start|_from|_start)$/i.test(p1)) p2i.value = p1 + '_end';
+      else if (/_from$/.test(p1)) p2i.value = p1.replace(/_from$/, '_to');
+      else if (/_start$/.test(p1)) p2i.value = p1.replace(/_start$/, '_end');
+      else p2i.value = p1 + '_to';
+    }
+  }
+  const ph = bldPlaceholderForType(bldParamTypeHint(field, op));
+  row.querySelector('.f-default').placeholder = isBetween ? '起始默认值 ' + ph : '默认值 ' + ph + '（空=无）';
+  row.querySelector('.f-default2').placeholder = '结束默认值 ' + ph;
+  row.querySelector('.f-value').placeholder = isBetween ? '固定值（起,止 逗号分隔）' : '固定值（' + ph + '；IN 用逗号分隔）';
+  row.querySelector('.f-param').placeholder = isBetween ? '起始参数名（URL ?起参数=）' : '参数名(URL ?参数=) 如 ' + field;
+  // 时间段 + 前端传参 → 显示止参数/止默认值
+  const showPair = isBetween && isParam;
+  row.querySelector('.b-between-sep').style.display = showPair ? '' : 'none';
+  row.querySelector('.f-param2').style.display = showPair ? '' : 'none';
+  row.querySelector('.f-default2').style.display = showPair ? '' : 'none';
+  row.querySelector('.f-desc').placeholder = isBetween ? '说明（显示在调用页）' : '说明（显示在调用页）';
+}
+
+function bldAddFilter(pre) {
+  pre = pre || {};
+  const box = document.getElementById('bldFiltRows');
+  if (!box) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = bldFilterBlockHtml();
+  const row = tmp.firstChild;
+  const fieldSel = row.querySelector('.f-field');
+  const firstCol = pre.field || bxFirstCol(function () { return true; });
+  fieldSel.innerHTML = bldFieldOptions(firstCol);
+  if (firstCol) fieldSel.value = firstCol;
+  bldFillOps(row);
+  if (pre.op) row.querySelector('.f-op').value = pre.op;
+  if (pre.src === 'fixed') row.querySelector('.f-src').value = 'fixed';
+  bldOnFiltSrcChange(row.querySelector('.f-src'));
+  const param = row.querySelector('.f-param');
+  if (pre.param) param.value = pre.param;
+  if (pre.default !== undefined) row.querySelector('.f-default').value = pre.default;
+  if (pre.param2) row.querySelector('.f-param2').value = pre.param2;
+  if (pre.default2 !== undefined) row.querySelector('.f-default2').value = pre.default2;
+  if (pre.value) row.querySelector('.f-value').value = pre.value;
+  if (pre.required) row.querySelector('.f-req').checked = true;
+  if (pre.desc) row.querySelector('.f-desc').value = pre.desc;
+  box.appendChild(row);
+  bldFiltEmpty();
+  bldRefreshHints(row);
+  bldRefreshTestParams();
+  return row;
+}
+function bldDelFilter(btn) {
+  const row = btn.closest('.frow');
+  if (row) row.remove();
+  bldFiltEmpty();
+  bldRefreshTestParams();
+}
+function bldRefreshFilterFields() {
+  const rows = document.querySelectorAll('#bldFiltRows .frow');
+  rows.forEach(function (r) {
+    const cur = r.querySelector('.f-field').value;
+    r.querySelector('.f-field').innerHTML = bldFieldOptions('');
+    r.querySelector('.f-field').value = cur;
+    bldFillOps(r);
+  });
+}
+
+function bldAddTimeRange() {
+  const box = document.getElementById('bldFiltRows');
+  if (!box) return;
+  const cols = (BLD_COLUMNS || []);
+  // 优先用“时间字段”下拉的选择
+  const sel = document.getElementById('bldTimeColSel');
+  let col = sel && sel.value ? sel.value : '';
+  const timeAuto = bxFirstCol(bxIsTime);
+  if (!col) col = timeAuto;
+  if (!col) {
+    bldErr('无法确定时间字段：请在 ② 顶部的“时间字段”下拉里手动选择后再点「＋ 时间段」');
+    return;
+  }
+  if (!cols.some(function (c) { return c.name === col; })) {
+    bldErr('所选时间字段「' + col + '」不存在，请重新选择');
+    return;
+  }
+  const isTime = bxIsTime(col);
+  if (!isTime) {
+    if (!confirm('「' + col + '」看起来不是时间/日期字段，仍要用它做时间段条件吗？')) return;
+  }
+  // 若已存在同列的时间段/起止条件则不重复添加
+  let dup = false;
+  document.querySelectorAll('#bldFiltRows .frow').forEach(function (r) {
+    const f = r.querySelector('.f-field').value;
+    const op = r.querySelector('.f-op').value;
+    const p1 = (r.querySelector('.f-param').value || '').trim();
+    if (f === col && (op === 'between' || p1 === 'start_time' || p1 === 'start_' + col)) dup = true;
+  });
+  if (dup) { bldOk('该表已有「' + col + '」时间段条件，可直接修改'); return; }
+  // 单行「时间段」：BETWEEN 起始参数 ~ 结束参数
+  bldAddFilter({ field: col, op: 'between', src: 'param', param: 'start_time', param2: 'end_time', default: '', default2: '', desc: (isTime ? '时间范围' : '[' + col + '] 时间范围'), required: false });
+  bldOk('已添加「' + col + ' 时间段」条件：调用 ?start_time=…&end_time=…（两参数均可选，缺省则跳过该边界）');
+}
+
+// ---------- 试运行参数 ----------
+function bldRefreshTestParams() {
+  const box = document.getElementById('bldTestParams');
+  if (!box) return;
+  const list = [];
+  document.querySelectorAll('#bldFiltRows .frow').forEach(function (r) {
+    if (r.querySelector('.f-src').value !== 'param') return;
+    const field = r.querySelector('.f-field').value;
+    const op = r.querySelector('.f-op').value;
+    const ptype = bldParamTypeHint(field, op);
+    const p = (r.querySelector('.f-param').value || '').trim();
+    if (p && !list.find(function (x) { return x.name === p; })) list.push({ name: p, type: ptype });
+    if (op === 'between') {
+      const p2 = (r.querySelector('.f-param2').value || '').trim();
+      if (p2 && !list.find(function (x) { return x.name === p2; })) list.push({ name: p2, type: ptype });
+    }
+  });
+  if (!list.length) { box.innerHTML = '<div style="font-size:12px;color:var(--text2)">（无动态参数，试运行时将直接执行固定条件）</div>'; return; }
+  let h = '<label style="font-size:12px">试运行参数值（默认取各参数的默认值）：</label>';
+  h += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px">';
+  list.forEach(function (p) {
+    h += '<div style="flex:0 1 220px"><label style="font-size:11px;color:var(--text2)">' + bxEsc(p.name) + ' (' + bxEsc(p.type) + ')</label>'
+      + '<input class="tp' + ' bld-val2" data-name="' + bxEsc(p.name) + '" placeholder="' + bxEsc(bldPlaceholderForType(p.type)) + '" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box"></div>';
+  });
+  h += '</div>';
+  box.innerHTML = h;
+}
+
+// ---------- 聚合汇总行 ----------
+function bldAddAggRow(pre) {
+  pre = pre || {};
+  const box = document.getElementById('bldAggRows');
+  if (!box) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = '<div class="bld-row" style="margin-bottom:6px">'
+    + '<select class="a-col bld-sel">' + bldAggColOptions(pre.col) + '</select>'
+    + '<select class="a-agg bld-selx">'
+    + aggHtml(pre.agg)
+    + '</select>'
+    + '<button type="button" onclick="bldDelAgg(this)" style="padding:3px 6px;font-size:12px;background:#c0392b;color:#fff;border:none;border-radius:5px;cursor:pointer">✕</button></div>';
+  box.appendChild(tmp.firstChild);
+}
+function aggHtml(cur) {
+  const defs = [['sum', '合计'], ['avg', '平均'], ['max', '最大'], ['min', '最小'], ['count', '条数']];
+  return defs.map(function (d) { return '<option value="' + d[0] + '"' + (d[0] === cur ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('');
+}
+function bldAggColOptions(cur) {
+  let h = '<option value="">-- 数值字段 --</option>';
+  (BLD_COLUMNS || []).forEach(function (c) {
+    if (bxIsNum(c.name)) {
+      h += '<option value="' + bxEsc(c.name) + '"' + (c.name === cur ? ' selected' : '') + '>' + bxEsc(c.name) + '</option>';
+    }
+  });
+  return h;
+}
+function bldDelAgg(btn) { const row = btn.closest('.bld-row'); if (row) row.remove(); }
+
+// ---------- 收集 ----------
+function bldCollect() {
+  const st = bldState();
+  const table = bldCurrentTable();
+  if (!table) { bldErr('请先在 ① 选择数据表'); return null; }
+  const qd = { rev: 2, table: table, select: [], filters: [], order: null, limit: st.limit, summary: { count: true, aggs: [] } };
+  // 输出字段
+  const selCols = [];
+  document.querySelectorAll('#bldFieldsBox input[type=checkbox]:checked').forEach(function (c) { selCols.push(c.value); });
+  qd.select = selCols;
+  // filters
+  let ok = true;
+  document.querySelectorAll('#bldFiltRows .frow').forEach(function (r) {
+    const field = r.querySelector('.f-field').value;
+    const op = r.querySelector('.f-op').value;
+    if (!field) return;
+    const isParam = r.querySelector('.f-src').value === 'param';
+    const param = (r.querySelector('.f-param').value || '').trim();
+    const defaultVal = r.querySelector('.f-default').value;
+    const required = r.querySelector('.f-req').checked;
+    const desc = r.querySelector('.f-desc').value;
+    const control = bldParamTypeHint(field, op);
+    const f = { column: field, op: op, control: control };
+    if (isParam) {
+      if (!param) { bldErr('字段 ' + field + ' 缺少参数名'); ok = false; return; }
+      f.fixed = false; f.param = param;
+      if (op === 'between') {
+        const param2 = (r.querySelector('.f-param2').value || '').trim();
+        if (!param2) { bldErr('字段 ' + field + ' 的时间段条件缺少“止参数名”'); ok = false; return; }
+        f.param2 = param2;
+        f.default2 = r.querySelector('.f-default2').value;
+      }
+      f.default = defaultVal; f.required = required; f.desc = desc;
+      qd.filters.push(f);
+    } else {
+      f.fixed = true; f.value = r.querySelector('.f-value').value;
+      qd.filters.push(f);
+    }
+  });
+  if (!ok) return null;
+  // order
+  const oc = document.getElementById('bldOrderCol');
+  if (oc && oc.value) qd.order = { column: oc.value, dir: document.getElementById('bldOrderDir').value };
+  // summary
+  qd.summary.count = !!document.getElementById('bldSumCount').checked;
+  document.querySelectorAll('#bldAggRows .bld-row').forEach(function (r) {
+    const col = r.querySelector('.a-col').value;
+    const agg = r.querySelector('.a-agg').value;
+    if (col) qd.summary.aggs.push({ column: col, agg: agg });
+  });
+  return qd;
+}
+
+function bldTestValues() {
+  const v = {};
+  document.querySelectorAll('#bldTestParams input.tp').forEach(function (inp) {
+    if (inp.value !== '') v[inp.getAttribute('data-name')] = inp.value;
+  });
+  return v;
+}
+
+// ---------- 试运行 ----------
+async function builderRunTest() {
+  const qd = bldCollect();
+  if (!qd) return;
+  const statusEl = document.getElementById('bldStatus');
+  if (statusEl) statusEl.textContent = '试运行中…';
+  try {
+    const resp = await fetch(TEST_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query_def: qd, params: bldTestValues() }),
+    });
+    const json = await resp.json();
+    if (!json.success) { bldErr('试运行失败：' + (json.error || '')); if (statusEl) statusEl.textContent = ''; return; }
+    document.getElementById('bldSqlPreview').value = json.sql || '';
+    const out = document.getElementById('bldTestResult');
+    const cols = json.columns || [];
+    const rows = json.rows || [];
+    let summaryTxt = '共返回 ' + rows.length + ' 行';
+    if (json.count !== null && json.count !== undefined) summaryTxt += '，匹配总数 ' + json.count;
+    if (json.aggs) { Object.keys(json.aggs).forEach(function (k) { if (json.aggs[k] !== null) summaryTxt += '，' + k + '=' + json.aggs[k]; }); }
+    if (!cols.length) { out.innerHTML = '<div class="empty">（无返回列）</div><div style="font-size:12px;color:var(--text2)">' + summaryTxt + '</div>'; }
+    else {
+      let h = '<div class="table-wrap" style="max-height:240px;overflow:auto"><table><thead><tr>';
+      cols.forEach(function (c) { h += '<th>' + bxEsc(String(c)) + '</th>'; });
+      h += '</tr></thead><tbody>';
+      rows.slice(0, 200).forEach(function (r) {
+        h += '<tr>';
+        cols.forEach(function (c) { h += '<td style="font-size:12px">' + bxEsc(r[c] === null || r[c] === undefined ? '' : String(r[c])) + '</td>'; });
+        h += '</tr>';
+      });
+      h += '</tbody></table></div>';
+      h += '<div style="font-size:12px;color:var(--text2);margin-top:4px">' + summaryTxt + '</div>';
+      out.innerHTML = h;
+    }
+    bldOk('试运行成功：' + summaryTxt);
+    if (statusEl) statusEl.textContent = '';
+  } catch (e) { bldErr('试运行请求失败：' + e); if (statusEl) statusEl.textContent = ''; }
+}
+
+// ---------- 保存 ----------
+async function builderSave() {
+  const qd = bldCollect();
+  if (!qd) return;
+  const st = bldState();
+  if (!st.path) { bldErr('请填写接口路径 route_path'); return; }
+  if (!/^[A-Za-z0-9_\-]{1,64}$/.test(st.path)) { bldErr('route_path 只能含字母/数字/下划线/中划线，长度≤64'); return; }
+  try {
+    const resp = await fetch(ROUTES_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        route_path: st.path,
+        description: st.desc,
+        source: 'builder',
+        enabled: st.enabled,
+        max_rows: st.limit,
+        query_def: qd,
+      }),
+    });
+    const json = await resp.json();
+    if (!json.success) { bldErr('保存失败：' + (json.error || '')); return; }
+    BLD_EDIT_PATH = st.path;
+    bldOk('已发布：GET /api/ha_data_store/custom/' + st.path + '?key=你的Key' + (qd.filters.length ? '&' + qd.filters.map(function (f) { return f.param || ''; }).filter(Boolean).join('=&') + '=' : ''));
+    loadCustomRoutes();
+    if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
+  } catch (e) { bldErr('保存请求失败：' + e); }
+}
+
+// ---------- 新建 / 编辑回填 ----------
+function builderNew() {
+  BLD_EDIT_PATH = '';
+  BLD_RENDER_KEY = '';
+  const tbl = bldCurrentTable();
+  builderRender();
+}
+function builderResetForm() { builderNew(); }
+
+async function builderLoadCatalogThen(keep) {
+  try {
+    const resp = await fetch(CATALOG_API);
+    const json = await resp.json();
+    if (!json.success) { bldErr('目录加载失败：' + (json.error || '')); return; }
+    BLD_CATALOG = json.data || [];
+    builderRender();
+    const tblEl = document.getElementById('bldTable');
+    if (keep) { for (let i = 0; i < tblEl.options.length; i++) { if (tblEl.options[i].value === keep) { tblEl.selectedIndex = i; break; } } }
+    bldOnTableChange();
+  } catch (e) { bldErr('目录加载请求失败'); }
+}
+
+function builderTabOpen() {
+  if (!BLD_CATALOG) { builderLoadCatalogThen(''); return; }
+  const root = document.getElementById('bldRoot');
+  const t = bldCurrentTable();
+  const key = (BLD_EDIT_PATH || '*') + '|' + (t || '');
+  if (root && root.childElementCount && key === BLD_RENDER_KEY) {
+    // 已渲染同一份，避免用户输入丢失
+    const okEl = document.getElementById('builderOk');
+    if (okEl && okEl.style.display !== 'none' && BLD_EDIT_PATH) okEl.style.display = 'none';
+    return;
+  }
+  builderRender();
+  BLD_RENDER_KEY = key;
+}
+
+function bldRestoreQd(qd) {
+  if (!qd) return;
+  // 表
+  const tbl = document.getElementById('bldTable');
+  if (tbl && qd.table) {
+    let hit = false;
+    for (let i = 0; i < tbl.options.length; i++) { if (tbl.options[i].value === qd.table) { tbl.selectedIndex = i; hit = true; break; } }
+    if (!hit) { builderLoadCatalogThen(qd.table); return; }
+  }
+  bldSetColumns(qd.table);
+  bldRenderFields();
+  bldRefreshTimeColSel();
+  // 输出字段
+  document.querySelectorAll('#bldFieldsBox input[type=checkbox]').forEach(function (c) {
+    c.checked = (qd.select || []).indexOf(c.value) >= 0;
+  });
+  // 排序 & 上限
+  const oc = document.getElementById('bldOrderCol');
+  if (oc && qd.order) {
+    let setCol = false;
+    for (let i = 0; i < oc.options.length; i++) { if (oc.options[i].value === qd.order.column) { oc.selectedIndex = i; setCol = true; break; } }
+    if (!setCol) oc.value = qd.order.column || '';
+    const od = document.getElementById('bldOrderDir'); if (od) od.value = qd.order.dir || 'DESC';
+  }
+  const lim = document.getElementById('bldLimit');
+  if (lim && qd.limit) lim.value = qd.limit;
+  // 汇总
+  const s = qd.summary || {};
+  const sc = document.getElementById('bldSumCount');
+  if (sc) sc.checked = s.count !== false;
+  document.getElementById('bldAggRows').innerHTML = '';
+  (s.aggs || []).forEach(function (a) { bldAddAggRow({ col: a.column, agg: a.agg }); });
+  // filters：将旧式“同一列 gte + lte 两个动态参数”合并为单行 between
+  const mergedFilt = [];
+  const rawFilt = (qd.filters || []).filter(function (f) { return f && f.column; });
+  const skipIdx = {};
+  for (let i = 0; i < rawFilt.length; i++) {
+    const fi = rawFilt[i];
+    if (skipIdx[i] || fi.fixed) { mergedFilt.push(fi); continue; }
+    const opLo = String(fi.op || '').toLowerCase();
+    if (!(opLo === 'gte' || opLo === 'gt' || opLo === 'lte' || opLo === 'lt')) { mergedFilt.push(fi); continue; }
+    // 找互补伙伴：同列，gt<->lt / gte<->lte
+    const comp = (opLo === 'gte' || opLo === 'gt') ? ((opLo === 'gte') ? 'lte' : 'lt') : ((opLo === 'lte') ? 'gte' : 'gt');
+    let j = -1;
+    for (let k = i + 1; k < rawFilt.length; k++) {
+      if (rawFilt[k].column === fi.column && String(rawFilt[k].op || '').toLowerCase() === comp && !rawFilt[k].fixed) { j = k; break; }
+    }
+    if (j === -1) { mergedFilt.push(fi); continue; }
+    const fj = rawFilt[j];
+    const lowIsStart = (opLo === 'gte' || opLo === 'gt');
+    const startF = lowIsStart ? fi : fj;
+    const endF = lowIsStart ? fj : fi;
+    skipIdx[j] = true;
+    mergedFilt.push({
+      column: fi.column, op: 'between', fixed: false,
+      param: startF.param || 'start_time', param2: endF.param || 'end_time',
+      default: startF.default || '', default2: endF.default || '',
+      required: !!(startF.required || endF.required), desc: fi.desc || '',
+    });
+  }
+  document.getElementById('bldFiltRows').innerHTML = '';
+  mergedFilt.forEach(function (f) {
+    if (!f || !f.column) return;
+    // 老数据若用「两个 gte/lte 行」表达时间段，升级为单行 between
+    if (!f.fixed && f.op === 'between') {
+      bldAddFilter({
+        field: f.column, op: 'between', src: 'param',
+        param: f.param, param2: f.param2, default: f.default, default2: f.default2,
+        required: f.required, desc: f.desc,
+      });
+      return;
+    }
+    bldAddFilter({
+      field: f.column,
+      op: f.op,
+      src: f.fixed ? 'fixed' : 'param',
+      param: f.param,
+      default: f.default,
+      value: f.value,
+      required: f.required,
+      desc: f.desc,
+    });
+  });
+  bldFiltEmpty();
+  bldRefreshTestParams();
+}
+
+function builderEditRoute(path) {
+  const routes = window.__customRoutesCache || [];
+  const route = routes.find(function (r) { return r.route_path === path; });
+  if (!route) { loadCustomRoutes().then(function () { builderEditRoute(path); }); return; }
+  let qd = null;
+  try { qd = typeof route.query_def === 'string' ? JSON.parse(route.query_def || '{}') : (route.query_def || null); } catch (e) { qd = null; }
+  if (!qd || !qd.table) { showToast('该路由不是可视化定义，无法在构造器中编辑', false); return; }
+  // 记录基本信息
+  BLD_EDIT_PATH = route.route_path || '';
+  BLD_RENDER_KEY = '';
+  window.__bldBasic = { desc: route.description || '', enabled: !(route.enabled === 0), limit: route.max_rows || qd.limit || 1000, table: qd.table };
+  // 切到构造器 tab 并回填
+  switchApiSubTab('builder');
+  const doFill = function () {
+    builderRender();
+    const pre = window.__bldBasic || {};
+    if (pre) {
+      const p = document.getElementById('bldPath'); if (p) p.value = BLD_EDIT_PATH;
+      const d = document.getElementById('bldDesc'); if (d) d.value = pre.desc || '';
+      const e = document.getElementById('bldEnabled'); if (e) e.checked = !!pre.enabled;
+      const l = document.getElementById('bldLimit'); if (l) l.value = pre.limit || 1000;
+    }
+    bldRestoreQd(qd);
+    const t = bldCurrentTable();
+    BLD_RENDER_KEY = (BLD_EDIT_PATH || '*') + '|' + (t || '');
+  };
+  setTimeout(function () {
+    if (!BLD_CATALOG) { builderLoadCatalogThen(qd.table); setTimeout(doFill, 150); } else doFill();
+  }, 80);
+}
+
+
+// ==============================
+//  ➕ 新建表（可视化建表）
+// ==============================
+const CREATE_API = '/api/ha_data_store/create_table';
+const CT_TYPES = ['TEXT', 'INTEGER', 'REAL', 'NUMERIC', 'BOOLEAN', 'BLOB', 'DATE', 'DATETIME'];
+
+function openCreateTableModal() {
+  document.getElementById('createTableName').value = '';
+  document.getElementById('createAutoId').checked = true;
+  document.getElementById('createTableStatus').textContent = '';
+  const rows = document.getElementById('createColRows');
+  rows.innerHTML = '';
+  // 预置三个常用字段行（不含 id）
+  [['name', 'TEXT'], ['value', 'REAL'], ['remark', 'TEXT']].forEach(function(pair) {
+    createAddColRow(pair[0], pair[1]);
+  });
+  createAutoIdChanged();
+  document.getElementById('createTableOverlay').style.display = 'block';
+  document.getElementById('createTableModal').style.display = 'block';
+  document.getElementById('createTableName').focus();
+}
+
+function closeCreateTableModal() {
+  document.getElementById('createTableOverlay').style.display = 'none';
+  document.getElementById('createTableModal').style.display = 'none';
+}
+
+function createAutoIdChanged() {
+  const auto = document.getElementById('createAutoId').checked;
+  document.querySelectorAll('#createColRows .ctr .col-pk').forEach(chk => {
+    chk.disabled = auto;
+    if (auto) chk.checked = false;
+  });
+}
+
+function createAddColRow(name, type) {
+  const rows = document.getElementById('createColRows');
+  const row = document.createElement('div');
+  row.className = 'ctr';
+  row.style.cssText = 'display:grid;grid-template-columns:1fr 130px 70px 140px 40px;gap:6px;margin-bottom:6px;align-items:center';
+  const inp = document.createElement('input');
+  inp.className = 'col-name';
+  inp.value = name || '';
+  inp.placeholder = '字段名';
+  inp.style.cssText = 'width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-family:monospace';
+  const tsel = document.createElement('select');
+  tsel.className = 'col-type';
+  CT_TYPES.forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t;
+    if (t === (type || 'TEXT')) opt.selected = true;
+    tsel.appendChild(opt);
+  });
+  const pk = document.createElement('input');
+  pk.type = 'checkbox';
+  pk.className = 'col-pk';
+  pk.title = '设为主键（须 INTEGER）';
+  pk.disabled = document.getElementById('createAutoId').checked;
+  const def = document.createElement('input');
+  def.className = 'col-default';
+  def.placeholder = '默认值';
+  def.style.cssText = 'width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box';
+  const del = document.createElement('button');
+  del.textContent = '✕';
+  del.style.cssText = 'padding:4px 6px;font-size:12px;background:#c0392b;color:#fff;border:none;border-radius:5px;cursor:pointer';
+  del.onclick = function() { row.remove(); };
+  row.appendChild(inp); row.appendChild(tsel);
+  const pkWrap = document.createElement('div');
+  pkWrap.style.cssText = 'text-align:center';
+  pkWrap.appendChild(pk);
+  row.appendChild(pkWrap); row.appendChild(def); row.appendChild(del);
+  rows.appendChild(row);
+}
+
+async function doCreateTable() {
+  const table = document.getElementById('createTableName').value.trim();
+  const st = document.getElementById('createTableStatus');
+  if (!st) return;
+  if (!table) { st.textContent = '请填写表名'; return; }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) { st.textContent = '表名只能含字母/数字/下划线且不能以数字开头'; return; }
+  const autoId = document.getElementById('createAutoId').checked;
+  const columns = [];
+  let empty = true;
+  document.querySelectorAll('#createColRows .ctr').forEach(row => {
+    const name = row.querySelector('.col-name').value.trim();
+    const type = row.querySelector('.col-type').value;
+    const pk = row.querySelector('.col-pk').checked;
+    const def = row.querySelector('.col-default').value;
+    if (!name) return;
+    empty = false;
+    columns.push({ name: name, type: type, pk: pk, default: def });
+  });
+  if (!autoId && empty) { st.textContent = '至少需要一个字段'; return; }
+  st.textContent = '创建中...';
+  try {
+    const resp = await fetch(CREATE_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table: table, columns: columns, auto_id: autoId }),
+    });
+    const json = await resp.json();
+    if (!json.success) { st.textContent = '失败: ' + (json.error || ''); return; }
+    showToast(json.message || '表创建成功', true);
+    closeCreateTableModal();
+    initDbViewer();
+    // 选中新表
+    setTimeout(function() {
+      const sel = document.getElementById('tableSelect');
+      if (sel) {
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === table) { sel.selectedIndex = i; break; }
+        }
+      }
+      loadTable(1);
+    }, 200);
+  } catch (e) { st.textContent = '请求失败'; }
+}
 </script>
 </body>
 </html>

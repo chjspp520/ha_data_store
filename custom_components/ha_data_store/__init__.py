@@ -347,18 +347,37 @@ def _init_database(db_path: str) -> None:
                 f"ON {tbl} (entity_id, datetime);"
             )
 
-        # 4) 自定义路由表
+        # 4) 自定义路由表（兼容：可视化查询构造器发布的定义也存于此表）
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_CUSTOM_ROUTES} (
                 route_path    TEXT PRIMARY KEY,
                 sql_statement TEXT NOT NULL,
                 description   TEXT NOT NULL DEFAULT '',
+                query_def     TEXT NOT NULL DEFAULT '',
+                source        TEXT NOT NULL DEFAULT 'manual',
+                enabled       INTEGER NOT NULL DEFAULT 1,
+                max_rows      INTEGER NOT NULL DEFAULT 1000,
+                param_schema  TEXT NOT NULL DEFAULT '',
                 created_at    TEXT NOT NULL DEFAULT '',
                 updated_at    TEXT NOT NULL DEFAULT ''
             );
             """
         )
+        # 迁移：已有表补充查询构造器所需列
+        _cr_existing_cols = [
+            row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_CUSTOM_ROUTES})")
+        ]
+        if "query_def" not in _cr_existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_CUSTOM_ROUTES} ADD COLUMN query_def TEXT NOT NULL DEFAULT ''")
+        if "source" not in _cr_existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_CUSTOM_ROUTES} ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+        if "enabled" not in _cr_existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_CUSTOM_ROUTES} ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+        if "max_rows" not in _cr_existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_CUSTOM_ROUTES} ADD COLUMN max_rows INTEGER NOT NULL DEFAULT 1000")
+        if "param_schema" not in _cr_existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_CUSTOM_ROUTES} ADD COLUMN param_schema TEXT NOT NULL DEFAULT ''")
 
         # 5) 属性类型定义表
         conn.execute(
@@ -4141,6 +4160,9 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         MediaQueueView,
         MediaNowPlayingView,
         TableColumnsView,
+        QueryCatalogView,
+        RoutesTestView,
+        CreateTableView,
         ReportEntitiesView,
         ReportAutoEntitiesView,
         ActionLogView,
@@ -4178,6 +4200,9 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(AttrManualTriggerView(db_path))
     hass.http.register_view(DbMaintainView(db_path))
     hass.http.register_view(DbAlterTableView(db_path))
+    hass.http.register_view(QueryCatalogView(db_path))
+    hass.http.register_view(RoutesTestView(db_path))
+    hass.http.register_view(CreateTableView(db_path))
     hass.http.register_view(BatchEntityStateView(db_path))
     hass.http.register_view(PushTargetsView(db_path))
     hass.http.register_view(PushDataView(db_path))

@@ -100,6 +100,27 @@ def _power_to_kw(value: float, unit: str | None) -> float:
     return value / 1000.0
 
 
+def _meter_display_name(cfg: dict, suffix: str) -> str:
+    """生成用电实体显示名称（不改变实体 ID）。
+
+    格式：房间_设备_{日/月/年}用电量（下划线分隔）
+    - room 与 device_name 相同时去重（如 全屋_全屋 → 全屋）；
+    - 不相同或一方为空时只保留存在的部分；
+    - 返回如 "客厅_空调_日用电量" / "全屋_日用电量" / "空调_月用电量"。
+    """
+    room = (cfg.get("room") or "").strip()
+    dev = (cfg.get("device_name") or "").strip()
+    if room and dev:
+        base = room if room == dev else f"{room}_{dev}"
+    elif dev:
+        base = dev
+    elif room:
+        base = room
+    else:
+        base = cfg.get("id_slug") or cfg.get("entity_id") or "用电"
+    return f"{base}_{suffix}"
+
+
 def _merge_period_list(
     cache: list[dict[str, object]], field: str, key: str, value: float
 ) -> list[dict[str, object]]:
@@ -136,7 +157,7 @@ class PowerDailySensor(SensorEntity):
         slug = cfg["id_slug"]
         self._cfg = cfg
         self._attr_unique_id = f"{DOMAIN}_power_meter_{slug}_daily"
-        self._attr_name = f"{cfg.get('device_name') or slug} 日用电"
+        self._attr_name = _meter_display_name(cfg, "日用电量")
         self._attr_device_info = mgr.device_info(cfg)
         self._attr_native_value = 0.0
         self._attr_extra_state_attributes = {}
@@ -174,7 +195,7 @@ class PowerMonthlySensor(SensorEntity):
         slug = cfg["id_slug"]
         self._cfg = cfg
         self._attr_unique_id = f"{DOMAIN}_power_meter_{slug}_monthly"
-        self._attr_name = f"{cfg.get('device_name') or slug} 月用电"
+        self._attr_name = _meter_display_name(cfg, "月用电量")
         self._attr_device_info = mgr.device_info(cfg)
         self._attr_native_value = 0.0
         self._attr_extra_state_attributes = {}
@@ -211,7 +232,7 @@ class PowerYearlySensor(SensorEntity):
         slug = cfg["id_slug"]
         self._cfg = cfg
         self._attr_unique_id = f"{DOMAIN}_power_meter_{slug}_yearly"
-        self._attr_name = f"{cfg.get('device_name') or slug} 年用电"
+        self._attr_name = _meter_display_name(cfg, "年用电量")
         self._attr_device_info = mgr.device_info(cfg)
         self._attr_native_value = 0.0
         self._attr_extra_state_attributes = {}

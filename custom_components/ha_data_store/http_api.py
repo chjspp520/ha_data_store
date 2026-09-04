@@ -533,23 +533,656 @@ class EntityConfigView(_BaseDBView):
 
 
 # ========================================================================== #
+#  查询构造器 / 自定义路由 扩展：常量与编译辅助                                   #
+# ========================================================================== #
+# 路由来源标记
+_SOURCE_MANUAL = "manual"
+_SOURCE_BUILDER = "builder"
+
+# 内部/配置表：不进入「可查询表目录」，也不允许被构造器引用
+_INTERNAL_TABLES = frozenset({
+    TABLE_ENTITY_CONFIGS, TABLE_CUSTOM_ROUTES, TABLE_ATTR_TYPE_DEFS,
+    TABLE_EXPORT_CONFIGS, TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS,
+    TABLE_API_KEYS, TABLE_API_SETTINGS,
+    TABLE_VACUUM_TYPE_DEFS, TABLE_VACUUM_CONFIGS, TABLE_POWER_METER_CONFIGS,
+})
+
+# 聚合函数白名单（构造器可用；数值列才允许 avg/sum）
+_BUILDER_AGGS = {"avg", "min", "max", "sum", "count"}
+
+# 时间分桶：substr(datetime, 1, n)
+_BUCKET_EXPRS = {
+    "year": 4, "month": 7, "day": 10, "hour": 13, "minute": 16,
+}
+
+
+def _is_internal_table(name: str) -> bool:
+    """判断是否为内部/配置表（构造器目录与编译均须排除）。"""
+    if not name:
+        return True
+    low = name.lower()
+    if low.startswith("sqlite_") or low.startswith("_sqlite_"):
+        return True
+    if low.endswith("_configs") or low.endswith("_type_defs"):
+        return True
+    return name in _INTERNAL_TABLES
+
+
+def _sql_literal(value) -> str:
+    """把 Python 值格式化为安全的 SQL 字面量（用于固定条件值，非用户输入拼接）。"""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    text = str(value)
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _builder_catalog(db_path: str) -> list[dict]:
+    """返回可查询表目录（分组），供前端查询构造器选表。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        names = [r[0] for r in rows]
+        groups = {
+            "env": {"key": "env", "label": "🌡️ 环境传感器", "tables": []},
+            "attr": {"key": "attr", "label": "📊 属性提取", "tables": []},
+            "device_history": {"key": "device_history", "label": "📡 设备历史", "tables": []},
+            "other": {"key": "other", "label": "🗂️ 其它/自定义数据", "tables": []},
+        }
+        for name in names:
+            if _is_internal_table(name):
+                continue
+            if name.startswith("env_"):
+                key = "env"
+            elif name.startswith("attr_"):
+                key = "attr"
+            elif name == TABLE_DEVICE_HISTORY:
+                key = "device_history"
+            else:
+                key = "other"
+            try:
+                cnt = conn.execute(
+                    f"SELECT COUNT(*) FROM [{name}]"
+                ).fetchone()[0]
+            except Exception:
+                cnt = 0
+            # 列信息（构造器选字段用）
+            try:
+                col_rows = conn.execute(f'PRAGMA table_info("{name}")').fetchall()
+                columns = [{"name": c[1], "type": c[2]} for c in col_rows]
+            except Exception:
+                columns = []
+            groups[key]["tables"].append({"name": name, "count": cnt, "columns": columns})
+        result = []
+        for g in groups.values():
+            if g["tables"]:
+                result.append(g)
+        return result
+    finally:
+        conn.close()
+
+
+def _table_columns(db_path: str, table: str) -> list[dict]:
+    """返回表的列信息 {name, type}。表不存在返回 []。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        if _is_internal_table(table):
+            return []
+        rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        return [{"name": r[1], "type": r[2]} for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def _is_named_param(value) -> str | None:
+    """若 value 是命名占位符(:xxx)则返回 xxx，否则返回 None。"""
+    if isinstance(value, str):
+        m = re.fullmatch(r"[:@$]([A-Za-z_][A-Za-z0-9_]*)", value.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
+def _coerce_param_value(param_type: str, raw_value) -> str:
+    """按参数类型规范化运行时传入的 URL 值。
+
+    对 'list' 类型（IN 条件）把逗号分隔值转成 JSON 数组文本供 json_each 展开。
+    """
+    raw = "" if raw_value is None else str(raw_value)
+    if param_type == "list":
+        if raw == "":
+            return "[]"
+        if raw.strip().startswith("["):
+            return raw
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        try:
+            return json.dumps(parts, ensure_ascii=False)
+        except Exception:
+            return "[]"
+    return raw
+
+
+def _compile_condition(field: str, op: str, value) -> str:
+    """把单个条件编译成 SQL 片段。
+
+    value 若为以 ':' 开头的命名占位符（如 :entity_id）则保留占位符（运行时由 URL 绑定）；
+    否则视为固定字面量，内部转义后内嵌。
+    """
+    op = (op or "eq").lower()
+    qfield = f'"{field}"'
+    if op in ("null", "is_null"):
+        return f"{qfield} IS NULL"
+    if op in ("notnull", "is_not_null"):
+        return f"{qfield} IS NOT NULL"
+    if op in ("eq", "neq", "gt", "lt", "gte", "lte"):
+        if _is_named_param(value):
+            placeholder = ":" + _is_named_param(value)
+        else:
+            placeholder = _sql_literal(value)
+        op_sql = {"eq": "=", "neq": "!=", "gt": ">", "lt": "<", "gte": ">=", "lte": "<="}[op]
+        return f"{qfield} {op_sql} {placeholder}"
+    if op in ("like", "not_like"):
+        if _is_named_param(value):
+            placeholder = ":" + _is_named_param(value)
+        else:
+            placeholder = _sql_literal(value)
+        sql_op = "LIKE" if op == "like" else "NOT LIKE"
+        return f"{qfield} {sql_op} {placeholder}"
+    if op == "in":
+        # 命名参数：运行时绑定逗号分隔/JSON 数组，用 json_each 展开为行
+        np = _is_named_param(value)
+        if np:
+            return f"{qfield} IN (SELECT value FROM json_each(:{np}))"
+        items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+        parts = []
+        for it in items:
+            it = str(it).strip()
+            parts.append(_sql_literal(it))
+        if not parts:
+            raise ValueError("IN 条件值不能为空")
+        return f"{qfield} IN ({', '.join(parts)})"
+    if op == "between":
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            raise ValueError("BETWEEN 条件需要两个值")
+        lo = str(value[0]).strip()
+        hi = str(value[1]).strip()
+        if lo.startswith(":") or hi.startswith(":"):
+            raise ValueError("BETWEEN 条件暂不支持命名参数，请使用固定值")
+        return f"{qfield} BETWEEN {_sql_literal(lo)} AND {_sql_literal(hi)}"
+    raise ValueError(f"不支持的条件运算符 '{op}'")
+
+
+def _compile_builder_query(query_def: dict, db_path: str, default_limit: int = 1000) -> str:
+    """把构造器提交的 query_def 编译为参数化 SELECT SQL（只读、白名单）。
+
+    返回的 SQL 使用 :name 占位符（供运行时 URL 绑定），无用户字符串直接拼接。
+    """
+    table = (query_def.get("table") or "").strip()
+    if not table:
+        raise ValueError("未指定数据表")
+    if _is_internal_table(table):
+        raise ValueError(f"表 '{table}' 为内部表，不允许通过查询构造器访问")
+
+    columns = {c["name"]: c["type"] for c in _table_columns(db_path, table)}
+    if not columns:
+        raise ValueError(f"数据表 '{table}' 不存在")
+
+    def _check_field(field: str) -> None:
+        if field not in columns:
+            raise ValueError(f"字段 '{field}' 不存在于表 '{table}'")
+
+    conditions = query_def.get("conditions") or []
+    where_sql = []
+    for cond in conditions:
+        field = (cond.get("field") or "").strip()
+        if not field:
+            continue
+        _check_field(field)
+        where_sql.append(_compile_condition(field, cond.get("op"), cond.get("value")))
+    where_clause = (" WHERE " + " AND ".join(where_sql)) if where_sql else ""
+
+    try:
+        limit = int(query_def.get("limit") or default_limit)
+    except (TypeError, ValueError):
+        limit = default_limit
+    limit = max(1, min(limit, 2000))
+
+    mode = query_def.get("mode") or "detail"
+
+    if mode == "aggregate":
+        funcs = query_def.get("aggregate", {}).get("funcs") or []
+        if not funcs:
+            raise ValueError("聚合模式至少需要一个聚合函数")
+        bucket = (query_def.get("aggregate", {}).get("bucket") or "").strip().lower()
+        time_col = (query_def.get("aggregate", {}).get("timeColumn") or "datetime").strip()
+        if bucket and bucket not in _BUCKET_EXPRS:
+            raise ValueError(f"不支持的分桶粒度 '{bucket}'，可选: " + "/".join(_BUCKET_EXPRS.keys()))
+        if bucket:
+            _check_field(time_col)
+
+        sel_parts = []
+        group_parts = []
+        if bucket:
+            n = _BUCKET_EXPRS[bucket]
+            expr = f"substr([{time_col}],1,{n})"
+            sel_parts.append(f"{expr} AS bucket")
+            group_parts.append(expr)
+        for f in funcs:
+            col = (f.get("col") or "").strip()
+            fn = (f.get("fn") or "").strip().lower()
+            if not col or not fn:
+                raise ValueError("聚合函数缺少字段或函数名")
+            _check_field(col)
+            if fn not in _BUILDER_AGGS:
+                raise ValueError(f"不支持的聚合函数 '{fn}'，可选: " + "/".join(sorted(_BUILDER_AGGS)))
+            ctype = (columns.get(col) or "TEXT").upper()
+            if fn in ("avg", "sum") and "INT" not in ctype and "REAL" not in ctype and "NUM" not in ctype and "BOOL" not in ctype and ctype != "DOUBLE":
+                raise ValueError(f"字段 '{col}' 类型 {ctype} 不支持 {fn.upper()} 聚合，仅数值字段可用")
+            alias = (f.get("alias") or f"{fn}_{col}")
+            alias = re.sub(r"[^A-Za-z0-9_]", "_", alias) or "v"
+            sel_parts.append(f"{fn.upper()}([{col}]) AS [{alias}]")
+        # 排序
+        order = ""
+        order_by = query_def.get("orderBy") or []
+        for ob in order_by[:1]:
+            if (ob.get("field") or "").strip() == "bucket" and bucket:
+                direction = "ASC" if str(ob.get("dir", "ASC")).upper() != "DESC" else "DESC"
+                order = f" ORDER BY bucket {direction}"
+                break
+        if not order and bucket:
+            order = " ORDER BY bucket ASC"
+        group_sql = (f" GROUP BY {', '.join(group_parts)}") if group_parts else ""
+        return f"SELECT {', '.join(sel_parts)} FROM [{table}]{where_clause}{group_sql}{order}"
+    # detail 明细模式
+    fields = query_def.get("fields") or []
+    fields = [str(x).strip() for x in fields if str(x).strip()]
+    if not fields:
+        raise ValueError("明细模式至少选择一个字段")
+    for f in fields:
+        _check_field(f)
+    sel = ", ".join(f"[{f}]" for f in fields)
+    order = ""
+    order_by = query_def.get("orderBy") or []
+    if order_by:
+        parts = []
+        for ob in order_by[:2]:
+            field = (ob.get("field") or "").strip()
+            if not field:
+                continue
+            _check_field(field)
+            direction = "DESC" if str(ob.get("dir", "DESC")).upper() == "DESC" else "ASC"
+            parts.append(f"[{field}] {direction}")
+        if parts:
+            order = " ORDER BY " + ", ".join(parts)
+    return f"SELECT {sel} FROM [{table}]{where_clause}{order} LIMIT {limit}"
+
+
+def _collect_route_params(sql: str) -> list[str]:
+    """从 SQL 提取命名占位符（:name/@name/$name），去重保序。"""
+    tokens = re.findall(r"[:@$]([A-Za-z_][A-Za-z0-9_]*)", sql or "")
+    names = []
+    for t in tokens:
+        if t not in names:
+            names.append(t)
+    return names
+
+
+def _route_sql_limit_guard(sql: str, max_rows: int) -> str:
+    """若 SQL 顶层没有 LIMIT，则追加安全上限（仅用于防御性兜底）。"""
+    if not sql:
+        return sql
+    stripped = sql.rstrip().rstrip(";").strip()
+    tail_match = re.search(r"\bLIMIT\s+\d+\s*$", stripped, re.IGNORECASE)
+    if tail_match:
+        return stripped + ";"
+    return f"{stripped} LIMIT {max_rows};"
+
+
+# ========================================================================== #
+#  查询构造器 v2 — 直观版运行时编译执行                                          #
+#  数据结构（rev=2）：
+#    table / select(null=全部|列数组) / order{column,dir} / limit
+#    filters[] = {column, op, control, fixed, value, param, param2,
+#                 default, default2, required, desc}
+#    summary = {count:bool, aggs:[{column, agg}]}
+#  动态参数约定：URL 传值覆盖 param；有 default 且未传时用默认；
+#  required 且无值 → 400；非 required 且无值 → 该过滤自动跳过（动态过滤）。
+# ========================================================================== #
+_CTRL_TYPE_MAP = {
+    "text": "text", "number": "real", "integer": "integer", "real": "real",
+    "bool": "bool", "list": "list", "like": "like", "select": "text",
+    "datetime": "datetime", "date": "date", "time": "time",
+}
+_AGG_WHITELIST = {"sum", "avg", "max", "min", "count"}
+
+
+def _bv2_columns(db_path: str, table: str) -> dict[str, str]:
+    if _is_internal_table(table):
+        raise ValueError(f"表 '{table}' 为内部表，不允许访问")
+    cols = {c["name"]: c["type"] for c in _table_columns(db_path, table)}
+    if not cols:
+        raise ValueError(f"数据表 '{table}' 不存在")
+    return cols
+
+
+def _bv2_check_field(cols: dict[str, str], field: str) -> str:
+    if not field or field not in cols:
+        raise ValueError(f"字段 '{field}' 不存在于当前数据表")
+    return field
+
+
+def _bv2_is_numeric_type(ctype: str) -> bool:
+    up = (ctype or "").upper()
+    return any(t in up for t in ("INT", "REAL", "NUM", "DOUBLE", "BOOL"))
+
+
+def _bv2_resolve(values: dict, param: str, default: str, required: bool) -> str | None:
+    """返回参数实际值（URL 传入 > 默认值）；None=应跳过；空且必填会由调用方报错。"""
+    if param:
+        raw = values.get(param)
+        if raw is not None and raw != "":
+            return str(raw)
+    if default not in (None, ""):
+        return str(default)
+    if required:
+        raise ValueError(f"缺少必填参数 '{param}'（未传且无默认值）")
+    return None
+
+
+def _bv2_build(qd: dict, db_path: str, values: dict, max_rows: int) -> dict:
+    """构造 rev2 查询的全部 SQL 与绑定参数。返回:
+        {main, binds, count_sql, aggs:[(label, sql)]}
+    只校验与生成，不执行。
+    """
+    table = str(qd.get("table") or "").strip()
+    if not table:
+        raise ValueError("未指定数据表")
+    cols = _bv2_columns(db_path, table)
+
+    # 输出列
+    select_def = qd.get("select")
+    if select_def:
+        sel_parts = [_bv2_check_field(cols, str(c)) for c in select_def if str(c).strip()]
+        if not sel_parts:
+            raise ValueError("输出字段列表为空")
+        sel_sql = ", ".join(f'[{c}]' for c in sel_parts)
+    else:
+        sel_sql = "*"
+
+    # 过滤
+    wheres: list[str] = []
+    binds: dict[str, str] = {}
+    bind_idx = 0
+
+    def _bind(raw_value: str) -> str:
+        nonlocal bind_idx
+        bind_idx += 1
+        pn = f"p{bind_idx}"
+        binds[pn] = raw_value
+        return f":{pn}"
+
+    for f in qd.get("filters") or []:
+        if not isinstance(f, dict):
+            continue
+        col = _bv2_check_field(cols, str(f.get("column") or ""))
+        qfield = f"[{col}]"
+        op = str(f.get("op") or "eq").strip().lower()
+        control = str(f.get("control") or "text").lower()
+        fixed = bool(f.get("fixed", False))
+        value = str(f.get("value") or "")
+
+        if op in ("null", "is_null", "empty"):
+            wheres.append(f"{qfield} IS NULL")
+            continue
+        if op in ("notnull", "is_not_null", "notempty"):
+            wheres.append(f"{qfield} IS NOT NULL")
+            continue
+
+        if fixed:
+            if op in ("in",):
+                items = [i.strip() for i in value.split(",") if i.strip()]
+                if not items:
+                    continue
+                wheres.append(f"{qfield} IN ({', '.join(_sql_literal(i) for i in items)})")
+                continue
+            if op == "between":
+                parts = [p.strip() for p in value.split(",") if p.strip()]
+                if len(parts) < 2:
+                    continue
+                wheres.append(f"{qfield} BETWEEN {_sql_literal(parts[0])} AND {_sql_literal(parts[1])}")
+                continue
+            if not value:
+                continue
+            if op in ("like", "not_like"):
+                sqlop = "LIKE" if op == "like" else "NOT LIKE"
+                wheres.append(f"{qfield} {sqlop} {_sql_literal(value)}")
+                continue
+            opr = {"eq": "=", "neq": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}.get(op)
+            if opr:
+                wheres.append(f"{qfield} {opr} {_sql_literal(value)}")
+            continue
+
+        # 动态传参
+        param = str(f.get("param") or "").strip()
+        if not param:
+            continue
+        if op == "between":
+            p1 = _bv2_resolve(values, param, str(f.get("default") or ""), bool(f.get("required")))
+            p2 = _bv2_resolve(
+                values,
+                str(f.get("param2") or param + "_to"),
+                str(f.get("default2") or ""),
+                bool(f.get("required")),
+            )
+            if p1 is None or p2 is None:
+                continue  # 非必填缺值 → 该区间条件自动跳过
+            b1, b2 = _bind(p1), _bind(p2)
+            wheres.append(f"{qfield} BETWEEN {b1} AND {b2}")
+            continue
+        raw_v = _bv2_resolve(values, param, str(f.get("default") or ""), bool(f.get("required")))
+        if raw_v is None:
+            continue
+        if op in ("like", "not_like"):
+            sqlop = "LIKE" if op == "like" else "NOT LIKE"
+            wheres.append(f"{qfield} {sqlop} {_bind(raw_v)}")
+            continue
+        if op == "in":
+            json_list = _coerce_param_value("list", raw_v)
+            wheres.append(f"{qfield} IN (SELECT value FROM json_each({_bind(json_list)}))")
+            continue
+        opr = {"eq": "=", "neq": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}.get(op)
+        if opr:
+            wheres.append(f"{qfield} {opr} {_bind(raw_v)}")
+    where_sql = (" WHERE " + " AND ".join(wheres)) if wheres else ""
+
+    # 排序
+    order_sql = ""
+    order_def = qd.get("order")
+    if isinstance(order_def, dict) and order_def.get("column"):
+        oc = _bv2_check_field(cols, str(order_def["column"]))
+        odir = "DESC" if str(order_def.get("dir", "ASC")).upper() == "DESC" else "ASC"
+        order_sql = f" ORDER BY [{oc}] {odir}"
+
+    # 上限
+    try:
+        limit = int(qd.get("limit") or max_rows)
+    except (TypeError, ValueError):
+        limit = max_rows
+    limit = max(1, min(limit, max_rows))
+
+    main = f"SELECT {sel_sql} FROM [{table}]{where_sql}{order_sql} LIMIT {limit}"
+
+    # 汇总
+    summary = qd.get("summary") or {}
+    count_sql = None
+    aggs: list[tuple[str, str]] = []
+    if summary.get("count"):
+        count_sql = f"SELECT COUNT(*) FROM [{table}]{where_sql}"
+    for a in summary.get("aggs") or []:
+        if not isinstance(a, dict):
+            continue
+        agg = str(a.get("agg") or "").lower()
+        col = str(a.get("column") or "")
+        if agg not in _AGG_WHITELIST:
+            continue
+        _bv2_check_field(cols, col)
+        if agg in ("sum", "avg") and not _bv2_is_numeric_type(cols[col]):
+            raise ValueError(f"字段 '{col}' 非数值列，不支持 {agg.upper()}")
+        label = re.sub(r"[^A-Za-z0-9_]", "_", f"{agg}_{col}") or "agg"
+        aggs.append((label, f"{agg.upper()}([{col}])"))
+    return {"main": main, "binds": binds, "count_sql": count_sql,
+            "aggs": aggs, "where": where_sql}
+
+
+def _bv2_execute(db_path: str, qd: dict, values: dict, max_rows: int = 2000) -> dict:
+    """编译并执行 rev2 构造定义（executor 内调用）。返回查询结果与汇总。"""
+    plan = _bv2_build(qd, db_path, values, max_rows=max_rows)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(plan["main"], plan["binds"])
+        rows = cursor.fetchall()
+        columns = [d[0] for d in cursor.description] if cursor.description else []
+        count = None
+        agg_vals = {}
+        if plan["count_sql"]:
+            cnt = conn.execute(plan["count_sql"], plan["binds"]).fetchone()
+            count = cnt[0] if cnt else 0
+        for label, agg_sql in plan["aggs"]:
+            sql = f"SELECT {agg_sql} AS v FROM [{qd['table']}]{plan['where']}"
+            row = conn.execute(sql, plan["binds"]).fetchone()
+            agg_vals[label] = row["v"] if row is not None else None
+        return {
+            "sql": plan["main"], "columns": columns,
+            "rows": [dict(r) for r in rows], "count": count,
+            "aggs": agg_vals,
+        }
+    finally:
+        conn.close()
+
+
+_BV2_OPS = {
+    "eq", "neq", "gt", "gte", "lt", "lte",
+    "like", "not_like", "in", "between",
+    "null", "notnull", "is_null", "is_not_null", "empty", "notempty",
+}
+
+
+def _bv2_validate(qd: dict, db_path: str) -> None:
+    """保存前严格校验 v2 定义（表/列/操作符/聚合白名单），不解析参数。"""
+    table = str(qd.get("table") or "").strip()
+    if not table:
+        raise ValueError("未指定数据表")
+    cols = _bv2_columns(db_path, table)
+    for c in (qd.get("select") or []):
+        if str(c).strip():
+            _bv2_check_field(cols, str(c))
+    for f in qd.get("filters") or []:
+        if not isinstance(f, dict):
+            raise ValueError("过滤条件格式错误")
+        col = str(f.get("column") or "").strip()
+        if not col:
+            raise ValueError("过滤条件缺少字段")
+        _bv2_check_field(cols, col)
+        op = str(f.get("op") or "eq").lower()
+        if op not in _BV2_OPS:
+            raise ValueError(f"字段 '{col}' 使用了不支持的操作符 '{op}'")
+        fixed = bool(f.get("fixed", False))
+        if not fixed:
+            param = str(f.get("param") or "").strip()
+            if not param or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", param):
+                raise ValueError(f"字段 '{col}' 的动态参数名非法")
+            p2 = str(f.get("param2") or param + "_to").strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", p2):
+                raise ValueError(f"字段 '{col}' 的区间止参数名非法")
+    order_def = qd.get("order")
+    if isinstance(order_def, dict) and order_def.get("column"):
+        _bv2_check_field(cols, str(order_def["column"]))
+    for a in (qd.get("summary") or {}).get("aggs") or []:
+        if not isinstance(a, dict):
+            continue
+        agg = str(a.get("agg") or "").lower()
+        col = str(a.get("column") or "").strip()
+        if not col or not agg:
+            raise ValueError("汇总指标缺少字段或聚合方式")
+        if agg not in _AGG_WHITELIST:
+            raise ValueError(f"不支持的聚合方式 '{agg}'")
+        _bv2_check_field(cols, col)
+        if agg in ("sum", "avg") and not _bv2_is_numeric_type(cols[col]):
+            raise ValueError(f"字段 '{col}' 非数值列，不支持 {agg.upper()}")
+
+
+def _bv2_param_schema(qd: dict) -> list[dict]:
+    """从 filters 汇总调用参数描述（供 API 地址生成器渲染与运行时默认值）。"""
+    out: list[dict] = []
+    for f in qd.get("filters") or []:
+        if not isinstance(f, dict) or f.get("fixed"):
+            continue
+        param = str(f.get("param") or "").strip()
+        if not param:
+            continue
+        op = str(f.get("op") or "").lower()
+        ctype = _CTRL_TYPE_MAP.get(str(f.get("control") or "text"), "text")
+        desc = str(f.get("desc") or "")
+        column = str(f.get("column") or "")
+        if op == "between":
+            out.append({
+                "name": param,
+                "type": ctype, "default": str(f.get("default") or ""),
+                "required": 1 if f.get("required") else 0,
+                "desc": (desc or column) + " 起",
+            })
+            out.append({
+                "name": str(f.get("param2") or param + "_to"),
+                "type": ctype, "default": str(f.get("default2") or ""),
+                "required": 1 if f.get("required") else 0,
+                "desc": (desc or column) + " 止",
+            })
+            continue
+        out.append({
+            "name": param, "type": ctype, "default": str(f.get("default") or ""),
+            "required": 1 if f.get("required") else 0,
+            "desc": (desc or column) + (f" [{op}]" if op not in ("eq",) else ""),
+        })
+    return out
+
+
+# ========================================================================== #
 #  3. GET /api/device_energy/routes — 获取所有自定义路由                       #
 # ========================================================================== #
 class CustomRoutesListView(_BaseDBView):
-    """获取所有自定义路由及 SQL。"""
+    """获取所有自定义路由。
+
+    - db_viewer 登录会话（hds_auth cookie）：返回完整定义（含 SQL / query_def），供管理页编辑。
+    - 仅携带 API key 的外部调用：只返回对外字段（不含 SQL），防止通过列表泄露查询定义。
+    """
 
     url = "/api/ha_data_store/routes"
     name = "api:ha_data_store:routes_list"
 
     async def get(self, request: web.Request) -> web.Response:
         db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+
+        session_token = request.cookies.get("hds_auth", "")
+        is_session = bool(session_token and session_token == _make_auth_token(db_path))
 
         def _query() -> list[dict]:
             conn = sqlite3.connect(db_path)
             try:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    f"SELECT route_path, sql_statement, description, created_at, updated_at "
+                    f"SELECT route_path, sql_statement, description, query_def, source, "
+                    f"  enabled, max_rows, param_schema, created_at, updated_at "
                     f"FROM {TABLE_CUSTOM_ROUTES} ORDER BY route_path"
                 )
                 return [dict(row) for row in cursor.fetchall()]
@@ -557,11 +1190,20 @@ class CustomRoutesListView(_BaseDBView):
                 conn.close()
 
         try:
-            hass: HomeAssistant = request.app["hass"]
-            if (resp := self._check_api_enabled(request)):
-                return resp
             rows = await self._exec_in_executor(hass, _query)
-            return self.json({"success": True, "data": rows})
+            if not is_session:
+                public = []
+                for r in rows:
+                    public.append({
+                        "route_path": r.get("route_path", ""),
+                        "description": r.get("description", ""),
+                        "source": r.get("source", _SOURCE_MANUAL),
+                        "enabled": r.get("enabled", 1),
+                        "max_rows": r.get("max_rows", 1000),
+                        "param_schema": r.get("param_schema", ""),
+                    })
+                return self.json({"success": True, "data": public, "full": False})
+            return self.json({"success": True, "data": rows, "full": True})
         except Exception as exc:
             _LOGGER.exception("获取自定义路由失败")
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -571,10 +1213,20 @@ class CustomRoutesListView(_BaseDBView):
 #  4. POST /api/device_energy/routes — 新增/修改自定义路由                      #
 # ========================================================================== #
 class CustomRoutesView(_BaseDBView):
-    """新增或修改自定义路由（包含 route_path, sql_statement, description）。"""
+    """新增/修改/启停自定义路由。
+
+    支持两种来源：
+      - 手写 SQL（manual）：body 提供 sql_statement（兼容旧版）。
+      - 可视化构造器（builder）：body 提供 query_def，后端编译生成 sql_statement。
+    仅传 route_path + enabled 时视为启停切换。
+    """
 
     url = "/api/ha_data_store/routes"
     name = "api:ha_data_store:routes_update"
+
+    @staticmethod
+    def _valid_route_path(path: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", path))
 
     async def post(self, request: web.Request) -> web.Response:
         db_path = self._db_path
@@ -591,27 +1243,109 @@ class CustomRoutesView(_BaseDBView):
             return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
 
         route_path = body.get("route_path", "").strip()
-        sql_statement = body.get("sql_statement", "").strip()
-        description = body.get("description", "")
-
+        description = str(body.get("description") or "").strip()
         if not route_path:
             return self.json({"success": False, "error": "route_path 不能为空"}, status_code=400)
-        if not sql_statement:
-            return self.json({"success": False, "error": "sql_statement 不能为空"}, status_code=400)
+        if not self._valid_route_path(route_path):
+            return self.json({"success": False, "error": "route_path 只能包含字母/数字/下划线/中划线，长度≤64"}, status_code=400)
 
-        # --- 保存时做安全预检：只允许 SELECT 开头 ---
-        sql_upper = sql_statement.strip().upper()
-        if not sql_upper.startswith("SELECT"):
-            return self.json(
-                {"success": False, "error": "SQL 必须以 SELECT 开头"},
-                status_code=403,
-            )
-        for keyword in _DANGEROUS_KEYWORDS:
-            if keyword in sql_upper:
+        # 启停切换：仅带 route_path + enabled
+        has_enabled = "enabled" in body
+        has_query_def = "query_def" in body and body.get("query_def")
+        has_sql = bool((body.get("sql_statement") or "").strip())
+        if has_enabled and not has_query_def and not has_sql:
+            try:
+                enabled = 1 if int(body.get("enabled", 1)) else 0
+            except (TypeError, ValueError):
+                return self.json({"success": False, "error": "enabled 必须为 0/1"}, status_code=400)
+            now = _get_local_iso(tz)
+
+            def _toggle() -> None:
+                conn = sqlite3.connect(db_path)
+                try:
+                    cur = conn.execute(
+                        f"UPDATE {TABLE_CUSTOM_ROUTES} SET enabled = ?, updated_at = ? WHERE route_path = ?",
+                        (enabled, now, route_path),
+                    )
+                    conn.commit()
+                    return cur.rowcount
+                finally:
+                    conn.close()
+
+            try:
+                removed = await self._exec_in_executor(hass, _toggle)
+                if removed == 0:
+                    return self.json({"success": False, "error": f"路由 '{route_path}' 不存在"}, status_code=404)
+                state = "启用" if enabled else "停用"
+                return self.json({"success": True, "message": f"路由 '{route_path}' 已{state}", "enabled": enabled})
+            except Exception as exc:
+                _LOGGER.exception("切换路由状态失败")
+                return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        source = str(body.get("source") or (_SOURCE_BUILDER if has_query_def else _SOURCE_MANUAL)).strip()
+        try:
+            enabled = 1 if int(body.get("enabled", 1)) else 0
+        except (TypeError, ValueError):
+            return self.json({"success": False, "error": "enabled 必须为 0/1"}, status_code=400)
+        try:
+            max_rows = int(body.get("max_rows") or 1000)
+        except (TypeError, ValueError):
+            max_rows = 1000
+        max_rows = max(1, min(max_rows, 5000))
+
+        query_def_text = ""
+        param_schema_text = ""
+        if source == _SOURCE_BUILDER:
+            query_def = body.get("query_def")
+            if not isinstance(query_def, dict):
+                return self.json({"success": False, "error": "构造器保存需要 query_def 对象"}, status_code=400)
+            if not isinstance(query_def.get("table"), str) or not query_def.get("table"):
+                return self.json({"success": False, "error": "query_def 缺少 table"}, status_code=400)
+            # 定义校验（表/字段/操作符/聚合白名单），分 v1 / v2 结构
+            try:
+                if query_def.get("rev") == 2:
+                    # v2 直观版：字段/操作/聚合白名单在此严格校验
+                    _bv2_validate(query_def, db_path)
+                    sql_statement = ""  # v2 由执行端按运行时参数动态编译
+                    params_schema = _bv2_param_schema(query_def)
+                    param_schema_text = json.dumps(params_schema, ensure_ascii=False) if params_schema else ""
+                else:
+                    sql_statement = _compile_builder_query(query_def, db_path, default_limit=max_rows)
+                    params = query_def.get("params") or []
+                    param_schema_text = json.dumps(params, ensure_ascii=False) if params else ""
+            except (ValueError, sqlite3.Error) as exc:
+                return self.json({"success": False, "error": f"定义编译失败: {exc}"}, status_code=400)
+            try:
+                query_def_text = json.dumps(query_def, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return self.json({"success": False, "error": "query_def 不是合法的 JSON"}, status_code=400)
+        else:
+            sql_statement = body.get("sql_statement", "").strip()
+            if not sql_statement:
+                return self.json({"success": False, "error": "sql_statement 不能为空"}, status_code=400)
+            # --- 保存时做安全预检：只允许 SELECT 开头 ---
+            sql_upper = sql_statement.strip().upper()
+            if not sql_upper.startswith("SELECT"):
                 return self.json(
-                    {"success": False, "error": f"SQL 包含危险关键字 '{keyword}'，已拒绝"},
+                    {"success": False, "error": "SQL 必须以 SELECT 开头"},
                     status_code=403,
                 )
+            for keyword in _DANGEROUS_KEYWORDS:
+                if keyword in sql_upper:
+                    return self.json(
+                        {"success": False, "error": f"SQL 包含危险关键字 '{keyword}'，已拒绝"},
+                        status_code=403,
+                    )
+            try:
+                query_def_text = body.get("query_def_text", "")
+                if not isinstance(query_def_text, str):
+                    query_def_text = ""
+            except Exception:
+                query_def_text = ""
+            try:
+                param_schema_text = str(body.get("param_schema") or "")
+            except Exception:
+                param_schema_text = ""
 
         now = _get_local_iso(tz)
 
@@ -621,14 +1355,21 @@ class CustomRoutesView(_BaseDBView):
                 conn.execute(
                     f"""
                     INSERT INTO {TABLE_CUSTOM_ROUTES}
-                        (route_path, sql_statement, description, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                        (route_path, sql_statement, description, query_def, source,
+                         enabled, max_rows, param_schema, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(route_path) DO UPDATE SET
                         sql_statement = excluded.sql_statement,
                         description   = excluded.description,
+                        query_def     = excluded.query_def,
+                        source        = excluded.source,
+                        enabled       = excluded.enabled,
+                        max_rows      = excluded.max_rows,
+                        param_schema  = excluded.param_schema,
                         updated_at    = excluded.updated_at
                     """,
-                    (route_path, sql_statement, description, now, now),
+                    (route_path, sql_statement, description, query_def_text, source,
+                     enabled, max_rows, param_schema_text, now, now),
                 )
                 conn.commit()
             finally:
@@ -636,7 +1377,14 @@ class CustomRoutesView(_BaseDBView):
 
         try:
             await self._exec_in_executor(hass, _upsert)
-            return self.json({"success": True, "message": f"路由 '{route_path}' 已保存"})
+            return self.json({
+                "success": True,
+                "message": f"路由 '{route_path}' 已保存",
+                "source": source,
+                "enabled": enabled,
+                "max_rows": max_rows,
+                "sql": sql_statement,
+            })
         except Exception as exc:
             _LOGGER.exception("保存自定义路由失败")
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -710,7 +1458,8 @@ class DynamicRouterView(_BaseDBView):
             try:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    f"SELECT sql_statement, description FROM {TABLE_CUSTOM_ROUTES} "
+                    f"SELECT sql_statement, description, source, enabled, max_rows, param_schema, query_def "
+                    f"FROM {TABLE_CUSTOM_ROUTES} "
                     f"WHERE route_path = ?",
                     (tail,),
                 )
@@ -731,7 +1480,61 @@ class DynamicRouterView(_BaseDBView):
                 status_code=404,
             )
 
+        # 发布开关：停用的路由拒绝执行
+        if not route_info.get("enabled", 1):
+            return self.json(
+                {"success": False, "error": f"路由 '{tail}' 已停用，请在数据库浏览器中启用后再调用"},
+                status_code=403,
+            )
+
+        # 解析 GET Query 参数
+        query_params = dict(request.query)
+        _NON_SQL_KEYS = {"key", "auth", "access_token", "_debug"}
+        try:
+            max_rows = int(route_info.get("max_rows") or 1000)
+        except (TypeError, ValueError):
+            max_rows = 1000
+        max_rows = max(1, min(max_rows, 5000))
+
+        # rev2 直观版（query_def 运行时动态编译执行）
+        qd_text = route_info.get("query_def") or ""
+        qd = None
+        if route_info.get("source", _SOURCE_MANUAL) == _SOURCE_BUILDER and qd_text:
+            try:
+                qd = json.loads(qd_text)
+            except Exception:
+                qd = None
+        if qd is not None and qd.get("rev") == 2:
+            values = {k: v for k, v in query_params.items() if k not in _NON_SQL_KEYS}
+            try:
+                result = await self._exec_in_executor(
+                    self._hass, _bv2_execute, db_path, qd, values, max_rows
+                )
+                # 默认只返回业务数据；加 ?_debug=1 才附带调试字段（sql/columns/dynamic）
+                debug = str(query_params.get("_debug", "")).strip() == "1"
+                payload: dict = {
+                    "success": True,
+                    "data": result["rows"],
+                    "count": result["count"],
+                    "summary": result["aggs"] or None,
+                }
+                if debug:
+                    payload["columns"] = result["columns"]
+                    payload["sql"] = result["sql"]
+                    payload["dynamic"] = True
+                return self.json(payload)
+            except ValueError as exc:
+                return self.json({"success": False, "error": str(exc)}, status_code=400)
+            except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError) as exc:
+                return self.json({"success": False, "error": f"SQL 执行错误: {exc}"}, status_code=400)
+            except Exception as exc:
+                _LOGGER.exception("动态路由 rev2 执行异常 [%s]", tail)
+                return self.json({"success": False, "error": f"服务器内部错误: {exc}"}, status_code=500)
+
+        # ---- 旧式（手写 SQL / v1 builder 预编译 SQL） ----
         sql_statement = route_info["sql_statement"]
+        if route_info.get("source", _SOURCE_MANUAL) != _SOURCE_BUILDER:
+            sql_statement = _route_sql_limit_guard(sql_statement, max_rows)
 
         # 安全沙箱校验
         sql_upper = sql_statement.strip().upper()
@@ -744,16 +1547,36 @@ class DynamicRouterView(_BaseDBView):
                     status_code=403,
                 )
 
-        # 解析 GET Query 参数，构建安全参数绑定
-        query_params = dict(request.query)
-        # 鉴权参数（key 等）不是 SQL 绑定参数，需排除
-        _NON_SQL_KEYS = {"key", "auth", "access_token"}
+        # 参数默认值 + 类型：URL 未传用默认值；list 类型转 JSON 供 json_each
+        param_defaults: dict[str, str] = {}
+        param_types: dict[str, str] = {}
+        try:
+            p_schema = route_info.get("param_schema") or ""
+            if p_schema:
+                parsed = json.loads(p_schema)
+                if isinstance(parsed, list):
+                    for p in parsed:
+                        if isinstance(p, dict) and p.get("name"):
+                            nm = str(p["name"])
+                            dv = p.get("default")
+                            param_defaults[nm] = "" if dv is None else str(dv)
+                            param_types[nm] = str(p.get("type") or "text")
+        except Exception:
+            param_defaults = {}
+            param_types = {}
         # 支持两种占位符：
         #  1) 命名占位符（:name / @name / $name）→ 按名从 query 取值绑定（dict）
         #  2) 传统 ? 占位符 → 按 query 参数字母序绑定（list，兼容旧配置）
         named_hits = re.findall(r"[:@$]([A-Za-z_][A-Za-z0-9_]*)", sql_statement)
         if named_hits:
-            bind_params: dict = {name: query_params.get(name, "") for name in named_hits}
+            bind_params: dict = {}
+            for nm in named_hits:
+                qv = query_params.get(nm)
+                if qv is None or qv == "":
+                    raw_val = param_defaults.get(nm, "")
+                else:
+                    raw_val = qv
+                bind_params[nm] = _coerce_param_value(param_types.get(nm, "text"), raw_val)
         else:
             bind_params: list = [
                 query_params[k] for k in sorted(query_params.keys()) if k not in _NON_SQL_KEYS
@@ -797,6 +1620,268 @@ class DynamicRouterView(_BaseDBView):
             return await self._handle_dynamic(request)
         except Exception as exc:
             _LOGGER.exception("动态路由异常 [%s]", request.path)
+            return self.json({"success": False, "error": f"服务器内部错误: {exc}"}, status_code=500)
+
+
+# ========================================================================== #
+#  5.1 查询构造器 — 目录 / 试运行 / 新建表                                       #
+# ========================================================================== #
+class QueryCatalogView(_BaseDBView):
+    """可视化查询构造器：返回可查询表目录（分组 + 表 + 列）。"""
+
+    url = "/api/ha_data_store/query_catalog"
+    name = "api:ha_data_store:query_catalog"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        try:
+            groups = await self._exec_in_executor(hass, _builder_catalog, db_path)
+            return self.json({"success": True, "data": groups})
+        except Exception as exc:
+            _LOGGER.exception("获取查询构造器目录失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class RoutesTestView(_BaseDBView):
+    """查询构造器试运行：接收 query_def（或 SQL），只读执行并返回前 200 行。"""
+
+    url = "/api/ha_data_store/routes/test"
+    name = "api:ha_data_store:routes_test"
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        query_def = body.get("query_def") if isinstance(body.get("query_def"), dict) else None
+        sql = str(body.get("sql") or "").strip()
+
+        try:
+            if query_def and query_def.get("rev") == 2:
+                # rev2 直观版：运行时编译执行（含汇总），试运行最多 200 行
+                params = body.get("params")
+                if params is None or not isinstance(params, dict):
+                    params = {}
+                _bv2_validate(query_def, db_path)
+                result = await self._exec_in_executor(
+                    hass, _bv2_execute, db_path, query_def, params, 200
+                )
+                result["rows"] = result["rows"][:200]
+                return self.json({"success": True, **result})
+            if query_def:
+                if not isinstance(query_def.get("table"), str) or not query_def.get("table"):
+                    return self.json({"success": False, "error": "query_def 缺少 table"}, status_code=400)
+                sql = _compile_builder_query(query_def, db_path, default_limit=200)
+            elif sql:
+                sql_upper = sql.strip().upper()
+                if not sql_upper.startswith("SELECT"):
+                    return self.json({"success": False, "error": "SQL 必须以 SELECT 开头"}, status_code=403)
+                for keyword in _DANGEROUS_KEYWORDS:
+                    if keyword in sql_upper:
+                        return self.json(
+                            {"success": False, "error": f"SQL 包含危险关键字 '{keyword}'，已拒绝"},
+                            status_code=403,
+                        )
+                sql = _route_sql_limit_guard(sql, 200)
+            else:
+                return self.json({"success": False, "error": "需要 query_def 或 sql"}, status_code=400)
+
+            params = body.get("params")
+            if params is None:
+                params = {}
+            if not isinstance(params, dict):
+                params = {}
+            # 用 query_def.params 的默认值补足未传参数，并按类型规范化(list→JSON)
+            qd_params_meta = {}
+            if query_def and isinstance(query_def.get("params"), list):
+                for p in query_def["params"]:
+                    if isinstance(p, dict) and p.get("name"):
+                        qd_params_meta[str(p["name"])] = str(p.get("type") or "text")
+                        if not str(p.get("default") or "") == "":
+                            params.setdefault(str(p["name"]), p["default"])
+            named_hits = re.findall(r"[:@$]([A-Za-z_][A-Za-z0-9_]*)", sql)
+            if named_hits:
+                bind_params: Any = {
+                    name: _coerce_param_value(qd_params_meta.get(name, "text"), params.get(name, ""))
+                    for name in named_hits
+                }
+            elif "?" in sql:
+                bind_params = list(params.values()) if isinstance(params, (list, tuple)) else []
+            else:
+                bind_params = []
+
+            def _run() -> dict:
+                conn = sqlite3.connect(db_path)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.execute(sql, bind_params)
+                    rows = cursor.fetchall()
+                    columns = [d[0] for d in cursor.description] if cursor.description else []
+                    return {"columns": columns, "rows": [dict(r) for r in rows], "count": len(rows)}
+                finally:
+                    conn.close()
+
+            result = await self._exec_in_executor(hass, _run)
+            return self.json({"success": True, "sql": sql, **result})
+        except (ValueError, sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError) as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            _LOGGER.exception("试运行查询失败")
+            return self.json({"success": False, "error": f"服务器内部错误: {exc}"}, status_code=500)
+
+
+class CreateTableView(_BaseDBView):
+    """新建数据表（可视化建表）。受「数据库修改」开关控制，表/字段白名单校验。"""
+
+    url = "/api/ha_data_store/create_table"
+    name = "api:ha_data_store:create_table"
+
+    _ALLOWED_TYPES = {
+        "TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC", "BOOLEAN", "DATE", "DATETIME",
+    }
+
+    @staticmethod
+    def _valid_identifier(name: str) -> bool:
+        if not name:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
+
+    @staticmethod
+    def _type_default_literal(col_type: str, default) -> str | None:
+        """把用户填写的默认值转换为安全的 DEFAULT 子句内容；无法转换返回 None（表示无默认）。"""
+        if default is None or default == "":
+            return None
+        text = str(default).strip()
+        upper = col_type.upper()
+        # 允许 SQLite 表达式/内置关键字形式的默认值（管理员自定义）
+        if re.fullmatch(r"(CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME|NULL)", text, re.IGNORECASE):
+            return text.upper()
+        if upper in ("TEXT", "DATE", "DATETIME"):
+            # 若已是带引号字面量则原样，否则转成单引号字面量
+            if text[:1] in ("'", '"') and text[-1:] == text[:1]:
+                return text
+            return _sql_literal(text)
+        if upper in ("INTEGER", "BOOLEAN"):
+            if not re.fullmatch(r"-?\d+", text):
+                raise ValueError(f"字段类型 {upper} 的默认值必须是整数，收到 '{default}'")
+            return text
+        if upper == "REAL" or upper == "NUMERIC":
+            try:
+                float(text)
+            except ValueError:
+                raise ValueError(f"字段类型 {upper} 的默认值必须是数字，收到 '{default}'")
+            return text
+        raise ValueError(f"字段类型 {upper} 不支持默认值")
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        table = str(body.get("table") or "").strip()
+        columns = body.get("columns") or []
+        auto_id = bool(body.get("auto_id", False))
+
+        if not table:
+            return self.json({"success": False, "error": "表名不能为空"}, status_code=400)
+        if not self._valid_identifier(table):
+            return self.json({"success": False, "error": "表名只能包含英文字母/数字/下划线，且不能以数字开头"}, status_code=400)
+        if table.lower().startswith("sqlite_"):
+            return self.json({"success": False, "error": "sqlite_ 前缀为系统保留，不能用于自定义表"}, status_code=400)
+        if not isinstance(columns, list) or not columns:
+            return self.json({"success": False, "error": "至少需要一个字段"}, status_code=400)
+
+        # 规范化 + 校验字段
+        norm = []
+        seen_names = set()
+        if auto_id:
+            norm.append({"name": "id", "type": "INTEGER", "pk": True, "default": None, "autoincr": True})
+            seen_names.add("id")
+        for col in columns:
+            if not isinstance(col, dict):
+                return self.json({"success": False, "error": "字段定义格式错误"}, status_code=400)
+            name = str(col.get("name") or "").strip()
+            col_type = str(col.get("type") or "").strip().upper()
+            pk = bool(col.get("pk", False))
+            if not name:
+                return self.json({"success": False, "error": "存在未命名的字段"}, status_code=400)
+            if not self._valid_identifier(name):
+                return self.json({"success": False, "error": f"字段名 '{name}' 非法，只能包含字母/数字/下划线"}, status_code=400)
+            if name in seen_names:
+                return self.json({"success": False, "error": f"字段名 '{name}' 重复"}, status_code=400)
+            seen_names.add(name)
+            base_type = col_type.split("(")[0].strip()
+            if base_type not in self._ALLOWED_TYPES:
+                return self.json({"success": False, "error": f"不允许的字段类型 '{col_type}'"}, status_code=400)
+            if pk:
+                if base_type != "INTEGER":
+                    return self.json({"success": False, "error": f"主键字段 '{name}' 必须为 INTEGER 类型"}, status_code=400)
+                if any(c["pk"] for c in norm):
+                    return self.json({"success": False, "error": "只能设置一个主键字段"}, status_code=400)
+            if auto_id and name == "id":
+                return self.json({"success": False, "error": "已选择附加自增主键 id，请勿重复添加 id 字段"}, status_code=400)
+            norm.append({"name": name, "type": col_type, "pk": pk, "default": col.get("default")})
+
+        # 构造 CREATE TABLE
+        try:
+            col_defs = []
+            for c in norm:
+                ddl = f"[{c['name']}] {c['type']}"
+                if c.get("autoincr"):
+                    ddl += " PRIMARY KEY AUTOINCREMENT"
+                elif c["pk"]:
+                    ddl += " PRIMARY KEY"
+                d = self._type_default_literal(c["type"].split("(")[0], c.get("default"))
+                if d:
+                    ddl += f" DEFAULT {d}"
+                col_defs.append(ddl)
+            create_sql = "CREATE TABLE [" + table + "] (\n    " + ",\n    ".join(col_defs) + "\n);"
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+
+        def _create() -> None:
+            conn = sqlite3.connect(db_path)
+            try:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (table,)
+                ).fetchone()
+                if exists:
+                    raise ValueError(f"表 '{table}' 已存在")
+                conn.execute(create_sql)
+                conn.commit()
+            finally:
+                conn.close()
+
+        try:
+            await self._exec_in_executor(hass, _create)
+            return self.json({"success": True, "message": f"表 '{table}' 创建成功", "table": table})
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            _LOGGER.exception("新建表失败")
             return self.json({"success": False, "error": f"服务器内部错误: {exc}"}, status_code=500)
 
 
