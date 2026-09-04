@@ -1,7 +1,7 @@
 # HA 数据统一存储系统 (ha_data_store)
 
-Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服务、设备桥接**一体化能力。无需修改 `configuration.yaml`，通过配置界面即可动态管理监控实体。
 
+ha_data_store 是一款 Home Assistant 自定义集成，无需修改 `configuration.yaml`，通过配置界面即可完成数据的采集、存储、对外 API 服务与设备桥接一体化管理。它通过监听实体状态变化与定时轮询，将设备开关记录（含跨午夜拆分、启动恢复与用电量核算）、传感器环境数据、实体属性提取、扫地机轨迹、健康记录、打印机用量、小爱对话等多样数据统一落库到 SQLite（WAL 模式）；同时提供完整 HTTP API（含 API Key 鉴权、安全沙箱下的自定义 SQL 动态路由）、内置数据库浏览器、虚拟设备与远程 HA 设备桥接（WebSocket）、文件源/API 源到实体的映射、实体导出为 JSON 与推送目标、原生辅助元素的扫描导入与自管实体化、基于功率积分自动累计日/月/年用电的用电计量，以及前端埋点驱动的用户操作记录（action_snapshot + config_id，供使用习惯分析与设备面板还原）等高级能力；并辅以今日家庭状态中文总结、轻量自动化引擎、系统健康监控传感器、用户操作记录与近期使用设备聚合、一键空设备清理和三个安全控制开关，整体形成一套"采集—存储—分析—展示—远程交互"的综合性家庭数据平台。
 ---
 
 ## 目录
@@ -21,6 +21,11 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
   - [虚拟设备](#8-虚拟设备)
   - [实体导出为JSON](#9-实体导出为json)
   - [打印机数据采集](#10-打印机数据采集)
+  - [用户操作记录](#11-用户操作记录)
+  - [辅助元素](#12-辅助元素)
+  - [用电计量](#13-用电计量)
+  - [设备清理](#14-设备清理)
+  - [可视化查询构造器 与 数据库新建表](#15-可视化查询构造器-与-数据库新建表)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -45,7 +50,10 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 🧹 **扫地机器人** | 监听扫地机器人坐标变化，记录轨迹数据 |
 | 🩺 **健康数据** | 存储血压、体温、身高、体重等健康记录，支持按人员查询 |
 | 🔗 **设备桥接** | 通过 WebSocket 连接远程 HA，将远程实体的状态和控制在本地无缝映射（开关/灯光/气候/窗帘/风扇/门锁/数值/选择/传感器/二进制传感器） |
-| 🖥️ **虚拟设备** | 动态创建自定义实体，支持多种设备类型和自定义属性 |
+| 🖥️ **虚拟设备** | 动态创建自定义实体，支持多种设备类型和自定义属性；支持导出/导入（配置+状态）跨机迁移 |
+| 🧩 **辅助元素** | 扫描原生 HA 辅助元素（input_* / counter / binary_sensor）导出，B 机导入转为本集成自管实体（switch/number/select/button/text/binary_sensor），支持前台新建、全选批量删除；汇总实体 `sensor.ha_data_store_helper` |
+| ⚡ **用电计量** | 登记功率实体，10 秒采样积分自动生成日/月/年用电量实体并按天入库；汇总实体 `sensor.ha_data_store_all_power`；API 工具含查询分组 |
+| 🧹 **设备清理** | 一键扫描并清理本集成下无实体的空设备（安全，不误删主设备） |
 | 🖨️ **打印机数据采集** | 采集打印机统计数据与当日作业明细，支持多台、配置管理、数据查询与系统监控 |
 | 📁 **文件源 → 实体** | 监听本地 JSON 文件变化，自动将数据映射为 HA 实体 |
 | 🌐 **API源 → 实体** | 定时请求外部 HTTP API，将 JSON 响应解析并映射为 HA 实体 |
@@ -54,10 +62,14 @@ Home Assistant 自定义集成，提供**数据采集、存储、对外 API 服�
 | 🔑 **API 密钥** | API Key 鉴权，支持多密钥，可独立开关 |
 | 🛡️ **安全控制** | 三个独立开关控制 API 访问、数据库浏览、数据库修改 |
 | 📈 **系统监控** | `sensor.ha_data_store_info` 实时展示 6 大类健康状态（设备/环境/属性/导出/文件源/API源） |
-| 📋 **内置数据库浏览器** | 管理页面直接浏览、编辑数据库，无需 SQL 工具 |
-| 🔗 **自定义路由** | 通过 GUI 或 API 定义自定义 HTTP 路由，绑定任意 SQL 查询 |
+| 📋 **内置数据库浏览器** | 管理页面直接浏览、编辑数据库，无需 SQL 工具；支持可视化「新建表」 |
+| 🧩 **查询构造器** | db_viewer 内可视化定义查询接口：选表 → 动态参数（字段/时间段/LIKE/多值 IN）→ 排序/上限 → 汇总(总条数/合计) → 试运行 → 发布；定义落库随库迁移 |
+| 🔗 **自定义路由** | 通过 GUI 或 API 定义自定义 HTTP 路由，绑定任意 SQL 查询；支持发布开关、来源/状态管理 |
 | 🗂️ **统一泛域名动态路由** | 万能路由 `/api/ha_data_store/custom/{tail}` 运行时查库执行任意自定义 SQL |
 | 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发 |
+| 🤖 **简单自动化引擎** | 定时/间隔触发 + 多条件判断 + 顺序执行服务动作，执行记录落库（30 秒调度，db_viewer 管理） |
+| 📊 **自动化状态传感器** | `sensor.ha_data_store_automation` 实时统计自动化总数/启停/执行结果，前端自动化管理卡片数据源 |
+| 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot + config_id），ts 采用实体状态时间与 device_history 精确关联，`sensor.近期使用设备` 近30天聚合，API工具支持多维度查询 |
 
 ---
 
@@ -350,6 +362,11 @@ curl -X POST /api/ha_data_store/routes \
 
 **万能动态路由：** 任何没有对应静态路由的 `/api/ha_data_store/custom/{tail}` 请求都会自动查询 `custom_routes` 表并执行 SQL 返回结果。
 
+**发布管理（v3.5.0）：**
+- 每条路由带 **启用/停用** 开关，停用后外部调用返回 403；无 `LIMIT` 的手写 SQL 执行时自动套用 `max_rows` 安全上限；
+- 路由列表显示来源（🧩 构造器定义 / ✍️ 手写 SQL）与状态；手写 SQL 仍是完整路由定义的一部分；
+- 不想手写 SQL？用 **🧩 查询构造器**（见 [15. 可视化查询构造器](#15-可视化查询构造器-与-数据库新建表)）可视化生成并发布。
+
 ---
 
 ### 5. 设备桥接
@@ -519,6 +536,132 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx  # 主动重采
 
 ---
 
+## 11. 用户操作记录
+
+前端 room-elves-card 通过埋点记录用户每次操作（开关、调值、按钮、场景、自动化等），上报后端存储，用于**分析使用习惯**和**将来还原设备控制面板**。
+
+### 数据存储（`user_actions` 表）
+
+每条操作记录含：
+
+| 字段 | 说明 |
+|------|------|
+| `user_name` | 当前登录用户 |
+| `entity_id` | 操作实体 |
+| `action` | 动作类型（toggle/set_value/press/call-service 等） |
+| `name` / `icon` | 实体显示名 / 图标 |
+| `room_name` | 所在房间 |
+| `source` | 触发位置（head/room/standalone） |
+| `card_type` | 弹窗卡片类型（预留） |
+| `other` | 预留字段 |
+| `state_log` | 操作前后状态变化（如 `on→off`、`cool→heat`） |
+| `ts` / `ts_text` | 时间戳 / 人类可读时间 |
+| `config_id` | 操作所属弹窗/选项卡/设备的 config_id（如 `diannao`），用于定位并还原完整弹窗配置 |
+| `device_type` | 设备类型（如 light/socket/ac 等） |
+| `action_snapshot` | 完整 tap_action 快照（JSON，用于还原设备面板） |
+
+**时间权威源**：`ts` 取**实体状态变化时刻**（HA `last_changed`）而非前端点击时刻，前后端时间源统一，消除浏览器/服务器时钟偏差（前端 8 秒时间窗 + 最多 8 次轮询核对后覆盖）。后端 `ts_text` 由 `ts` 按秒精度本地化；`device_history.on_time/off_time` 同为实体状态时间（秒精度，毫秒自动截断），`_link_device_history_to_actions` 用 `on_time == ts_text` 精确匹配回填操作者，保证跨表时间严格一致。
+
+### 近期使用设备传感器
+
+`user_actions` 写入后，`sensor.近期使用设备`（`sensor.ha_data_store_user_actions`）实时聚合近 30 天数据：
+
+- **状态值** = 近 30 天有操作的不同设备面板数
+- `attributes.devices` = 按 **action_snapshot 归一化聚合** 的设备列表，每项含：`entity_id / name / icon / room_name / count`（使用次数）/ `last_used` + `last_used_text`（最近使用）/ `state_log`（最近状态变化）/ `config_id` / `device_type` / `action_snapshot`（完整还原快照），按使用次数降序
+- 30 秒定时刷新 + 写入后实时刷新
+
+前端可直接订阅该 sensor，无需调 API 即可渲染"常用设备小卡片"，并凭 `action_snapshot` 还原设备控制面板。
+
+### 上报接口
+
+```
+POST /api/ha_data_store/action_log   Body: { actions: [ {user_name, entity_id, action, ..., action_snapshot} ] }
+GET  /api/ha_data_store/action_log?days=30   查询近 N 天原始记录
+```
+
+前端本地缓冲，**操作停止 5 秒后统一上报**（防抖合并连续操作），**满 20 条立即上报**；fetch 15 秒超时（AbortController 防 pending 锁死）、失败**指数退避自动重试**（5s 起、上限 5 分钟）、上报前游标取 max 防多实例重复上报；fetch 前同步补核对（实体状态时间 + state_log 权威值）。
+
+### 查询（API 工具 → 🎯 用户动作查询组）
+
+见 [数据查询接口](#数据查询接口) 的 `user_actions_*` 系列类型。
+
+---
+
+## 12. 辅助元素
+
+原生 HA 辅助元素（`input_boolean/input_number/input_select/input_text/input_button/counter/binary_sensor`）的配置存于 HA `.storage`，无法由本集成直接管理。本功能把 A 机原生 helper 扫描导出为 JSON（配置 + 状态），在 B 机导入后转换为**本集成自管实体**（RestoreEntity，无需重启、状态自动回填并在重启后保持）：
+
+| 源 | 目标 | 保留 |
+|------|------|------|
+| `input_boolean` | `switch` | icon/name + on/off |
+| `input_number` | `number` | min/max/step/unit + 当前值 |
+| `counter` | `number` | min/max/step/initial + 计数 |
+| `input_select` | `select` | options + 当前选项 |
+| `input_button` | `button` | 配置（无状态） |
+| `input_text` | `text` | 文本值 |
+| `binary_sensor` | `binary_sensor` | on/off |
+
+- **UI**：db_viewer「系统配置 → 🧩 辅助元素」——已导入列表(可删/全选批量删)、扫描并导出、导出已导入项、导入文件(可覆盖同名)、🆕 前台新建；
+- **汇总实体** `sensor.ha_data_store_helper`：状态 = 辅助元素个数，attributes `entities[]` = 每个实体明细（entity_id/name/icon/source_type/source_entity_id），30s 刷新；
+- **接口**：`GET /api/ha_data_store/helper/scan`、`/helper/export`、`POST /helper/import`、`GET/POST/DELETE /helper`。
+
+## 13. 用电计量
+
+db_viewer「系统配置 → ⚡ 用电计量」登记**功率实体**（填功率实体 ID / 设备名 / 房间 / ID 段 / 单位 W·kW），系统 **10 秒采样积分**（功率 × 时间差）自动生成三个累计实体并按天入库：
+
+- `sensor.ha_data_store_{id}_daily_ele`（日，今日累计）
+- `sensor.ha_data_store_{id}_monthly_ele`（月，由日数据实时聚合）
+- `sensor.ha_data_store_{id}_yearly_ele`（年，由日数据实时聚合）
+
+特性：
+- 每天一条落库 `power_energy_daily`（60s 落盘 + 跨日自动分账，kwh 保留 3 位小数）；月/年不建表，实时聚合；
+- 单位 W/kW 自动识别（登记优先，其次读实体 `unit_of_measurement`）；`unavailable/unknown` 不累计；采样空窗 >5 分钟丢弃（防停机误算）；
+- 全部实体归入统一设备「用电计量」；重启自动恢复，卸载前自动落盘；
+- **历史列表状态属性**：三个累计实体状态属性自动附带全量历史列表 —— 日用电 `daylist`（每日用电）、月用电 `monthlist`（每月用电）、年用电 `yearlist`（每年用电），元素形如 `{day|month|year, usage}`（usage 单位 kWh，保留 3 位小数）；全量不设上限、**无数据日期不占位**，**今天/本月/当年并入实时值**（与实体 state 一致），由 Manager 缓存并在 60s 落盘/跨日时重建，重启自动恢复；
+- **汇总实体** `sensor.ha_data_store_all_power`：状态 = 用电实体个数，attributes `entities[]` = 每个用电实体的 entity_id/name/icon/room/device/power_entity，30s 刷新；
+- **接口**：`GET /api/ha_data_store/power_energy`（`type=configs` / `type=query&kind=daily|monthly|yearly|range|latest`，支持 entity_id/room/date/month/year/start/end），`POST`（登记/删除）；API 工具含「⚡ 用电计量」查询分组；
+- 数据浏览器中 `power_energy_daily` 为用户表（默认可见）。
+
+## 14. 设备清理
+
+集成运行过程中可能残留"没有实体"的空设备（例如删除实体后遗留）。db_viewer「系统配置 → 🧹 设备清理」可一键扫描并清理：
+
+- 仅清理 **identifiers 以本集成 domain 开头**、**非 entry 主设备**、且按 entity_registry 统计**无任何实体**的空设备，安全不误删；
+- `GET /api/ha_data_store/devices/cleanup` 扫描预览，`POST`（`{confirm:true}`）真删（删除前自动解除 config entry 关联，以最终是否仍在 registry 判定成功）。
+
+---
+
+## 15. 可视化查询构造器 与 数据库新建表
+
+「API 工具」内新增 **🧩 查询构造器**，无需手写 SQL 即可把任意数据表发布为一个受鉴权的查询接口；「数据库浏览」工具栏同时支持可视化 **➕ 新建表**。
+
+**构造器流程（5 步）：**
+
+1. **① 选数据表与返回字段**：表目录按数据类别分组（环境/属性/设备历史/其它自定义）并显示行数，返回字段默认全部、可勾选精简；
+2. **② 动态参数（过滤条件）**：每行 = 字段 + 比较方式 + 值来源。按字段类型提供合适操作符：
+   - 文本/ID：`=` / `≠`；数值字段：`>` `≥` `<` `≤`
+   - 文本还支持 **包含 LIKE / 不包含 / 多值 IN**（调用时逗号分隔，如 `rooms=客厅,卧室`）与「为空」
+   - 时间/日期字段提供 **「时间段(起,止)」单行 between**（自动生成 `start_time`/`end_time` 两个参数）；可先用顶部「时间字段」下拉指定列，再点「＋ 时间段」
+   - 值选“前端传参”即成动态参数（填参数名/默认值/必填/说明）；或选“固定值”写死
+3. **③ 排序**：字段 + 升/降序；
+4. **④ 汇总信息**：可选返回总条数 `count` 与数值列合计/平均/最大/最小；
+5. **⑤ 试运行并发布**：填试运行参数值 → 执行结果表 + SQL 预览 → 保存即发布。
+
+**发布后调用：**
+
+```http
+GET /api/ha_data_store/custom/{route_path}?key=你的Key&entity_id=sensor.a&start_time=2026-09-01 00:00:00&end_time=2026-09-04 23:59:59
+```
+
+- 响应默认：`{"success":true, "data":[...], "count":匹配总数, "summary":{合计/平均...}}`；
+- 可选参数未传且无默认值时**自动跳过该过滤**（前端可只传部分条件）；必填缺失返回 400 中文错误；加 `&_debug=1` 可查看实际生成的 SQL；
+- 鉴权沿用「API 访问」总开关 + API Key；路由有独立 **启用/停用** 开关；
+- 定义（`query_def`）落库 `custom_routes`，复制数据库即可迁移。
+
+**新建表：** 填表名（自附加自增主键可选）与字段（名称/类型/主键/默认值），后端白名单校验后建表；新表即刻进入“用户表”下拉与查询构造器可选范围。
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -578,6 +721,13 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `printer_monthly_total` | 打印机按年月统计合计数据 | stats_entity |
 | `printer_daily_range` | 打印机指定日期区间数据 | stats_entity, start/end |
 | `printer_detail` | 打印机指定日期详细数据 | stats_entity, date |
+| `user_actions_daily` | 用户动作·指定日期操作记录 | date |
+| `user_actions_range` | 用户动作·日期段操作记录 | start/end |
+| `user_actions_month_dates` | 用户动作·指定月哪些日期有数据 | month |
+| `user_actions_hour_dist` | 用户动作·数据点按小时分布 | entity_id(可选) |
+| `user_actions_entity_summary` | 用户动作·实体操作次数排行 | entity_id(可选) |
+| `user_actions_user_summary` | 用户动作·按用户汇总 | 无 |
+| `user_actions_entity_last_today` | 用户动作·实体当日最后一条记录 | entity_id |
 
 **查询示例：**
 
@@ -596,6 +746,15 @@ curl "http://ha:8123/api/ha_data_store/query?type=ranking_monthly&month=2024-01&
 
 # 查询客厅 2025-01 哪些日期有数据
 curl "http://ha:8123/api/ha_data_store/query?type=room_data_dates&room=客厅&month=2025-01&category=device&key=your_api_key"
+
+# 用户动作：指定日期操作记录
+curl "http://ha:8123/api/ha_data_store/query?type=user_actions_daily&date=2026-08-24&key=your_api_key"
+
+# 用户动作：数据点按小时分布（指定实体）
+curl "http://ha:8123/api/ha_data_store/query?type=user_actions_hour_dist&entity_id=light.living_room&key=your_api_key"
+
+# 用户动作：实体当日最后一条记录
+curl "http://ha:8123/api/ha_data_store/query?type=user_actions_entity_last_today&entity_id=light.living_room&key=your_api_key"
 ```
 
 ### 配置管理接口
@@ -676,11 +835,25 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
 | `/api/ha_data_store/bridge_entities` | GET/POST/DELETE | 桥接实体配置管理 |
 | `/api/ha_data_store/bridge_reload` | POST | 重新加载所有桥接连接 |
 | `/api/ha_data_store/virtual_device` | GET/POST/DELETE | 虚拟设备管理 |
-| `/api/ha_data_store/health_add` | POST | 添加健康记录 |
+| `/api/ha_data_store/virtual_device/export` | GET | 导出全部虚拟设备（配置 + 当前状态，跨机迁移用） |
+| `/api/ha_data_store/virtual_device/import` | POST | 导入虚拟设备并重建（body `{mode: skip\|overwrite, devices:[...]}`） |
+| `/api/ha_data_store/helper` | GET/POST/DELETE | 辅助元素列表/新建/删除 |
+| `/api/ha_data_store/helper/scan` | GET | 扫描原生 HA helper（可 `?include_binary_sensor=1`）生成可导出 item |
+| `/api/ha_data_store/helper/export` | GET | 导出已导入的辅助元素（配置 + 状态） |
+| `/api/ha_data_store/helper/import` | POST | 导入辅助元素并转为本集成实体（body `{mode: skip\|overwrite, items:[...]}`） |
+| `/api/ha_data_store/power_energy` | GET | 用电量查询：`type=configs` 或 `type=query&kind=daily\|monthly\|yearly\|range\|latest`（支持 entity_id/room/date/month/year/start/end 过滤） |
+| `/api/ha_data_store/power_energy` | POST | 登记/删除功率计量（body `{action: create\|delete, entity_id, ...}`） |
+| `/api/ha_data_store/devices/cleanup` | GET/POST | 扫描空设备 / 清理空设备（POST body `{confirm:true}`） |
+| `/api/ha_data_store/health_add` | POST | 添加健康记录（body 可选 `remark` 备注 / `description` 说明） |
 | `/api/ha_data_store/health_types` | GET/POST/DELETE | 健康数据类型管理 |
 | `/api/ha_data_store/batch_entity_state` | POST | 批量写入实体状态 |
 | `/api/ha_data_store/db_maintain` | POST | 数据库维护（VACUUM/REINDEX） |
 | `/api/ha_data_store/entity_monitor` | GET | 实体在线监控 |
+| `/api/ha_data_store/automations` | GET/POST | 自动化配置列表/新增 |
+| `/api/ha_data_store/automations/{id}` | PUT/DELETE | 修改/删除自动化（修改后自动重算下次运行时间） |
+| `/api/ha_data_store/automations/{id}/run?force=1` | POST | 手动运行（force=1 跳过条件） |
+| `/api/ha_data_store/automation_logs` | GET/DELETE | 执行记录分页查询 / 清理（?days=N 或 ?automation_id=） |
+| `/api/ha_data_store/automation_lookup` | GET | 按名称查询自动化详细信息（?name= 精确 / &fuzzy=1 模糊，含配置+统计） |
 
 ### 高级接口
 
@@ -815,10 +988,16 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `vacuum_type_defs` | 扫地机器人类型定义 |
 | `vacuum_configs` | 扫地机器人配置 |
 | `vacuum_history` | 扫地机器人轨迹 |
-| `health_records` | 健康记录（血压/体温/体重等） |
+| `health_records` | 健康记录（血压/体温/体重等，含 `remark` 备注 / `description` 说明） |
 | `virtual_devices` | 虚拟设备持久化 |
 | `printer_configs` | 打印机配置（支持多台，name 唯一） |
 | `printer_daily` | 打印机每日记录（汇总 + 墨量 + 当日明细 JSON） |
+| `user_actions` | 用户操作记录（前端埋点上报，含 action_snapshot/state_log/ts_text/config_id/device_type 等；ts 采用实体状态时间，与 device_history 精确关联） |
+| `automations` | 自动化配置（触发/条件/动作，30 秒调度执行） |
+| `automation_logs` | 自动化执行记录（时间、条件明细、动作结果、耗时、状态，保留 30 天） |
+| `helper_entities` | 辅助元素持久化（原生 helper 导入为本集成自管实体，含 source_type/source_entity_id/extra_config） |
+| `power_meter_configs` | 功率→用电计量登记表（功率实体/设备名/房间/id_slug/单位/启用） |
+| `power_energy_daily` | 用电计量日表（每功率实体每天一条 kwh，月/年由日表实时聚合） |
 
 ---
 
@@ -914,6 +1093,36 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.5.0 可视化查询构造器 + 数据库新建表 + 自定义路由发布开关（2026-09-05）
+
+- **🧩 可视化查询构造器**（db_viewer「API 工具」）：选表 → 动态过滤参数（字段/数值比较/模糊 LIKE/多值 IN/时间段单行 between，含时间字段下拉）→ 排序/上限 → 汇总（总条数 + 合计/平均）→ 试运行 → 一键发布，全程无需写 SQL
+- **发布即接口**：`GET /api/ha_data_store/custom/{route_path}?key=xx&参数=值`；可选参数缺省自动跳过、必填缺失返回 400；响应默认仅业务字段 `data/count/summary`（`&_debug=1` 可看 SQL）；受 API 总开关 + Key 鉴权，定义落 `custom_routes` 随库迁移
+- **➕ 数据库浏览「新建表」**：可视化建表（表名/自增主键/行式字段定义），后端白名单校验；表可见性改黑名单，自建表即时可查、可被构造器引用
+- **🔌 自定义路由管理增强**：路由列表显示来源（构造器/手写）与启用状态、支持一键启停；`GET /routes` 对 API Key 隐藏完整 SQL（仅 db_viewer 会话可见）；无 LIMIT 手写 SQL 自动套用上限
+
+### v3.4.1 用电计量历史列表状态属性（2026-09-03）
+
+- **日/月/年用电实体状态属性新增全量历史列表**：日用电 `daylist`（每日用电）、月用电 `monthlist`（每月用电）、年用电 `yearlist`（每年用电），格式 `[{day|month|year, usage}]`（usage 单位 kWh），源自 `power_energy_daily` 日表全量聚合、不设上限、无 0 值占位
+- **今天/本月/当年并入实时值**：列表尾项以内存实时累计覆盖（与实体 state 一致），不受 60s 落盘延迟影响
+- **性能与重启安全**：Manager 缓存列表，60s 落盘/跨日时重建一次，实体刷新只读缓存；缓存可由日表随时重建，重启无数据丢失
+- 仅改 `power_energy.py`，无表结构变更，已有 `power_energy_daily` 数据零改动，实体 ID 不变
+
+### v3.4.0 用电计量 + 辅助元素 + 设备清理（2026-09-03）
+
+- **⚡ 用电计量**：登记功率实体自动生成日/月/年用电实体（`sensor.ha_data_store_{id}_daily/monthly/yearly_ele`），10 秒采样积分、按天入库（`power_energy_daily`）、统一设备「用电计量」、汇总实体 `sensor.ha_data_store_all_power`
+- **🧩 辅助元素**：原生 HA helper 扫描导出 → 导入转为本集成自管实体（switch/number/select/button/text/binary_sensor），支持前台新建、全选批量删除；汇总实体 `sensor.ha_data_store_helper`
+- **🧹 设备清理**：db_viewer「设备清理」页一键扫描/清理本集成无实体的空设备（安全不误删主设备）
+- **数据管理**：虚拟/辅助/用电导出导入；设备类/传感器类/辅助元素/用电计量列表全选批量删除；API 工具新增「⚡ 用电计量」查询分组；数据浏览器新增 `power_energy_daily` 用户表
+- **修复**：建表常量未导入导致的 `no such table`、平台实体子线程注册报错、新增登记不被统计等
+
+### v2.11.0 用户操作记录与近期使用设备
+
+- **用户操作记录**：新增 `user_actions` 表，接收前端埋点上报的每次操作（含完整 `action_snapshot` 快照、`state_log` 前后状态、`ts_text` 可读时间、`user_name` 用户），追加式不去重
+- **`sensor.近期使用设备`**：近 30 天按 action_snapshot 聚合，`attributes.devices` 含设备使用次数/最近使用时间/最近状态变化/完整还原快照，写入后实时刷新
+- **上报接口**：`POST /api/ha_data_store/action_log`（批量上报）、`GET /api/ha_data_store/action_log?days=N`（查明细）
+- **API工具"用户动作查询组"**：新增 7 种查询（指定日期/日期段/月有数据日期/小时分布/实体排行/按用户汇总/实体当日最后一条），实体下拉自动填充
+- **数据库浏览器**：`user_actions` 表纳入用户表，实体加载失败给出明确提示
 
 ### v2.6.0 打印机数据采集
 
