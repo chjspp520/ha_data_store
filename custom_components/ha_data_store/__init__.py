@@ -565,6 +565,7 @@ def _init_database(db_path: str) -> None:
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_USER_ACTIONS} (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                op_id           TEXT NOT NULL DEFAULT '',
                 user_name       TEXT NOT NULL DEFAULT '',
                 entity_id       TEXT NOT NULL DEFAULT '',
                 action          TEXT NOT NULL DEFAULT '',
@@ -586,7 +587,7 @@ def _init_database(db_path: str) -> None:
             """
         )
         # 迁移：旧表可能缺少部分列（历史版本创建），此处逐个补列
-        _ALTER_COLS = ("ts_text", "card_type", "other", "state_log", "config_id", "device_type")
+        _ALTER_COLS = ("ts_text", "card_type", "other", "state_log", "config_id", "device_type", "op_id")
         try:
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_USER_ACTIONS})").fetchall()}
             for col in _ALTER_COLS:
@@ -600,6 +601,12 @@ def _init_database(db_path: str) -> None:
         )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_user_actions_eid ON {TABLE_USER_ACTIONS} (entity_id);"
+        )
+        # 幂等去重：同一操作(op_id=前端 _id)重复上报只保留一条。
+        # 用部分唯一索引（op_id 非空才生效），兼容历史旧行 op_id='' 的多条空值。
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_user_actions_op_id "
+            f"ON {TABLE_USER_ACTIONS} (op_id) WHERE op_id <> '';"
         )
         # 14) 媒体播放列表表
         conn.execute(
@@ -4290,6 +4297,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].setdefault("db_edit_enabled", True)
     hass.data[DOMAIN].setdefault("allow_remote_access", False)
 
+    # ── 用户操作记录"收件箱"：POST /action_log 先落 JSON 临时文件，后台迁入 SQLite，
+    #    防止 SQLite 瞬时锁库/写入失败导致前端上报（含 sendBeacon 无响应投递）丢数据 ──
+    from .action_log_inbox import ActionLogInbox
+    action_inbox = ActionLogInbox(hass, db_path)
+    hass.data[DOMAIN]["action_log_inbox"] = action_inbox
+    await action_inbox.start()
+
     _register_api_views(hass, db_path)
 
     # ── 简单自动化引擎（定时/间隔/条件 + 执行记录） ──
@@ -4800,6 +4814,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_manager = hass.data.get(DOMAIN, {}).get("automation_manager")
     if automation_manager:
         automation_manager.stop()
+
+    # 停止用户操作记录收件箱后台搬运（残留数据已落盘 JSON，下次启动自动补迁）
+    action_inbox = hass.data.get(DOMAIN, {}).get("action_log_inbox")
+    if action_inbox:
+        try:
+            await action_inbox.stop()
+        except Exception:
+            _LOGGER.exception("[action_log] 收件箱停止异常")
 
     # 停止功率→用电计量（落盘后取消采样）
     power_manager = hass.data.get(DOMAIN, {}).get("power_energy_manager")

@@ -10739,12 +10739,24 @@ class ActionLogView(_BaseDBView):
         if not isinstance(raw_actions, list) or not raw_actions:
             return self.json({"success": False, "error": "actions 数组为空"}, status_code=400)
 
+        # ── 优先走"收件箱"：先写本地 JSON 临时文件、立即返回成功，后台再迁入 SQLite ──
+        # 避免 SQLite 瞬时锁库/写入慢导致前端（尤其 sendBeacon 无响应投递）丢数据。
+        inbox = hass.data.get(DOMAIN, {}).get("action_log_inbox")
+        if inbox is not None and hasattr(inbox, "enqueue"):
+            try:
+                queued = await inbox.enqueue(raw_actions)
+                return self.json({"success": True, "inserted": queued, "queued": True})
+            except Exception as exc:
+                # 收件箱异常：回退到下方直写 SQLite 兜底，尽量不拒绝
+                _LOGGER.exception("[action_log] 收件箱写入失败，回退直写: %s", exc)
+
         db_path = self._db_path
         now = _get_local_iso(DEFAULT_TIMEZONE)
 
         def _insert() -> tuple[int, list]:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=20.0)
             try:
+                conn.execute("PRAGMA busy_timeout=20000")
                 inserted = 0
                 # 收集本次成功写入的记录，用于后续关联 device_history（on_user/off_user 等）
                 matched_items: list = []
@@ -10753,10 +10765,16 @@ class ActionLogView(_BaseDBView):
                         continue
                     eid = (item.get("entity_id") or "").strip()
                     action = (item.get("action") or "").strip()
-                    ts = int(item.get("ts") or 0)
+                    try:
+                        ts = int(item.get("ts") or 0)
+                    except (TypeError, ValueError):
+                        ts = 0
                     ts_text = _format_ts_ms(ts, DEFAULT_TIMEZONE)
                     if not action:
                         continue
+                    # 幂等键：前端每条记录自带 _id（形如 "<时间戳>_<随机>"），
+                    # 后端以 op_id 唯一约束去重，重复上报（beacon 重发/页面重开补报）不会写两遍
+                    op_id = (item.get("_id") or item.get("op_id") or "").strip()
                     # user_name 兼容两种字段名：后端规范为 user_name，前端旧版上报 user
                     user_name = (item.get("user_name") or item.get("user") or "").strip()
                     snap = (item.get("action_snapshot") or "")
@@ -10776,12 +10794,13 @@ class ActionLogView(_BaseDBView):
                             pass
                     # device_type：设备类型，由前端上报（如 light/socket/ac 等）
                     device_type = (item.get("device_type") or "").strip() if isinstance(item.get("device_type"), str) else ""
-                    conn.execute(
-                        f"INSERT INTO {TABLE_USER_ACTIONS} "
-                        f"(user_name, entity_id, action, name, icon, room_name, source, service, "
+                    cur = conn.execute(
+                        f"INSERT OR IGNORE INTO {TABLE_USER_ACTIONS} "
+                        f"(op_id, user_name, entity_id, action, name, icon, room_name, source, service, "
                         f"card_type, other, state_log, ts, ts_text, action_snapshot, config_id, device_type, created_at) "
-                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
+                            op_id,
                             user_name,
                             eid,
                             action,
@@ -10801,6 +10820,9 @@ class ActionLogView(_BaseDBView):
                             now,
                         ),
                     )
+                    if cur.rowcount <= 0:
+                        # 该 op_id 已存在（幂等去重命中），跳过，不重复统计/关联
+                        continue
                     inserted += 1
                     # 收集本次插入记录，用于 device_history 关联（含可能的空用户/空快照）
                     matched_items.append({

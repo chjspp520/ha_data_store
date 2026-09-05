@@ -1,5 +1,47 @@
 # 更新日志
 
+## 2026-09-05 — v3.5.2 操作记录上报链路幂等化（不丢不重）
+
+### 🎯 背景
+
+room-elves-card 前端埋点操作记录上报，偶发“部分操作未入库”。可能原因：
+
+- 前端防抖窗口内关闭页面 / `sendBeacon` 无响应投递（无法确认服务端是否真的入库）
+- 后端 SQLite 瞬时被其它采集任务锁库，写入失败即丢
+- 页面关闭后本地暂存未能在下次打开时自动补发
+
+### ✅ 后端改进
+
+1. **`user_actions` 表新增幂等键 `op_id`（= 前端记录 `_id`）**
+   - 建表/启动迁移自动补充 `op_id TEXT NOT NULL DEFAULT ''`；
+   - 新增**部分唯一索引** `idx_user_actions_op_id ... WHERE op_id <> ''`（历史 `op_id=''` 行不受影响）。
+2. **上报写入改为幂等 `INSERT OR IGNORE`**
+   - `ActionLogView` 直写兜底路径与 `action_log_inbox` 收件箱迁入路径均带 `op_id` 去重：同一操作重复上报只写一行，`rowcount<=0` 视为重复，不重复计数、不重复关联 `device_history`。
+3. **抗锁**：action_log 相关 SQLite 连接加 `PRAGMA busy_timeout=20000` + `connect(timeout=20)`，锁冲突在连接层等待，不再瞬时抛错丢数据。
+4. **新增 JSON 收件箱（双保险）** `action_log_inbox.py`
+   - POST `/api/ha_data_store/action_log` 先原子写入本地 `{config_dir}/storage/action_log_inbox.json` 并快速返回成功；
+   - 后台定时（每 3 秒，及入队即触发）把小批次数据迁入 `user_actions`，迁移成功才从收件箱删除；
+   - 迁移失败保留收件箱并进入 15 秒冷却后重试；HA 重启启动自动加载遗留文件补迁；损坏文件自动改名 `.bak` 备份；
+   - 迁移成功后执行 `device_history` 用户关联与常用设备 `user_actions_sensor` 刷新（原在请求路径内，改到后台批量做，POST 响应更快）；
+   - **后台搬运用 `async_track_time_interval` 定时回调驱动**（而非常驻无限 asyncio 任务），避免 HA 启动/bootstrap 等待超时、以及关停/重启被卡住。
+
+### 🤝 前端协同（room-elves-card `action-log.js`）
+
+- 上报节奏：操作停止约 5s → 约 1s（体感立即上报）；补上页面隐藏/关闭 `sendBeacon` 兜底、下次打开自动补报。
+- 调试信息：上报结果回写到每条记录 `上报` 字段（成功/失败），调试卡片列表按“已上报游标”显示，避免显示滞后。
+- **关键语义**：`sendBeacon` 属无响应投递，改为**不再推进游标、不再回写成功**，记录保持“未确认”；下次打开自动重发。重发即使重复，也被后端 `op_id` 唯一索引吸收 → **不丢也不重**。
+
+### 📁 文件改动
+
+| 文件 | 改动 |
+|------|------|
+| `__init__.py` | `user_actions` 表补 `op_id` 列 + 部分唯一索引迁移；创建/启动 `ActionLogInbox`，`async_unload_entry` 停止后台任务 |
+| `http_api.py` | `ActionLogView.post` 优先入收件箱快速返回；直写兜底路径改 `INSERT OR IGNORE`（含 `op_id`），连接加 `busy_timeout` |
+| `action_log_inbox.py` | 新增：JSON 收件箱 + 后台迁库（`busy_timeout`/锁冲突重试/冷却/重启补迁/`op_id` 幂等） |
+| `const.py` / `manifest.json` | VERSION → 3.5.2 |
+
+> **升级提示**：需重启 Home Assistant 完成建表迁移与收件箱补迁。重启后历史“未确认”记录会自动补发，重复数据由 `op_id` 唯一索引吸收。
+
 ## 2026-09-05 — v3.5.1 设备历史查询支持 start/end 时间区间
 - 修复 `type=device_history` / `device_summary` 忽略 `start`/`end` 参数的问题：此前传 `start=YYYY-MM-DD&end=YYYY-MM-DD` 会落到"全部记录"兜底分支，现按 `on_time` 区间过滤并返回区间内汇总
 - 支持三种形态：仅 `start`、仅 `end`、`start+end`；区间优先于 `date/month/year`
