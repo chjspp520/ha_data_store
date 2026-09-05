@@ -2109,6 +2109,24 @@ class QueryView(_BaseDBView):
                 summary = self._calc_device_summary_by_where(conn, where_clause, sql_params, pattern)
                 return {"records": records, "summary": summary}
 
+            # ---------- start/end 区间查：返回区间内记录 + 汇总 ----------
+            start = params["start"]
+            end = params["end"]
+            if start or end:
+                range_conds, range_params = self._build_on_time_range(start, end)
+                cursor = conn.execute(
+                    f"SELECT * FROM {TABLE_DEVICE_HISTORY} "
+                    f"WHERE {where_clause} AND {' AND '.join(range_conds)} "
+                    f"ORDER BY on_time ASC LIMIT ?",
+                    (*sql_params, *range_params, limit),
+                )
+                records = [dict(row) for row in cursor.fetchall()]
+                self._parse_records_state_attr(records)
+                summary = self._calc_device_summary_by_range(
+                    conn, where_clause, sql_params, range_conds, range_params
+                )
+                return {"records": records, "summary": summary}
+
             # ---------- 按月查：默认返回每日汇总，detail=true 返回原始记录 ----------
             if month:
                 pattern = f"{month}-%"
@@ -2188,16 +2206,8 @@ class QueryView(_BaseDBView):
         date = params["date"]
         month = params["month"]
         year = params["year"]
-
-        # 确定时间匹配模式
-        if date:
-            pattern = f"{date}%"
-        elif month:
-            pattern = f"{month}-%"
-        elif year:
-            pattern = f"{year}-%"
-        else:
-            pattern = "%"  # 全部累计
+        start = params["start"]
+        end = params["end"]
 
         conn = sqlite3.connect(db_path)
         try:
@@ -2211,6 +2221,22 @@ class QueryView(_BaseDBView):
                 sql_params.append(room)
             where_clause = " AND ".join(conditions)
 
+            # start/end 区间优先（比 date/month/year 更细粒度）
+            if start or end:
+                range_conds, range_params = self._build_on_time_range(start, end)
+                return self._calc_device_summary_by_range(
+                    conn, where_clause, sql_params, range_conds, range_params
+                )
+
+            # 确定时间匹配模式（date/month/year）
+            if date:
+                pattern = f"{date}%"
+            elif month:
+                pattern = f"{month}-%"
+            elif year:
+                pattern = f"{year}-%"
+            else:
+                pattern = "%"  # 全部累计
             return self._calc_device_summary_by_where(conn, where_clause, sql_params, pattern)
         finally:
             conn.close()
@@ -3971,6 +3997,46 @@ class QueryView(_BaseDBView):
             f"WHERE {where_clause} AND on_time LIKE ? "
             f"  AND off_time != '' AND off_time IS NOT NULL",
             (*where_params, pattern),
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                "on_count": row["on_count"],
+                "total_energy": round(row["total_energy"], 2),
+                "total_duration": round(row["total_duration"], 0),
+            }
+        return {"on_count": 0, "total_energy": 0, "total_duration": 0}
+
+    @staticmethod
+    def _build_on_time_range(start: str, end: str) -> tuple[list[str], list[str]]:
+        """根据 start/end（YYYY-MM-DD）生成 on_time 区间条件与参数。
+
+        支持三种形态：仅 start、仅 end、start+end。
+        """
+        conds: list[str] = []
+        params: list[str] = []
+        if start:
+            conds.append("on_time >= ?")
+            params.append(f"{start} 00:00:00")
+        if end:
+            conds.append("on_time <= ?")
+            params.append(f"{end} 23:59:59")
+        return conds, params
+
+    def _calc_device_summary_by_range(
+        self, conn: sqlite3.Connection,
+        where_clause: str, where_params: list,
+        range_conds: list[str], range_params: list,
+    ) -> dict:
+        """计算设备汇总：区间（on_time >=/<）过滤版本。"""
+        full_conds = f"{where_clause} AND " + " AND ".join(range_conds) if range_conds else where_clause
+        cursor = conn.execute(
+            f"SELECT COUNT(*) AS on_count, "
+            f"  COALESCE(SUM(energy_consumed), 0) AS total_energy, "
+            f"  COALESCE(SUM(duration), 0) AS total_duration "
+            f"FROM {TABLE_DEVICE_HISTORY} "
+            f"WHERE {full_conds} AND off_time != '' AND off_time IS NOT NULL",
+            (*where_params, *range_params),
         )
         row = cursor.fetchone()
         if row:

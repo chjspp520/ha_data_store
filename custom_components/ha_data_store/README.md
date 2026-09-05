@@ -1094,6 +1094,10 @@ curl -X POST /api/ha_data_store/apikey/settings \
 
 ## 更新日志
 
+### v3.5.1 设备历史查询支持 start/end 时间区间（2026-09-05）
+
+修复 `type=device_history` / `device_summary` 忽略 `start`/`end` 参数的问题：此前区间会落到"全部记录"兜底，现按 `on_time` 过滤并返回区间内汇总；支持仅 start / 仅 end / start+end，且优先于 date/month/year。
+
 ### v3.5.0 可视化查询构造器 + 数据库新建表 + 自定义路由发布开关（2026-09-05）
 
 - **🧩 可视化查询构造器**（db_viewer「API 工具」）：选表 → 动态过滤参数（字段/数值比较/模糊 LIKE/多值 IN/时间段单行 between，含时间字段下拉）→ 排序/上限 → 汇总（总条数 + 合计/平均）→ 试运行 → 一键发布，全程无需写 SQL

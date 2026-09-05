@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-09-05 — v3.5.1 设备历史查询支持 start/end 时间区间
+- 修复 `type=device_history` / `device_summary` 忽略 `start`/`end` 参数的问题：此前传 `start=YYYY-MM-DD&end=YYYY-MM-DD` 会落到"全部记录"兜底分支，现按 `on_time` 区间过滤并返回区间内汇总
+- 支持三种形态：仅 `start`、仅 `end`、`start+end`；区间优先于 `date/month/year`
+- 涉及 `http_api.py`（`_query_device_history` / `_query_device_summary`，新增 `_build_on_time_range` / `_calc_device_summary_by_range`）；版本 → v3.5.1
+
 ## 2026-09-05 — v3.5.0 可视化查询构造器 + 数据库新建表 + 自定义路由发布开关
 
 ### 🧩 可视化查询构造器（直观版，无需手写 SQL）
