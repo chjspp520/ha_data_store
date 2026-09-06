@@ -1,5 +1,32 @@
 # 更新日志
 
+## 2026-09-06 — v3.5.4 全部用电量实体支持列表条数设置（text.ha_data_store_ele_list）
+
+- 新增文本设置实体 **`text.ha_data_store_ele_list`**（用电计量列表条数）：状态值格式 **“日,月,年”**，如 `5,3,4` 表示 daylist 显示 5 条、monthlist 显示 3 条、yearlist 显示 4 条
+  - 默认值 `3,3,3`；仅后端校验格式（`^\d+,\d+,\d+$`），非法输入拒绝写入；读取方解析失败一律回退 `3,3,3`
+  - 归入主设备「HA数据统一存储系统」
+- **`sensor.ha_data_store_all_power`** 每个用电实体明细新增：
+  - `period`：`daily | monthly | yearly`（与三个用电实体自身的 period 一致）
+  - 对应列表：daily→`daylist`、monthly→`monthlist`、yearly→`yearlist`（升序保留最近 N 条；条数为 0 则不显示）
+  - 列表条数实时取自 `text.ha_data_store_ele_list`
+- 监听 `state_changed`：`text.ha_data_store_ele_list` 值变化 → 立即刷新 `all_power`（失败仅记录日志）
+- **三个用电实体自身的 `daylist/monthlist/yearlist` 保持全量，不受限制**（老数据源不受影响）
+- 涉及 `text.py`（新增 `EleListSettingText`）、`sensor.py`（`PowerAllSensor` 增加 `_ele_limits`/列表注入/监听）；版本 → v3.5.4
+
+## 2026-09-06 — v3.5.3 新增数据库压缩按钮实体
+
+- 新增按钮实体 **`button.ha_data_store_db_compress`**（数据库压缩）：
+  - 点击即对集成 SQLite 数据库执行 `VACUUM` 压缩，操作放入 executor 执行，不阻塞事件循环
+  - 压缩前先 `PRAGMA journal_mode=DELETE`，与「数据库维护」页面的压缩逻辑一致
+  - 点击完成后刷新以下状态属性：
+    | 属性 | 说明 | 示例 |
+    |---|---|---|
+    | `压缩前大小` | VACUUM 前数据库文件大小 | `12.34 MB` |
+    | `压缩后大小` | VACUUM 后文件大小 | `5.00 MB` |
+    | `压缩时间` | 本次压缩完成时间 | `2026-09-06 10:20:30` |
+  - 实体归入主设备「HA数据统一存储系统」；压缩失败仅记录日志，不写入状态
+- 涉及 `button.py`（新增 `DatabaseCompressButton` / `_fmt_size`）；版本 → v3.5.3
+
 ## 2026-09-05 — v3.5.2 操作记录上报链路幂等化（不丢不重）
 
 ### 🎯 背景

@@ -420,13 +420,20 @@ class PowerAllSensor(SensorEntity):
 
     把「用电计量」下所有已注册的用电实体聚合为一个新实体：
       状态值        = 用电实体个数（去重）
-      状态属性      = 每个用电实体的明细（entity_id/name/room/device/icon）
+      状态属性      = 每个用电实体的明细
+        entity_id / name / icon / room / device / power_entity
+        period       → daily | monthly | yearly（与单实体一致）
+        daylist/monthlist/yearlist → 当前实体对应列表（受 text.ha_data_store_ele_list 条数限制）
     实体 ID 固定为 sensor.ha_data_store_all_power。
     """
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:flash"
     _attr_native_unit_of_measurement = "个"
+
+    # 列表条数设置实体与默认值（日,月,年）
+    _EL_LIST_ENTITY = "text.ha_data_store_ele_list"
+    _EL_LIMITS_DEFAULT = (3, 3, 3)
 
     def __init__(self, hass, device_info):
         self._hass = hass
@@ -437,11 +444,48 @@ class PowerAllSensor(SensorEntity):
         self._attr_native_value = 0
         self._attr_extra_state_attributes = {}
 
-    def _load_data(self):
+    def _ele_limits(self):
+        """从 text.ha_data_store_ele_list 解析 (日条数, 月条数, 年条数)。
+
+        状态缺失 / 格式非法 / 含负数 → 一律回退默认 (3,3,3)。
+        """
+        try:
+            state = self._hass.states.get(self._EL_LIST_ENTITY)
+            raw = (state.state if state else "") or ""
+        except Exception:
+            return self._EL_LIMITS_DEFAULT
+        parts = [p.strip() for p in str(raw).split(",")]
+        if len(parts) != 3:
+            return self._EL_LIMITS_DEFAULT
+        nums = []
+        for p in parts:
+            try:
+                v = int(p)
+            except (TypeError, ValueError):
+                return self._EL_LIMITS_DEFAULT
+            if v < 0:
+                return self._EL_LIMITS_DEFAULT
+            nums.append(v)
+        return (nums[0], nums[1], nums[2])
+
+    def _load_data(self, limits, power_values):
+        """采集 all_power 明细（executor 线程执行）。
+
+        limits = (日,月,年) 各列表显示条数；0 表示不显示该列表。
+        power_values = {功率实体: 当前数值}，注入为每项的 power_value（避免前端再查 power_entity 造成延迟）。
+        三个用电实体自身的 daylist/monthlist/yearlist 保持全量，不受影响。
+        """
         mgr = self._hass.data.get(DOMAIN, {}).get("power_energy_manager")
         entities = []
         if mgr is not None:
             for eid, st in list(getattr(mgr, "_meters", {}).items()):
+                cur = mgr.state_of(eid)
+                # suffix → 周期描述（与单实体 period 保持一致）
+                period_def = {
+                    "daily": ("day", cur["date"], cur["daily"], "daylist", limits[0]),
+                    "monthly": ("month", cur["date"][:7], cur["monthly"], "monthlist", limits[1]),
+                    "yearly": ("year", cur["date"][:4], cur["yearly"], "yearlist", limits[2]),
+                }
                 for suffix, ent in list((st.get("sensors") or {}).items()):
                     ent_id = getattr(ent, "entity_id", None)
                     if not ent_id:
@@ -449,16 +493,30 @@ class PowerAllSensor(SensorEntity):
                     cfg = getattr(ent, "_cfg", {}) or {}
                     room = cfg.get("room") or ""
                     device_name = cfg.get("device_name") or ""
-                    # 登记功率实体作为 device 字段（功率来源）
                     power_entity = cfg.get("entity_id") or ""
-                    entities.append({
+                    item = {
                         "entity_id": ent_id,
                         "name": getattr(ent, "_attr_name", None) or ent_id,
                         "icon": getattr(ent, "_attr_icon", None) or "mdi:flash",
                         "room": room,
                         "device": device_name,
                         "power_entity": power_entity,
-                    })
+                    }
+                    # 功率实体当前值（已由 async 侧预取）
+                    if power_entity and power_entity in power_values:
+                        item["power_value"] = power_values[power_entity]
+                    if suffix in period_def:
+                        field, key, value, list_attr, limit_n = period_def[suffix]
+                        item["period"] = suffix
+                        # 条数为 0 → 不输出该列表字段（0,0,0 表示不显示 day/month/year 列表）
+                        if not limit_n:
+                            entities.append(item)
+                            continue
+                        # 列表为升序（旧→新），保留最近 N 条后倒序 → 最新在最上面
+                        full = mgr.period_list_of(eid, field, key, value)
+                        if full:
+                            item[list_attr] = full[-limit_n:][::-1]
+                    entities.append(item)
         # 去重（同一实体只保留一份）并按名称排序
         seen = set()
         unique = []
@@ -471,7 +529,28 @@ class PowerAllSensor(SensorEntity):
         return {"total": len(unique), "entities": unique}
 
     async def _async_refresh(self, now=None):
-        data = await self._hass.async_add_executor_job(self._load_data)
+        limits = self._ele_limits()
+        # async 线程内预取各功率实体的当前值（executor 中不允许访问 hass.states）
+        power_values = {}
+        mgr = self._hass.data.get(DOMAIN, {}).get("power_energy_manager")
+        if mgr is not None:
+            seen_power = set()
+            for _eid, st in list(getattr(mgr, "_meters", {}).items()):
+                for _suffix, ent in list((st.get("sensors") or {}).items()):
+                    cfg = getattr(ent, "_cfg", {}) or {}
+                    pe = cfg.get("entity_id") or ""
+                    if not pe or pe in seen_power:
+                        continue
+                    seen_power.add(pe)
+                    s = self._hass.states.get(pe)
+                    if s is None:
+                        continue
+                    try:
+                        pv = round(float(str(s.state)), 2)
+                    except (TypeError, ValueError):
+                        continue
+                    power_values[pe] = pv
+        data = await self._hass.async_add_executor_job(self._load_data, limits, power_values)
         self._attr_native_value = data.get("total", 0)
         self._attr_extra_state_attributes = data
         self.async_write_ha_state()
@@ -1000,6 +1079,20 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_track_time_interval(hass, helper_summary_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, power_all_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
+
+    # text.ha_data_store_ele_list（列表条数设置）变化 → 立即刷新 all_power
+    async def _on_ele_list_changed(event):
+        if not event.data:
+            return
+        if event.data.get("entity_id") != PowerAllSensor._EL_LIST_ENTITY:
+            return
+        try:
+            await power_all_sensor._async_refresh(None)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 列表条数变化刷新 all_power 失败")
+
+    hass.bus.async_listen(EVENT_STATE_CHANGED, _on_ele_list_changed)
+
     # 自动化状态传感器：定时轮询作为兜底；automation_logs 新数据由写日志回调触发；
     # automation.* 实体（ha_automation 节点）状态变化实时监听触发（2 秒防抖）
     async_track_time_interval(hass, automation_status_sensor.async_trigger_refresh, timedelta(seconds=30))

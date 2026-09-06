@@ -618,7 +618,7 @@ db_viewer「系统配置 → ⚡ 用电计量」登记**功率实体**（填功�
 - 单位 W/kW 自动识别（登记优先，其次读实体 `unit_of_measurement`）；`unavailable/unknown` 不累计；采样空窗 >5 分钟丢弃（防停机误算）；
 - 全部实体归入统一设备「用电计量」；重启自动恢复，卸载前自动落盘；
 - **历史列表状态属性**：三个累计实体状态属性自动附带全量历史列表 —— 日用电 `daylist`（每日用电）、月用电 `monthlist`（每月用电）、年用电 `yearlist`（每年用电），元素形如 `{day|month|year, usage}`（usage 单位 kWh，保留 3 位小数）；全量不设上限、**无数据日期不占位**，**今天/本月/当年并入实时值**（与实体 state 一致），由 Manager 缓存并在 60s 落盘/跨日时重建，重启自动恢复；
-- **汇总实体** `sensor.ha_data_store_all_power`：状态 = 用电实体个数，attributes `entities[]` = 每个用电实体的 entity_id/name/icon/room/device/power_entity，30s 刷新；
+- **汇总实体** `sensor.ha_data_store_all_power`：状态 = 用电实体个数，attributes `entities[]` = 每个用电实体的 entity_id/name/icon/room/device/power_entity + `period`（daily/monthly/yearly）+ 对应列表（daily→`daylist`、monthly→`monthlist`、yearly→`yearlist`，升序保留最近 N 条），30s 刷新；列表条数由设置实体 **`text.ha_data_store_ele_list`**（状态“日,月,年”，默认 `3,3,3`）控制，该 text 变化时立即刷新 all_power；三个用电实体自身的列表保持全量不受影响；
 - **接口**：`GET /api/ha_data_store/power_energy`（`type=configs` / `type=query&kind=daily|monthly|yearly|range|latest`，支持 entity_id/room/date/month/year/start/end），`POST`（登记/删除）；API 工具含「⚡ 用电计量」查询分组；
 - 数据浏览器中 `power_energy_daily` 为用户表（默认可见）。
 
@@ -1093,6 +1093,14 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.5.4 全部用电量实体支持列表条数设置（2026-09-06）
+
+新增设置实体 **`text.ha_data_store_ele_list`**，状态格式“日,月,年”（如 `5,3,4`），默认 `3,3,3`，非法格式回退默认值。`sensor.ha_data_store_all_power` 每个实体明细增加 `period`（daily/monthly/yearly）与对应 `daylist`/`monthlist`/`yearlist`（升序保留最近 N 条），条数实时取自该 text 实体并在其变化时立即刷新；三个用电实体自身的列表仍保持全量不受影响。
+
+### v3.5.3 新增数据库压缩按钮实体（2026-09-06）
+
+新增按钮 **`button.ha_data_store_db_compress`**（数据库压缩）：点击即对集成 SQLite 数据库执行 `VACUUM` 压缩（executor 中执行，不阻塞事件循环），完成后在状态属性中记录 **`压缩前大小` / `压缩后大小` / `压缩时间`**，例如 `12.34 MB → 5.00 MB`。实体归入主设备「HA数据统一存储系统」。
 
 ### v3.5.1 设备历史查询支持 start/end 时间区间（2026-09-05）
 
