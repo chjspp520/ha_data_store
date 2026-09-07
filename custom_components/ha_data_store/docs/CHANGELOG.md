@@ -1,5 +1,59 @@
 # 更新日志
 
+## 2026-09-07 — v3.5.6 新增全屋实体传感器 `sensor.ha_data_store_all_entities`
+
+### 🆕 新增传感器 `sensor.ha_data_store_all_entities`（全屋实体）
+
+数据源：`report_entities` 表（room-elves-card 等前端实体上报，POST `/api/ha_data_store/report` 全量重置）。
+
+- **状态值** = 去重后的实体个数（按 `entity_id` 去重；一个实体跨多个节点仍计 1）
+- **状态属性**（按 `entity_type` 分组）：
+  - `nodes` → `{节点名: [实体...]}`；节点名 = 全表 `entity_type` 拆分后去重
+  - `type_list` → 全部节点名（排序，与 `nodes` 键一致）
+  - `total` / `total_rows` → 去重实体个数 / 表原始行数
+  - `updated_at` → 最近一次更新时间
+- 每个实体字段：`entity/name/icon/room_name/rooms/entity_type/entity_device/entity_area`
+- **`entity_type` 支持多值**：以 `,`（兼容中文逗号）拆分，一个实体可同时归属多个节点（属正常现象）；同一节点内同实体只保留一份
+- **更新规则**：report_entities 表变化才更新——每分钟轻量比对（总行数 + 最后上报时间），变化才重建并写状态；POST `/report` 成功后也会即时触发；表不变则不更新（无定时轮询、无状态抖动）
+- 实体 ID 固定：注册表自动强制 `sensor.ha_data_store_all_entities`
+- 涉及 `sensor.py`、`http_api.py`；版本 → v3.5.6
+
+## 2026-09-07 — v3.5.5 全屋用电/用时：API 三级查询增强 + 汇总传感器
+
+### 🏠 新增查询类型 `whole_house_usage`（总计→房间→设备 三级）
+
+`GET /api/ha_data_store/query?type=whole_house_usage&year=YYYY[&month=YYYY-MM][&date=YYYY-MM-DD]`
+
+- `year/month/date` 按最近一级精确匹配：`date > month > year`，只查年则返回全年
+- 三级结构：`total` → `rooms[]` → `rooms[].devices[]`；返回字段：
+  - 每级：`count`(开启次数)、`duration_hour`(小时，2 位)、`energy_kwh`(kWh，4 位)、`running_count`
+  - **设备数量统计**：顶层 `total.device_count`（范围内参与统计的设备总数）；每个房间 `room.device_count`（该房间设备数）
+  - **顶层 `room_names`**：单纯房间名列表（按 `rooms` 同一顺序），如 `["客厅","餐厅",...]`；`room_count` = 房间数
+- **运行中设备纳入统计**（`on_time` 非空且 `off_time` 空/空串），设备项/房间/总计带 `running` 标记：
+  - 时长 A = 当前时间 − `on_time`（未真正关闭，用当前时间作截止）
+  - 有用电表（`now_kwh` 与 `on_power` 均有）：用电 = `now_kwh − on_power`（kWh）
+  - 无电表但有固定功率（`power_rating`，来自 `entity_configs`）：用电 = `power_rating(W)/1000 × A(小时)`
+  - 两者皆无/缺数据：用电按 0
+- 已关闭记录保持原口径：时长取 `duration`(秒)，用电取 `energy_consumed`(kWh)
+- API 工具「设备类」新增分组「🏠 全屋用电/用时（年/月/日）」
+
+### 🆕 新增传感器 `sensor.ha_data_store_all_room_usage`（全屋用电/用时汇总）
+
+- **状态值** = 今日节点 `total.energy_kwh`（kWh，2 位小数），单位 kWh
+- **状态属性** = 三个三级节点（与 `whole_house_usage` 同构）：
+  - `yearly` → 本年（`period`=年份）
+  - `monthly` → 本月（`period`=YYYY-MM）
+  - `daily` → 今日（`period`=YYYY-MM-DD）
+  - 每个节点均为 `{scope, period, total, rooms, room_count, room_names}`
+  - `generated_at` → 本次计算时间（本地时区）
+- **每 1 分钟刷新一次**；三个节点共用同一计算时刻，保证运行中设备口径一致
+- 实体 ID 固定，注册表自动强制 `sensor.ha_data_store_all_room_usage`
+
+### 🔧 内部重构
+
+- `http_api.py`：`_query_whole_house_usage` 计算逻辑抽为模块级函数 `compute_whole_house_usage_sync(db_path, year, month, date, now_dt)`，HTTP 接口与传感器共用同一口径，后续增强一处生效
+- 涉及 `http_api.py`、`sensor.py`、`const.py` / `manifest.json`；版本 → v3.5.5
+
 ## 2026-09-06 — v3.5.4 全部用电量实体支持列表条数设置（text.ha_data_store_ele_list）
 
 - 新增文本设置实体 **`text.ha_data_store_ele_list`**（用电计量列表条数）：状态值格式 **“日,月,年”**，如 `5,3,4` 表示 daylist 显示 5 条、monthlist 显示 3 条、yearlist 显示 4 条

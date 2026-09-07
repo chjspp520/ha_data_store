@@ -191,6 +191,221 @@ def _make_auth_token(db_path: str) -> str:
     return hashlib.sha256(f"hds_auth_{pw}".encode()).hexdigest()
 
 
+def compute_whole_house_usage_sync(db_path: str, year: str, month: str = "",
+                                   date: str = "",
+                                   now_dt: datetime | None = None) -> dict:
+    """全屋用电/用时汇总（三级：总计→房间→设备），含正在运行的设备。
+
+    HTTP 接口(whole_house_usage) 与传感器共用，保证口径一致。
+    参数：
+      year  = YYYY（必填，用来确定范围）
+      month = YYYY-MM（可选，指定则查该月）
+      date  = YYYY-MM-DD（可选，指定则查该日）
+    （三者精确按最近一级：date > month > year）
+
+    统计口径：
+      - 已关闭记录（off_time 非空）：时长取 duration(秒)，用电取 energy_consumed(kWh)
+      - 正在运行记录（on_time 非空且 off_time 空/空串）：
+          · 设备项/房间/总计带 running 标记
+          · 时长 A = 当前时间 - on_time（未真正关闭，用当前时间作截止）
+          · 有用电数据（now_kwh 与 on_power 均有）：用电 = now_kwh - on_power (kWh)
+          · 无电表但有固定功率(power_rating)：用电 = power_rating(W)/1000 × A(小时)
+          · 两者皆无/电表缺数据：用电按 0
+      返回三级：total/rooms/devices
+      duration 为小时(2位)，energy 为 kWh(4位)，count 为开启次数。
+      device_count：top total 为范围内参与统计的设备总数；
+                    每个 room 的 device_count 为该房间参与统计的设备数。
+      room_names：单纯房间名称列表（按 rooms 同一顺序），如 ["客厅","餐厅",...]。
+    """
+    year = (year or "").strip()
+    month = (month or "").strip()
+    date = (date or "").strip()
+
+    if not year:
+        raise ValueError("whole_house_usage 需要 year 参数（格式：YYYY）")
+    if not re.match(r"^\d{4}$", year):
+        raise ValueError("year 参数格式错误，应为 YYYY")
+    if month and not re.match(r"^\d{4}-\d{2}$", month):
+        raise ValueError("month 参数格式错误，应为 YYYY-MM")
+    if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise ValueError("date 参数格式错误，应为 YYYY-MM-DD")
+
+    # 精确匹配粒度：date > month > year
+    if date:
+        pattern = f"{date}%"
+        scope_label = date
+        scope_key = "date"
+    elif month:
+        pattern = f"{month}-%"
+        scope_label = month
+        scope_key = "month"
+    else:
+        pattern = f"{year}-%"
+        scope_label = year
+        scope_key = "year"
+
+    if now_dt is None:
+        now_dt = datetime.now()
+
+    def _parse_time(ts: str):
+        try:
+            if len(ts) > 19:
+                ts = ts[:19]
+            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return None
+
+    def _hours(seconds: float) -> float:
+        return round(float(seconds) / 3600.0, 2)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT dh.room AS room, dh.entity_id AS entity_id, "
+            f"  MAX(dh.name) AS name, "
+            f"  dh.on_time AS on_time, dh.off_time AS off_time, "
+            f"  dh.duration AS duration, dh.energy_consumed AS energy_consumed, "
+            f"  dh.on_power AS on_power, dh.now_kwh AS now_kwh, "
+            f"  MAX(ec.power_entity) AS power_entity, MAX(ec.power_rating) AS power_rating "
+            f"FROM {TABLE_DEVICE_HISTORY} dh "
+            f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+            f"WHERE dh.on_time LIKE ? "
+            f"GROUP BY dh.room, dh.entity_id, dh.on_time, dh.off_time, "
+            f"  dh.duration, dh.energy_consumed, dh.on_power, dh.now_kwh",
+            (pattern,),
+        ).fetchall()
+
+        # room+entity 聚合（同一实体可能含已关闭与运行中记录）
+        buckets: dict[tuple, dict] = {}
+        for r in rows:
+            room = r["room"] or ""
+            eid = r["entity_id"] or ""
+            if not eid:
+                continue
+            off = r["off_time"]
+            closed = bool(off and str(off).strip())
+            name = r["name"] or eid
+            running = not closed
+
+            # 时长（秒）：已关闭取 duration；运行中用当前时间 - on_time
+            dur_s = 0.0
+            if closed:
+                try:
+                    dur_s = float(r["duration"] or 0)
+                except (TypeError, ValueError):
+                    dur_s = 0.0
+            else:
+                on_dt = _parse_time(r["on_time"] or "")
+                if on_dt is not None:
+                    secs = (now_dt - on_dt).total_seconds()
+                    dur_s = max(secs, 0.0)
+
+            # 用电量（kWh）
+            ene = 0.0
+            if closed:
+                try:
+                    ene = float(r["energy_consumed"] or 0)
+                except (TypeError, ValueError):
+                    ene = 0.0
+            else:
+                now_kwh = r["now_kwh"]
+                on_power = r["on_power"]
+                power_entity = r["power_entity"] or ""
+                try:
+                    power_rating = float(r["power_rating"] or 0)
+                except (TypeError, ValueError):
+                    power_rating = 0.0
+                if now_kwh is not None and on_power is not None:
+                    # 有用电表读数：now_kwh - on_power
+                    ene = max(float(now_kwh) - float(on_power), 0.0)
+                elif not power_entity and power_rating > 0:
+                    # 无电表但有固定功率：功率(kW) × 时长(小时)
+                    ene = power_rating / 1000.0 * (dur_s / 3600.0)
+
+            key = (room, eid)
+            b = buckets.get(key)
+            if b is None:
+                b = {
+                    "room": room, "entity_id": eid, "name": name,
+                    "count": 0, "dur_s": 0.0, "ene": 0.0, "running": False,
+                }
+                buckets[key] = b
+            b["count"] += 1
+            b["dur_s"] += dur_s
+            b["ene"] += ene
+            if running:
+                b["running"] = True
+
+        total_count = 0
+        total_dur = 0.0
+        total_ene = 0.0
+        total_running = 0
+        total_device = 0
+        rooms_map: dict[str, dict] = {}
+
+        for key, b in buckets.items():
+            total_count += b["count"]
+            total_dur += b["dur_s"]
+            total_ene += b["ene"]
+            if b["running"]:
+                total_running += 1
+            # 每个 (房间, 设备) 桶即为一个参与统计的设备条目
+            total_device += 1
+            dev = {
+                "entity_id": b["entity_id"],
+                "name": b["name"],
+                "count": b["count"],
+                "duration_hour": _hours(b["dur_s"]),
+                "energy_kwh": round(b["ene"], 4),
+                "running": b["running"],
+            }
+            room_obj = rooms_map.get(b["room"])
+            if room_obj is None:
+                room_obj = {"room": b["room"], "count": 0, "dur_s": 0.0,
+                            "ene": 0.0, "running_count": 0, "devices": []}
+                rooms_map[b["room"]] = room_obj
+            room_obj["count"] += b["count"]
+            room_obj["dur_s"] += b["dur_s"]
+            room_obj["ene"] += b["ene"]
+            if b["running"]:
+                room_obj["running_count"] += 1
+            room_obj["devices"].append(dev)
+
+        rooms = []
+        for room_obj in rooms_map.values():
+            room_obj["devices"].sort(
+                key=lambda d: (d["duration_hour"], d["energy_kwh"]), reverse=True
+            )
+            rooms.append({
+                "room": room_obj["room"],
+                "count": room_obj["count"],
+                "device_count": len(room_obj["devices"]),
+                "duration_hour": _hours(room_obj["dur_s"]),
+                "energy_kwh": round(room_obj["ene"], 4),
+                "running_count": room_obj["running_count"],
+                "devices": room_obj["devices"],
+            })
+        rooms.sort(key=lambda x: (x["duration_hour"], x["energy_kwh"]), reverse=True)
+
+        return {
+            "scope": scope_key,
+            "period": scope_label,
+            "total": {
+                "count": total_count,
+                "device_count": total_device,
+                "duration_hour": _hours(total_dur),
+                "energy_kwh": round(total_ene, 4),
+                "running_count": total_running,
+            },
+            "rooms": rooms,
+            "room_count": len(rooms),
+            "room_names": [r["room"] for r in rooms],
+        }
+    finally:
+        conn.close()
+
+
 _LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1913,7 +2128,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, whole_house_usage, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail"},
                 status_code=400,
             )
 
@@ -1979,6 +2194,8 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_aggregate_room_monthly, db_path, request)
             elif query_type == "aggregate_room_yearly_daily":
                 result = await self._exec_in_executor(hass, self._query_aggregate_room_yearly_daily, db_path, request)
+            elif query_type == "whole_house_usage":
+                result = await self._exec_in_executor(hass, self._query_whole_house_usage, db_path, request)
             elif query_type in ("ranking_daily", "ranking_monthly", "ranking_yearly"):
                 result = await self._exec_in_executor(hass, self._query_ranking, db_path, request)
             elif query_type == "electricity_standard":
@@ -3489,6 +3706,26 @@ class QueryView(_BaseDBView):
             }
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  whole_house_usage：全屋用电/用时（三级：总计→房间→设备）               #
+    # ------------------------------------------------------------------ #
+    def _query_whole_house_usage(self, db_path: str, request: web.Request) -> dict:
+        """全屋用电/用时汇总（指定年/月/日），含正在运行的设备。
+
+        参数：
+          year  = YYYY（必填，用来确定范围）
+          month = YYYY-MM（可选，指定则查该月）
+          date  = YYYY-MM-DD（可选，指定则查该日）
+        （三者精确按最近一级：date > month > year）
+
+        统计口径（时长/用电/运行中设备处理）与实现见模块级函数
+        compute_whole_house_usage_sync 的 docstring。
+        """
+        year = request.query.get("year", "").strip()
+        month = request.query.get("month", "").strip()
+        date = request.query.get("date", "").strip()
+        return compute_whole_house_usage_sync(db_path, year, month, date)
 
     # ------------------------------------------------------------------ #
     #  内部：按房间+时间周期聚合多类别数据（设备/环境/属性）                     #
@@ -10520,6 +10757,13 @@ class ReportEntitiesView(_BaseDBView):
 
         try:
             result = await self._exec_in_executor(hass, _reset)
+            # report_entities 表已变化 → 触发「全屋实体」传感器刷新（表不变时不会走到这里）
+            try:
+                sensor_ref = hass.data.get(DOMAIN, {}).get("all_entities_sensor")
+                if sensor_ref is not None:
+                    await sensor_ref._async_refresh()
+            except Exception as exc:
+                _LOGGER.warning("[report] 刷新全屋实体 sensor 失败: %s", exc)
             return self.json({"success": True, "data": result})
         except Exception as exc:
             _LOGGER.exception("[report] 全量重置失败")

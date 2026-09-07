@@ -1219,6 +1219,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="device_user_by_date">📅 指定实体指定日期用户操作记录</option>
           <option value="device_user_by_month">🗓 指定实体指定月份用户操作记录</option>
           <option value="device_user_month_dates">📅 指定实体指定月份有用户操作的日期</option>
+          <option value="whole_house_usage">🏠 全屋用电/用时（年/月/日）</option>
         </optgroup>
         <optgroup label="传感器类">
           <option value="env_history">环境历史</option>
@@ -1399,6 +1400,22 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="apiYearRow" style="display:none">
       <label>年份 (YYYY)</label>
       <input type="number" id="apiYear" min="2020" max="2099" placeholder="2026" onchange="generateApiUrl()">
+    </div>
+    <div id="apiWhScopeRow" style="display:none" class="full">
+      <label>统计范围（全屋用电/用时）</label>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;width:100%">
+        <div style="flex:0 0 140px">
+          <select id="apiWhScope" onchange="onApiWhScopeChange()" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="year">年</option>
+            <option value="month">月</option>
+            <option value="day">日</option>
+          </select>
+        </div>
+        <div style="flex:0 1 220px">
+          <input id="apiWhVal" type="number" min="2020" max="2099" placeholder="2026" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" onchange="generateApiUrl()">
+        </div>
+        <span style="font-size:11px;color:var(--text2)">按 年 / 月 / 日 统计全屋用电与用时；返回 总计→房间→设备 三级（时长=小时，用电=kWh，次数）</span>
+      </div>
     </div>
     <div id="apiDateFieldRow" style="display:none">
       <label>日期字段</label>
@@ -6586,6 +6603,9 @@ function onApiTypeChange() {
   const isCustomRoutePath = isCustomRoute ? qt.slice('custom:'.length) : '';
   // 默认隐藏自定义参数区；仅自定义路由分支会重新显示
   document.getElementById('apiCustomParamsRow').style.display = 'none';
+  // 默认隐藏全屋用电/用时范围行；仅 whole_house_usage 分支显示
+  const elWhScopeRow = document.getElementById('apiWhScopeRow');
+  if (elWhScopeRow) elWhScopeRow.style.display = 'none';
   const isRoomsDaily = qt === 'rooms_daily';
   const isVacuumHistory = qt === 'vacuum_history';
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
@@ -6600,6 +6620,8 @@ function onApiTypeChange() {
   const isAggregateRoomMonthly = qt === 'aggregate_room_monthly';
   const isAggregateRoomYearlyDaily = qt === 'aggregate_room_yearly_daily';
   const isAggregateRoom = isAggregateRoomDaily || isAggregateRoomMonthly || isAggregateRoomYearlyDaily;
+  // 全屋用电/用时（设备类，年/月/日三级汇总）
+  const isWholeHouseUsage = qt === 'whole_house_usage';
   const isRanking = qt === 'ranking_daily' || qt === 'ranking_monthly' || qt === 'ranking_yearly';
   const isElectricityStandard = qt === 'electricity_standard';
   const isHealthHistory = qt === 'health_history';
@@ -7097,6 +7119,14 @@ function onApiTypeChange() {
   } else if (qt === 'env_history' || qt === 'env_latest') {
     populateApiTableCbs(['temperature','humidity','pm25','co2','power','sensor']);
   }
+
+  // 全屋用电/用时：隐藏常规控件，仅保留「范围选择 + 取值」
+  if (isWholeHouseUsage) {
+    if (typeof _hideAllApiFormRows === 'function') _hideAllApiFormRows();
+    const whRow = document.getElementById('apiWhScopeRow');
+    if (whRow) whRow.style.display = 'block';
+  }
+
   generateApiUrl();
 }
 
@@ -7116,6 +7146,17 @@ function onDateModeChange() {
   const mode = document.getElementById('apiDateMode').value;
   document.getElementById('apiDateSingle').style.display = mode === 'single' ? 'block' : 'none';
   document.getElementById('apiDateRange').style.display = mode === 'range' ? 'block' : 'none';
+  generateApiUrl();
+}
+
+// 全屋用电/用时：按 年/月/日 切换输入控件类型
+function onApiWhScopeChange() {
+  const scope = document.getElementById('apiWhScope').value;
+  const val = document.getElementById('apiWhVal');
+  if (!val) return;
+  if (scope === 'year') { val.type = 'number'; val.min = 2020; val.max = 2099; val.placeholder = '2026'; }
+  else if (scope === 'month') { val.type = 'month'; val.min = ''; val.max = ''; val.placeholder = '2026-01'; }
+  else { val.type = 'date'; val.min = ''; val.max = ''; val.placeholder = '2026-01-01'; }
   generateApiUrl();
 }
 
@@ -7638,6 +7679,27 @@ function generateApiUrl() {
     if (catCbs.length > 0) {
       const cats = Array.from(catCbs).map(cb => cb.value).join(',');
       url += '&category=' + encodeURIComponent(cats);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 全屋用电/用时模式特殊处理（年/月/日）
+  if (qt === 'whole_house_usage') {
+    const whScope = document.getElementById('apiWhScope').value;
+    const whVal = (document.getElementById('apiWhVal').value || '').trim();
+    if (!whVal) {
+      document.getElementById('apiUrlOutput').value = url + '（请先选择统计范围并输入年/月/日）';
+      return;
+    }
+    if (whScope === 'year') {
+      url += '&year=' + encodeURIComponent(whVal);
+    } else if (whScope === 'month') {
+      const m = whVal.slice(0, 7);
+      if (m) url += '&year=' + encodeURIComponent(m.slice(0, 4)) + '&month=' + encodeURIComponent(m);
+    } else {
+      const d = whVal.slice(0, 10);
+      if (d) url += '&year=' + encodeURIComponent(d.slice(0, 4)) + '&date=' + encodeURIComponent(d);
     }
     document.getElementById('apiUrlOutput').value = url;
     return;

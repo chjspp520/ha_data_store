@@ -70,6 +70,8 @@ ha_data_store 是一款 Home Assistant 自定义集成，无需修改 `configura
 | 🤖 **简单自动化引擎** | 定时/间隔触发 + 多条件判断 + 顺序执行服务动作，执行记录落库（30 秒调度，db_viewer 管理） |
 | 📊 **自动化状态传感器** | `sensor.ha_data_store_automation` 实时统计自动化总数/启停/执行结果，前端自动化管理卡片数据源 |
 | 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot + config_id），ts 采用实体状态时间与 device_history 精确关联，`sensor.近期使用设备` 近30天聚合，API工具支持多维度查询 |
+| 🏠 **全屋用电/用时** | `whole_house_usage` 查询按 年/月/日 返回 总计→房间→设备 三级统计（时长/用电/开启次数/运行中设备/设备数量/单纯房间名列表），API 工具含查询分组；汇总传感器 `sensor.ha_data_store_all_room_usage` 输出 本年/本月/今日 三级（状态=今日用电 kWh），每分钟刷新 |
+| 🗂️ **全屋实体** | 传感器 `sensor.ha_data_store_all_entities` 按 `report_entities.entity_type` 分组展示全部上报实体（支持多值逗号拆分、跨节点归属），状态值=去重实体个数，表变化才更新 |
 
 ---
 
@@ -705,6 +707,7 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `aggregate_daily` | 所有实体按日聚合 | - |
 | `aggregate_monthly` | 所有实体按月聚合 | - |
 | `aggregate_yearly` | 所有实体按年聚合 | - |
+| `whole_house_usage` | 全屋用电/用时（总计→房间→设备 三级，含运行中设备统计与设备数量） | year(必填)；month/date 可选精确 |
 | `ranking_daily` | 日排行榜 | - |
 | `ranking_monthly` | 月排行榜 | - |
 | `ranking_yearly` | 年排行榜 | - |
@@ -755,7 +758,19 @@ curl "http://ha:8123/api/ha_data_store/query?type=user_actions_hour_dist&entity_
 
 # 用户动作：实体当日最后一条记录
 curl "http://ha:8123/api/ha_data_store/query?type=user_actions_entity_last_today&entity_id=light.living_room&key=your_api_key"
+
+# 全屋用电/用时：指定年（可叠加 month/date 精确到月/日）
+curl "http://ha:8123/api/ha_data_store/query?type=whole_house_usage&year=2026&month=2026-09&date=2026-09-07&key=your_api_key"
 ```
+
+**`whole_house_usage`（全屋用电/用时）返回结构：**
+
+- 三级：`total` → `rooms[]`（每个房间含 `devices[]`）→ 设备项；`year/month/date` 按最近一级精确匹配（`date > month > year`）
+- 每级字段：`count`(开启次数) / `duration_hour`(小时,2位) / `energy_kwh`(kWh,4位) / `running_count`
+- 顶层：`room_count`(房间数) + `room_names`(单纯房间名列表，如 `["客厅","餐厅",...]`)；`total.device_count`(设备总数)
+- 每个房间：`device_count`(该房间设备数)
+- 运行中设备（`on_time` 非空、`off_time` 空）纳入统计并带 `running` 标记：时长=当前时间−`on_time`；用电=有电表取 `now_kwh−on_power`，无电表但有固定功率按 `power_rating(W)/1000×时长` 折算
+- 汇总传感器 `sensor.ha_data_store_all_room_usage` 直接输出 本年/本月/今日 三级（状态值=今日用电 kWh，每 1 分钟刷新）
 
 ### 配置管理接口
 
@@ -1093,6 +1108,14 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.5.6 新增全屋实体传感器（2026-09-07）
+
+新增 **`sensor.ha_data_store_all_entities`**（全屋实体）：数据源 `report_entities` 表，状态值=去重实体个数；状态属性按 `entity_type` 分组为 `nodes`（节点名 = entity_type 拆分去重，支持 `,`/中文逗号多值，一个实体可归属多节点）+ `type_list` + `total/total_rows`；每个实体含 `entity/name/icon/room_name/rooms/entity_type/entity_device/entity_area`。更新规则：表变化才更新（每分钟轻量签名比对，POST `/report` 成功后即时刷新），表不变不更新；实体 ID 固定 `sensor.ha_data_store_all_entities`。
+
+### v3.5.5 全屋用电/用时查询与汇总传感器（2026-09-07）
+
+新增查询类型 `whole_house_usage`（按 年/月/日 返回 总计→房间→设备 三级统计）：每级含开启次数 / 时长(小时) / 用电(kWh) / 运行中设备数，运行中设备（未关闭）按"当前时间−on_time"计时长、有用电表取 `now_kwh−on_power`、无电表按固定功率折算；顶层新增 `room_names`（单纯房间名列表）、`total.device_count`，每个房间新增 `device_count`（房间设备数）。新增汇总传感器 **`sensor.ha_data_store_all_room_usage`**：状态值=今日总用电（kWh），attributes 含 `yearly`/`monthly`/`daily` 三个三级节点（与 API 同构，每分钟刷新）。API 工具「设备类」含「🏠 全屋用电/用时（年/月/日）」分组。
 
 ### v3.5.4 全部用电量实体支持列表条数设置（2026-09-06）
 

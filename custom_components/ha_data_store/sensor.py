@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json, logging, os, sqlite3, time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
@@ -556,6 +556,214 @@ class PowerAllSensor(SensorEntity):
         self.async_write_ha_state()
 
 
+class WholeHouseUsageSensor(SensorEntity):
+    """全屋用电/用时汇总传感器（本年/本月/今日 三个三级节点）。
+
+    与 whole_house_usage API 同口径（总计→房间→设备，含正在运行设备）。
+    状态值        = 今日节点 total.energy_kwh（kWh，2 位小数）
+    状态属性      = 三个节点，各自为 {scope, period, total, rooms, room_count}：
+        yearly  → 本年节点
+        monthly → 本月节点
+        daily   → 今日节点
+        rooms[].devices[] 结构：entity_id/name/count/duration_hour/energy_kwh/running
+        运行中设备口径：时长=当前时间-on_time；用电：有电表取 now_kwh-on_power(kWh)，
+        否则按固定功率 power_rating(W)/1000 × 时长(小时) 折算。
+        generated_at → 本次计算时间（本地时区）
+    每 1 分钟刷新一次。实体 ID 固定为 sensor.ha_data_store_all_room_usage。
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:lightning-bolt"
+    _attr_native_unit_of_measurement = "kWh"
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_all_room_usage"
+        self.entity_id = "sensor.ha_data_store_all_room_usage"
+        self._attr_name = "全屋用电/用时汇总"
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+
+    def _load_data(self):
+        """计算 本年/本月/今日 三个三级节点（executor 线程执行）。"""
+        from .http_api import compute_whole_house_usage_sync
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        now_dt = datetime.now()
+        base = {"generated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S")}
+        if not db_path:
+            return {**base, "error": "db_path 缺失",
+                    "yearly": None, "monthly": None, "daily": None}
+        year = now_dt.strftime("%Y")
+        month = now_dt.strftime("%Y-%m")
+        today = now_dt.strftime("%Y-%m-%d")
+        try:
+            # 三个节点共用同一 now_dt，保证运行中设备的时长/用电口径一致
+            daily = compute_whole_house_usage_sync(db_path, year, month, today, now_dt)
+            monthly = compute_whole_house_usage_sync(db_path, year, month, "", now_dt)
+            yearly = compute_whole_house_usage_sync(db_path, year, "", "", now_dt)
+        except Exception as e:
+            _LOGGER.error("[HDS] all_room_usage 计算失败: %s", e)
+            return {**base, "error": str(e),
+                    "yearly": None, "monthly": None, "daily": None}
+        return {**base, "yearly": yearly, "monthly": monthly, "daily": daily}
+
+    async def _async_refresh(self, now=None):
+        data = await self._hass.async_add_executor_job(self._load_data)
+        daily = data.get("daily") or {}
+        try:
+            val = (daily.get("total") or {}).get("energy_kwh")
+            state = round(float(val), 2) if val is not None else None
+        except (TypeError, ValueError):
+            state = None
+        self._attr_native_value = state
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
+
+
+class AllEntitiesSensor(SensorEntity):
+    """全屋实体传感器（按 entity_type 分组展示前端上报实体）。
+
+    数据源：report_entities 表（room-elves-card 等前端实体上报）。
+    状态值      = 去重后的实体个数（按 entity 去重，一个实体多个节点仍计 1 个）
+    状态属性：
+      nodes      → {节点名: [实体...]}，节点名 = 全表 entity_type 按逗号拆分后去重排序
+      type_list  → 全部节点名（与 nodes 键一致）
+      total      → 去重实体个数
+      total_rows → 表内原始行数（同一 entity 存在多行时 total < total_rows）
+      updated_at → 最近一次读取时间
+    每个实体字段：entity/name/icon/room_name/rooms/entity_type/entity_device/entity_area
+    entity_type 支持多值逗号分隔（如 "全屋灯光,快捷操作,大卫生间灯光"），拆分后
+    一个实体可归属多个节点（属正常现象）；同一实体在同一节点内只出现一次。
+    entity_type 为空的行归入「未分类」节点，保证不丢失。
+    更新规则：report_entities 表发生变化（前端上报全量重置成功）时由写路径触发刷新，
+    不做定时轮询——表不变则不更新。
+    实体 ID 固定为 sensor.ha_data_store_all_entities。
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:apps"
+    _attr_native_unit_of_measurement = "个"
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_all_entities"
+        self.entity_id = "sensor.ha_data_store_all_entities"
+        self._attr_name = "全屋实体"
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+        self._last_sig = None
+
+    def _split_types(self, raw):
+        """拆分 entity_type 多值（兼容中英文逗号），返回去除空白后的非空类型列表。"""
+        out = []
+        for part in (raw or "").replace("，", ",").split(","):
+            part = part.strip()
+            if part:
+                out.append(part)
+        return out
+
+    def _load_signature(self):
+        """表的 (总行数, 最后上报时间)，作为"表是否变化"的轻量签名；db 缺失返回 None。"""
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        if not db_path:
+            return None
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*), MAX(last_report_time) FROM {TABLE_REPORT_ENTITIES}"
+                ).fetchone()
+                return None if row is None else (row[0], row[1])
+            finally:
+                conn.close()
+        except Exception as e:
+            _LOGGER.error("[HDS] all_entities 变化检测失败: %s", e)
+            return None
+
+    def _load_data(self):
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        empty = {"total": 0, "total_rows": 0, "nodes": {}, "type_list": []}
+        if not db_path:
+            return empty
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT entity_id, name, icon, room_name, rooms, "
+                    f"entity_type, entity_device, entity_area FROM {TABLE_REPORT_ENTITIES} "
+                    f"ORDER BY room_name, entity_id"
+                ).fetchall()]
+            finally:
+                conn.close()
+        except Exception as e:
+            _LOGGER.error("[HDS] all_entities 传感器加载失败: %s", e)
+            return empty
+
+        nodes = {}
+        seen_eid = set()
+        for r in rows:
+            eid = (r.get("entity_id") or "").strip()
+            if not eid:
+                continue
+            seen_eid.add(eid)
+            entry = {
+                "entity": eid,
+                "name": r.get("name") or "",
+                "icon": r.get("icon") or "",
+                "room_name": r.get("room_name") or "",
+                "rooms": r.get("rooms") or "",
+                "entity_type": r.get("entity_type") or "",
+                "entity_device": r.get("entity_device") or "",
+                "entity_area": r.get("entity_area") or "",
+            }
+            types = self._split_types(entry["entity_type"])
+            if not types:
+                types = ["未分类"]
+            for t in types:
+                lst = nodes.setdefault(t, [])
+                # 同一节点内同一实体只保留一份（同 entity 多行时先到先得）
+                if not any(x["entity"] == eid for x in lst):
+                    lst.append(entry)
+
+        type_list = sorted(nodes.keys())
+        return {
+            "total": len(seen_eid),
+            "total_rows": len(rows),
+            "nodes": {k: nodes[k] for k in type_list},
+            "type_list": type_list,
+        }
+
+    async def _async_refresh(self, now=None):
+        data = await self._hass.async_add_executor_job(self._load_data)
+        sig = await self._hass.async_add_executor_job(self._load_signature)
+        self._last_sig = sig
+        # 表内容未变化 → 不重写状态（值/节点均一致时才视为未变化）
+        old_attrs = self._attr_extra_state_attributes or {}
+        unchanged = (
+            self._attr_native_value == data.get("total", 0)
+            and old_attrs.get("total_rows") == data.get("total_rows")
+            and old_attrs.get("type_list") == data.get("type_list")
+            and old_attrs.get("nodes") == data.get("nodes")
+        )
+        if unchanged:
+            return
+        data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._attr_native_value = data.get("total", 0)
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
+
+    async def _async_tick(self, now=None):
+        """每分钟轻量检测 report_entities 是否变化；变化才刷新，不变不动作。"""
+        sig = await self._hass.async_add_executor_job(self._load_signature)
+        if sig is None:
+            return
+        if self._last_sig != sig:
+            await self._async_refresh()
+
+
 class TodayFamilyStatusSensor(SensorEntity):
     """今日家庭状态总结传感器。
 
@@ -956,6 +1164,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     db_viewer_url_sensor = DbViewerUrlSensor(hass, device_info)
     helper_summary_sensor = HelperSummarySensor(hass, device_info)
     power_all_sensor = PowerAllSensor(hass, device_info)
+    whole_usage_sensor = WholeHouseUsageSensor(hass, device_info)
+    all_entities_sensor = AllEntitiesSensor(hass, device_info)
     cpu_sensor = CpuUsageSensor(hass, device_info)
     mem_sensor = MemoryUsageSensor(hass, device_info)
     disk_sensor = DiskUsageSensor(hass, device_info)
@@ -963,9 +1173,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
     hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
     hass.data.setdefault(DOMAIN, {})["automation_status_sensor"] = automation_status_sensor
+    hass.data.setdefault(DOMAIN, {})["all_entities_sensor"] = all_entities_sensor
     entities = [sensor, report_sensor, summary_sensor, user_actions_sensor,
                 automation_status_sensor, db_viewer_url_sensor,
-                helper_summary_sensor, power_all_sensor,
+                helper_summary_sensor, power_all_sensor, whole_usage_sensor,
+                all_entities_sensor,
                 cpu_sensor, mem_sensor, disk_sensor]
     # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
     url, attrs = await db_viewer_url_sensor._fetch_url()
@@ -1058,6 +1270,38 @@ async def async_setup_entry(hass, entry, async_add_entities):
     except Exception as e:
         _LOGGER.warning("[HDS] 全部用电量传感器实体ID设置失败: %s", e)
 
+    # 全屋用电/用时汇总传感器：强制固定实体 ID 为 sensor.ha_data_store_all_room_usage
+    try:
+        reg = er.async_get(hass)
+        new_eid = "sensor.ha_data_store_all_room_usage"
+        old_eid = reg.async_get_entity_id("sensor", DOMAIN, whole_usage_sensor.unique_id)
+        if old_eid and old_eid != new_eid:
+            try:
+                reg.async_update_entity(old_eid, new_entity_id=new_eid)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 全屋用电/用时传感器实体重命名失败（%s → %s）: %s", old_eid, new_eid, e)
+        reg.async_get_or_create(domain="sensor", platform=DOMAIN,
+                                unique_id=whole_usage_sensor.unique_id,
+                                suggested_object_id="ha_data_store_all_room_usage")
+    except Exception as e:
+        _LOGGER.warning("[HDS] 全屋用电/用时传感器实体ID设置失败: %s", e)
+
+    # 全屋实体传感器：强制固定实体 ID 为 sensor.ha_data_store_all_entities
+    try:
+        reg = er.async_get(hass)
+        new_eid = "sensor.ha_data_store_all_entities"
+        old_eid = reg.async_get_entity_id("sensor", DOMAIN, all_entities_sensor.unique_id)
+        if old_eid and old_eid != new_eid:
+            try:
+                reg.async_update_entity(old_eid, new_entity_id=new_eid)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 全屋实体传感器实体重命名失败（%s → %s）: %s", old_eid, new_eid, e)
+        reg.async_get_or_create(domain="sensor", platform=DOMAIN,
+                                unique_id=all_entities_sensor.unique_id,
+                                suggested_object_id="ha_data_store_all_entities")
+    except Exception as e:
+        _LOGGER.warning("[HDS] 全屋实体传感器实体ID设置失败: %s", e)
+
     bdi = get_bridge_device_info(entry.entry_id)
     try:
         bridge_entities = get_bridge_entities_for_platform(hass, "sensor", bdi)
@@ -1079,6 +1323,30 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_track_time_interval(hass, helper_summary_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, power_all_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
+    # 全屋用电/用时汇总：每 1 分钟刷新
+    async_track_time_interval(hass, whole_usage_sensor._async_refresh, timedelta(seconds=60))
+
+    # 注册完成后先刷一次全屋用电/用时汇总（避免初始未知等待 1 分钟）
+    async def _first_whole_usage_refresh():
+        try:
+            await asyncio.sleep(3)
+            await whole_usage_sensor._async_refresh()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 全屋用电/用时传感器首次刷新失败: %s", e)
+
+    hass.async_create_task(_first_whole_usage_refresh())
+
+    # 全屋实体：启动先刷一次拿初始值；之后每分钟只做轻量变化检测
+    # （report_entities 内容变化才重建并写状态，不变则不更新）
+    async_track_time_interval(hass, all_entities_sensor._async_tick, timedelta(seconds=60))
+    async def _first_all_entities_refresh():
+        try:
+            await asyncio.sleep(3)
+            await all_entities_sensor._async_refresh()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 全屋实体传感器首次刷新失败: %s", e)
+
+    hass.async_create_task(_first_all_entities_refresh())
 
     # text.ha_data_store_ele_list（列表条数设置）变化 → 立即刷新 all_power
     async def _on_ele_list_changed(event):
