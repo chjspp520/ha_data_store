@@ -620,7 +620,7 @@ db_viewer「系统配置 → ⚡ 用电计量」登记**功率实体**（填功�
 - 单位 W/kW 自动识别（登记优先，其次读实体 `unit_of_measurement`）；`unavailable/unknown` 不累计；采样空窗 >5 分钟丢弃（防停机误算）；
 - 全部实体归入统一设备「用电计量」；重启自动恢复，卸载前自动落盘；
 - **历史列表状态属性**：三个累计实体状态属性自动附带全量历史列表 —— 日用电 `daylist`（每日用电）、月用电 `monthlist`（每月用电）、年用电 `yearlist`（每年用电），元素形如 `{day|month|year, usage}`（usage 单位 kWh，保留 3 位小数）；全量不设上限、**无数据日期不占位**，**今天/本月/当年并入实时值**（与实体 state 一致），由 Manager 缓存并在 60s 落盘/跨日时重建，重启自动恢复；
-- **汇总实体** `sensor.ha_data_store_all_power`：状态 = 用电实体个数，attributes `entities[]` = 每个用电实体的 entity_id/name/icon/room/device/power_entity + `period`（daily/monthly/yearly）+ 对应列表（daily→`daylist`、monthly→`monthlist`、yearly→`yearlist`，升序保留最近 N 条），30s 刷新；列表条数由设置实体 **`text.ha_data_store_ele_list`**（状态“日,月,年”，默认 `3,3,3`）控制，该 text 变化时立即刷新 all_power；三个用电实体自身的列表保持全量不受影响；
+- **汇总实体** `sensor.ha_data_store_all_power`：状态 = 用电实体个数，attributes 顶层 `total`（**不受 `ele_list` 条数限制**）= 合计节点 `{count, power, today, month, year, room[]}`：`power` 当前全屋功率(W，仅 ≥0 有效读数计入)，`today/month/year` 今日/本月/本年用电合计(kWh，直接对全部启用 meter 求和)，`room[]` 按房间汇总 `{room,count,power,today,month,year}`（room 为空归入「未分配」）；`entities[]` = 每个用电实体的明细（entity_id/name/icon/room/device/power_entity + `period` + 对应列表 daily→`daylist`、monthly→`monthlist`、yearly→`yearlist`，升序保留最近 N 条），30s 刷新；明细列表条数由设置实体 **`text.ha_data_store_ele_list`**（状态“日,月,年”，默认 `3,3,3`）控制，该 text 变化时立即刷新 all_power；三个用电实体自身的列表保持全量不受影响；
 - **接口**：`GET /api/ha_data_store/power_energy`（`type=configs` / `type=query&kind=daily|monthly|yearly|range|latest`，支持 entity_id/room/date/month/year/start/end），`POST`（登记/删除）；API 工具含「⚡ 用电计量」查询分组；
 - 数据浏览器中 `power_energy_daily` 为用户表（默认可见）。
 
@@ -1108,6 +1108,10 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.5.7 全部用电量 total 改为合计节点（2026-09-08）
+
+`sensor.ha_data_store_all_power` 的 `attributes.total` 由 int（实体个数）**改为对象**：`{count, power, today, month, year, room[]}`。`power` 为当前全屋功率合计(W，仅有效 ≥0 读数)；`today/month/year` 为今日/本月/本年用电合计(kWh，直接对全部启用 meter 求和，**不受 `ele_list` 条数限制**，条数只限明细列表)；`room[]` 按房间汇总同四项（room 空归入「未分配」）；原实体个数并入 `total.count`（状态值不变）。读旧 `total`(当整数)的前端需改用 `total.count`。
 
 ### v3.5.6 新增全屋实体传感器（2026-09-07）
 

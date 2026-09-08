@@ -1,5 +1,20 @@
 # 更新日志
 
+## 2026-09-08 — v3.5.7 全部用电量实体顶层 total 改为合计节点（含房间汇总）
+
+### ⚡ `sensor.ha_data_store_all_power` attributes.total 结构调整
+
+- **状态值**不变：仍为用电实体个数（去重）
+- **`attributes.total` 由 int 改为对象**（原实体个数并入 `total.count`）：
+  - `count` → 用电实体个数（与原值一致）
+  - `power` → 当前全屋功率合计(W)
+  - `today` / `month` / `year` → 今日/本月/本年用电合计(kWh)，直接对内存中所有启用 meter 求和
+  - `room[]` → 按房间汇总节点，每项含 `room/count/power/today/month/year`；room 为空的 meter 归入「未分配」；按今日用电降序排列
+- **不受条数限制**：`total` 合计（power/today/month/year/room）与 `text.ha_data_store_ele_list` 无关，只有明细 `entities[]` 的 daylist/monthlist/yearlist 仍受该条数限制
+- **功率合计规则**：`unavailable/unknown`/非数值/**负值**一律不参与合计，仅有效读数(≥0)计入
+- **兼容提醒**：`total` 由 int 变对象属破坏性改动，读旧值(当整数)的前端需改用 `total.count`
+- 涉及 `sensor.py`；版本 → v3.5.7
+
 ## 2026-09-07 — v3.5.6 新增全屋实体传感器 `sensor.ha_data_store_all_entities`
 
 ### 🆕 新增传感器 `sensor.ha_data_store_all_entities`（全屋实体）

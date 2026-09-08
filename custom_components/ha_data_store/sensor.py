@@ -419,11 +419,19 @@ class PowerAllSensor(SensorEntity):
     """全部用电量统计传感器。
 
     把「用电计量」下所有已注册的用电实体聚合为一个新实体：
-      状态值        = 用电实体个数（去重）
-      状态属性      = 每个用电实体的明细
-        entity_id / name / icon / room / device / power_entity
-        period       → daily | monthly | yearly（与单实体一致）
-        daylist/monthlist/yearlist → 当前实体对应列表（受 text.ha_data_store_ele_list 条数限制）
+      状态值        = 用电实体个数（去重，三个累计实体传感器/功率设备）
+      状态属性 total（合计节点，不受 text.ha_data_store_ele_list 条数限制）：
+        count  → 用电实体个数（与状态值一致）
+        power  → 当前全屋功率(W)：全部启用 meter 的有效读数求和
+                 （unavailable/unknown/非数值/负值不参与）
+        today  → 今日用电合计(kWh，各 meter 今日实时累计求和)
+        month  → 本月用电合计(kWh = 月基数 + 今日实时)
+        year   → 本年用电合计(kWh = 年基数 + 今日实时)
+        room[] → 按房间汇总同四项（房间由各 meter 配置 room 决定，
+                 空 room 归入「未分配」），count = 该房间用电实体个数
+      状态属性 entities = 每个用电实体的明细（受列表条数限制）
+        entity_id / name / icon / room / device / power_entity / period /
+        daylist/monthlist/yearlist
     实体 ID 固定为 sensor.ha_data_store_all_power。
     """
 
@@ -469,36 +477,74 @@ class PowerAllSensor(SensorEntity):
         return (nums[0], nums[1], nums[2])
 
     def _load_data(self, limits, power_values):
-        """采集 all_power 明细（executor 线程执行）。
+        """采集 all_power 合计节点 + 明细（executor 线程执行）。
 
-        limits = (日,月,年) 各列表显示条数；0 表示不显示该列表。
-        power_values = {功率实体: 当前数值}，注入为每项的 power_value（避免前端再查 power_entity 造成延迟）。
-        三个用电实体自身的 daylist/monthlist/yearlist 保持全量，不受影响。
+        limits       = (日,月,年) 各列表显示条数；0 表示不显示该列表。
+        power_values = {功率实体: 当前数值}（异步侧预取），每项明细的
+                       power_value 与 total.power 合计均只取该值；
+                       仅有效读数(>=0)计入 power 合计。
+        三个用电实体自身的 daylist/monthlist/yearlist 保持全量，不受影响；
+        total 合计不受 limits 限制。
         """
         mgr = self._hass.data.get(DOMAIN, {}).get("power_energy_manager")
         entities = []
+        # 合计节点：按 meter（功率设备配置）逐路汇总
+        sum_power = 0.0
+        sum_today = 0.0
+        sum_month = 0.0
+        sum_year = 0.0
+        room_acc: dict[str, dict] = {}
         if mgr is not None:
             for eid, st in list(getattr(mgr, "_meters", {}).items()):
                 cur = mgr.state_of(eid)
-                # suffix → 周期描述（与单实体 period 保持一致）
+                sensors = st.get("sensors") or {}
+                # 取该 meter 的配置（room/device_name/entity_id 等）
+                cfg = {}
+                for _ent in list(sensors.values()):
+                    _c = getattr(_ent, "_cfg", None)
+                    if _c:
+                        cfg = _c
+                        break
+                room = (cfg.get("room") or "").strip() or "未分配"
+                # 用电合计（kWh）：今日实时累计 / 月基数+今日 / 年基数+今日
+                today_v = float(cur.get("daily") or 0)
+                month_v = float(cur.get("monthly") or 0)
+                year_v = float(cur.get("yearly") or 0)
+                # 功率合计（W）：仅有效读数（>=0）参与，unavailable/负值不参与
+                pv = power_values.get(cfg.get("entity_id") or eid)
+                power_v = pv if (pv is not None and pv >= 0) else 0.0
+                acc = room_acc.get(room)
+                if acc is None:
+                    acc = {"room": room, "power": 0.0, "today": 0.0,
+                           "month": 0.0, "year": 0.0, "count": 0}
+                    room_acc[room] = acc
+                acc["power"] += power_v
+                acc["today"] += today_v
+                acc["month"] += month_v
+                acc["year"] += year_v
+                acc["count"] += len(sensors)
+                sum_power += power_v
+                sum_today += today_v
+                sum_month += month_v
+                sum_year += year_v
+
+                # ↓ 明细列表（受 ele_list 条数限制，原逻辑不变）↓
                 period_def = {
                     "daily": ("day", cur["date"], cur["daily"], "daylist", limits[0]),
                     "monthly": ("month", cur["date"][:7], cur["monthly"], "monthlist", limits[1]),
                     "yearly": ("year", cur["date"][:4], cur["yearly"], "yearlist", limits[2]),
                 }
-                for suffix, ent in list((st.get("sensors") or {}).items()):
+                for suffix, ent in list(sensors.items()):
                     ent_id = getattr(ent, "entity_id", None)
                     if not ent_id:
                         continue
-                    cfg = getattr(ent, "_cfg", {}) or {}
-                    room = cfg.get("room") or ""
                     device_name = cfg.get("device_name") or ""
                     power_entity = cfg.get("entity_id") or ""
                     item = {
                         "entity_id": ent_id,
                         "name": getattr(ent, "_attr_name", None) or ent_id,
                         "icon": getattr(ent, "_attr_icon", None) or "mdi:flash",
-                        "room": room,
+                        "room": cfg.get("room") or "",
                         "device": device_name,
                         "power_entity": power_entity,
                     }
@@ -526,7 +572,31 @@ class PowerAllSensor(SensorEntity):
             seen.add(x["entity_id"])
             unique.append(x)
         unique.sort(key=lambda x: (x["name"] or "").lower())
-        return {"total": len(unique), "entities": unique}
+
+        # 房间合计列表（按今日用电降序，其次房间名）
+        rooms = []
+        for acc in room_acc.values():
+            rooms.append({
+                "room": acc["room"],
+                "count": acc["count"],
+                "power": round(acc["power"], 1),
+                "today": round(acc["today"], 2),
+                "month": round(acc["month"], 2),
+                "year": round(acc["year"], 2),
+            })
+        rooms.sort(key=lambda x: (-x["today"], x["room"]))
+
+        return {
+            "total": {
+                "count": len(unique),
+                "power": round(sum_power, 1),
+                "today": round(sum_today, 2),
+                "month": round(sum_month, 2),
+                "year": round(sum_year, 2),
+                "room": rooms,
+            },
+            "entities": unique,
+        }
 
     async def _async_refresh(self, now=None):
         limits = self._ele_limits()
@@ -551,7 +621,8 @@ class PowerAllSensor(SensorEntity):
                         continue
                     power_values[pe] = pv
         data = await self._hass.async_add_executor_job(self._load_data, limits, power_values)
-        self._attr_native_value = data.get("total", 0)
+        total = data.get("total") or {}
+        self._attr_native_value = total.get("count", 0)
         self._attr_extra_state_attributes = data
         self.async_write_ha_state()
 
