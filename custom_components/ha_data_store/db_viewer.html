@@ -1210,6 +1210,10 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <select id="apiQueryType" onchange="onApiTypeChange()">
         <optgroup label="设备类">
           <option value="device_history">设备开关记录</option>
+          <option value="entity_daily_by_year">📈 实体按日用电（指定年）</option>
+          <option value="entity_daily_all">📈 实体按日用电（全部）</option>
+          <option value="entities_daily_flat">📈 全部实体按月按日（平铺）</option>
+          <option value="entities_daily_by_day">📈 全部实体按月按日（按日分组）</option>
           <option value="device_summary">设备汇总</option>
           <option value="device_users_list">👥 设备操作用户列表</option>
           <option value="device_user_history">👤 按用户查设备记录</option>
@@ -1566,6 +1570,10 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">查询类型 (type)</div>
       <table style="font-size:12px;line-height:1.6">
         <tr><td style="color:var(--green);padding-right:16px">device_history</td><td>设备开关记录 · entity_id/date/month/year/room/limit</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entity_daily_by_year</td><td>实体按日用电（指定年）· entity_id/year · 运行中设备含 running 标记</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entity_daily_all</td><td>实体按日用电（全部历史）· entity_id · 运行中设备含 running 标记</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entities_daily_flat</td><td>全部实体按月按日（平铺）· month · 日×设备扁平行 + totals</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entities_daily_by_day</td><td>全部实体按月按日（按日分组）· month · days[].summary(device_count/count/时长/用电) + days[].devices + totals</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_summary</td><td>设备汇总 · entity_id/date/month/year/room</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_users_list</td><td>设备操作用户列表 · date/month/year/room · 各用户开启/关闭次数</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_user_history</td><td>按用户查设备记录 · user_name/direction(on|off|both)/entity_id/date/room/limit · 每条标注 matched</td></tr>
@@ -6616,6 +6624,14 @@ function onApiTypeChange() {
   const isAggregateMonthly = qt === 'aggregate_monthly';
   const isAggregateYearly = qt === 'aggregate_yearly';
   const isAggregate = isAggregateDaily || isAggregateMonthly || isAggregateYearly;
+  // 实体按日用电（单实体）：指定年 / 全部历史
+  const isEntityDailyByYear = qt === 'entity_daily_by_year';
+  const isEntityDailyAll = qt === 'entity_daily_all';
+  const isEntityDaily = isEntityDailyByYear || isEntityDailyAll;
+  // 全部实体按月按日（每月一查，两种结构）
+  const isEntitiesDailyFlat = qt === 'entities_daily_flat';
+  const isEntitiesDailyByDay = qt === 'entities_daily_by_day';
+  const isEntitiesDailyMonth = isEntitiesDailyFlat || isEntitiesDailyByDay;
   const isAggregateRoomDaily = qt === 'aggregate_room_daily';
   const isAggregateRoomMonthly = qt === 'aggregate_room_monthly';
   const isAggregateRoomYearlyDaily = qt === 'aggregate_room_yearly_daily';
@@ -7097,6 +7113,46 @@ function onApiTypeChange() {
     document.getElementById('apiDateMode').parentNode.style.display = isDeviceUserHasMonth ? 'none' : '';
     document.getElementById('apiDateMode').value = isDeviceUserByDate ? 'single' : 'none';
     onDateModeChange();
+    loadApiEntitiesAndRooms();
+  } else if (isEntitiesDailyMonth) {
+    // 全部实体按月按日：只需 月份，隐藏其余常规参数
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'block';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    loadApiEntitiesAndRooms();
+  } else if (isEntityDaily) {
+    // 实体按日用电：只需 实体ID（+ 指定年时显示年份输入），隐藏其余常规参数
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'none';
+    document.getElementById('apiYearRow').style.display = isEntityDailyByYear ? 'block' : 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
     loadApiEntitiesAndRooms();
   } else {
     document.getElementById('apiEntityId').parentNode.style.display = '';
@@ -7638,6 +7694,37 @@ function generateApiUrl() {
     if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
     const dateField = document.getElementById('apiDateField').value;
     if (dateField) url += '&date_field=' + encodeURIComponent(dateField);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 实体按日用电模式特殊处理（单实体：指定年 / 全部历史）
+  if (qt === 'entity_daily_by_year' || qt === 'entity_daily_all') {
+    if (!entityId) {
+      document.getElementById('apiUrlOutput').value = url + '（请先选择实体 ID）';
+      return;
+    }
+    url += '&entity_id=' + encodeURIComponent(entityId);
+    if (qt === 'entity_daily_by_year') {
+      const year = document.getElementById('apiYear').value;
+      if (!year) {
+        document.getElementById('apiUrlOutput').value = url + '（请先填写年份）';
+        return;
+      }
+      url += '&year=' + encodeURIComponent(year);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 全部实体按月按日模式特殊处理（平铺 rows / 按日分组 days，只需月份）
+  if (qt === 'entities_daily_flat' || qt === 'entities_daily_by_day') {
+    const month = document.getElementById('apiMonth').value;
+    if (!month) {
+      document.getElementById('apiUrlOutput').value = url + '（请先选择月份）';
+      return;
+    }
+    url += '&month=' + encodeURIComponent(month);
     document.getElementById('apiUrlOutput').value = url;
     return;
   }

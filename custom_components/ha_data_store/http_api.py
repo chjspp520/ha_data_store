@@ -406,6 +406,320 @@ def compute_whole_house_usage_sync(db_path: str, year: str, month: str = "",
         conn.close()
 
 
+def compute_entity_daily_usage_sync(db_path: str, entity_id: str, year: str = "",
+                                    now_dt: datetime | None = None) -> dict:
+    """单实体按日聚合（每天一行：开启次数 / 时长 / 用电量）。
+
+    行级计算规则与 whole_house_usage 一致：
+      - 已关闭记录（off_time 非空）：时长取 duration(秒)，用电取 energy_consumed(kWh)
+      - 运行中记录（on_time 非空且 off_time 空/空串）：
+          · 当日行标 running=true
+          · 时长 A = 当前时间 - on_time（用当前时间作关闭时间）
+          · ① 有用电传感器（now_kwh 与 on_power 均有）：
+              用电 = now_kwh - on_power (kWh)
+          · ② 无用电传感器但配置固定功率（entity_configs.power_rating，W）：
+              用电 = power_rating/1000 × A(小时)
+          · ③ 既无用电传感器也未配置功率 → 该实体 energy_kwh 返回 null（空值）
+      运行中记录按 on_time 归入当日（系统 0 点自动分割，库中不存在跨天记录）。
+
+    year = YYYY（可选；不填则返回该实体全部历史的每日聚合）。
+    返回：{entity_id, year, totals, rows}
+      totals = {count 次数合计, duration_hour 时长合计(小时), energy_kwh 用电量合计(kWh)}
+              （energy_kwh 在实体无用电来源时为 null，规则同行内空值）
+      rows   = [{date, count, duration_hour, energy_kwh, running}] 按日期倒序（最新在前）。
+    """
+    entity_id = (entity_id or "").strip()
+    if not entity_id:
+        raise ValueError("entity_id 不能为空")
+    year = (year or "").strip()
+    if year and not re.match(r"^\d{4}$", year):
+        raise ValueError("year 参数格式错误，应为 YYYY")
+
+    if now_dt is None:
+        now_dt = datetime.now()
+
+    def _parse_time(ts: str):
+        try:
+            if len(ts) > 19:
+                ts = ts[:19]
+            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return None
+
+    def _hours(seconds: float) -> float:
+        return round(float(seconds) / 3600.0, 2)
+
+    where = "dh.entity_id = ?"
+    params: list = [entity_id]
+    if year:
+        where += " AND dh.on_time LIKE ?"
+        params.append(f"{year}-%")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT dh.entity_id AS entity_id, dh.on_time AS on_time, "
+            f"dh.off_time AS off_time, dh.duration AS duration, "
+            f"dh.energy_consumed AS energy_consumed, dh.on_power AS on_power, "
+            f"dh.now_kwh AS now_kwh, MAX(ec.power_entity) AS power_entity, "
+            f"MAX(ec.power_rating) AS power_rating "
+            f"FROM {TABLE_DEVICE_HISTORY} dh "
+            f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+            f"WHERE {where} "
+            f"GROUP BY dh.entity_id, dh.on_time, dh.off_time, dh.duration, "
+            f"dh.energy_consumed, dh.on_power, dh.now_kwh",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    day_map: dict[str, dict] = {}
+    source_ok = False
+    for r in rows:
+        off = r["off_time"]
+        closed = bool(off and str(off).strip())
+        energy_consumed = r["energy_consumed"]
+        now_kwh = r["now_kwh"]
+        on_power = r["on_power"]
+        power_entity = (r["power_entity"] or "").strip()
+        try:
+            power_rating = float(r["power_rating"] or 0)
+        except (TypeError, ValueError):
+            power_rating = 0.0
+
+        # 判断该实体是否存在"可算用电量"来源（任一来源成立即可）
+        if (energy_consumed not in (None, "")
+                or (now_kwh is not None and on_power is not None)
+                or power_entity or power_rating > 0):
+            source_ok = True
+
+        date_key = (r["on_time"] or "")[:10]
+        if not date_key:
+            continue
+        day = day_map.setdefault(date_key, {
+            "date": date_key, "count": 0, "dur_s": 0.0,
+            "ene": 0.0, "running": False,
+        })
+        day["count"] += 1
+
+        if closed:
+            try:
+                day["dur_s"] += float(r["duration"] or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                day["ene"] += float(energy_consumed or 0)
+            except (TypeError, ValueError):
+                pass
+        else:
+            day["running"] = True
+            on_dt = _parse_time(r["on_time"] or "")
+            secs = max((now_dt - on_dt).total_seconds(), 0.0) if on_dt is not None else 0.0
+            day["dur_s"] += secs
+            if now_kwh is not None and on_power is not None:
+                # ① 有用电传感器：now_kwh - on_power
+                day["ene"] += max(float(now_kwh) - float(on_power), 0.0)
+            elif not power_entity and power_rating > 0:
+                # ② 无传感器但有固定功率：功率(kW) × A(小时)
+                day["ene"] += power_rating / 1000.0 * (secs / 3600.0)
+
+    result = []
+    tot_count = 0
+    tot_dur = 0.0
+    tot_ene = 0.0
+    for date_key in sorted(day_map, reverse=True):
+        d = day_map[date_key]
+        item = {
+            "date": date_key,
+            "count": d["count"],
+            "duration_hour": _hours(d["dur_s"]),
+            "energy_kwh": round(d["ene"], 4) if source_ok else None,  # ③ 无来源 → 空值
+            "running": d["running"],
+        }
+        result.append(item)
+        tot_count += d["count"]
+        tot_dur += d["dur_s"]
+        tot_ene += d["ene"]
+    return {
+        "entity_id": entity_id,
+        "year": year or None,
+        "totals": {
+            "count": tot_count,                            # 次数合计
+            "duration_hour": _hours(tot_dur),              # 时长合计(小时)
+            "energy_kwh": round(tot_ene, 4) if source_ok else None,  # 用电量合计；无来源 → 空值
+        },
+        "rows": result,
+    }
+
+
+def compute_month_entities_daily_sync(db_path: str, month: str,
+                                      now_dt: datetime | None = None) -> dict:
+    """指定月内「全部实体按日 × 每设备」聚合（供两个结构相近的接口共用）。
+
+    返回两种形状所需中间数据，接口层再选择输出：
+      totals = {count, duration_hour, energy_kwh}  全月(全部实体)合计
+      days   = 按日分组，每日含 summary(该日 count/时长/用电合计) 与 devices；供每日数组接口
+      flat   = 日×设备扁平行，供平铺接口
+    行级计算规则与 compute_entity_daily_usage_sync 完全一致：
+      - 已关闭：时长 duration(秒)、用电 energy_consumed(kWh)
+      - 运行中（on_time 非空且 off_time 空/空串）：running=true，
+        时长 A=当前时间-on_time；① 有用电传感器 now_kwh-on_power
+        ② 无传感器但配置固定功率(power_rating W)→功率/1000×A ③ 两者皆无 → 该实体该月 energy 为 null。
+    month = YYYY-MM（必填）。
+    """
+    month = (month or "").strip()
+    if not re.match(r"^\d{4}-\d{2}$", month):
+        raise ValueError("month 参数格式错误，应为 YYYY-MM")
+
+    if now_dt is None:
+        now_dt = datetime.now()
+
+    def _parse_time(ts: str):
+        try:
+            if len(ts) > 19:
+                ts = ts[:19]
+            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return None
+
+    def _hours(seconds: float) -> float:
+        return round(float(seconds) / 3600.0, 2)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT dh.entity_id AS entity_id, MAX(dh.name) AS name, "
+            f"dh.on_time AS on_time, dh.off_time AS off_time, "
+            f"dh.duration AS duration, dh.energy_consumed AS energy_consumed, "
+            f"dh.on_power AS on_power, dh.now_kwh AS now_kwh, "
+            f"MAX(ec.power_entity) AS power_entity, MAX(ec.power_rating) AS power_rating "
+            f"FROM {TABLE_DEVICE_HISTORY} dh "
+            f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+            f"WHERE dh.on_time LIKE ? "
+            f"GROUP BY dh.entity_id, dh.on_time, dh.off_time, dh.duration, "
+            f"dh.energy_consumed, dh.on_power, dh.now_kwh",
+            (f"{month}-%",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # (date, entity_id) → 桶；同时记录每实体的“是否有用电来源”与名称
+    buckets: dict[tuple, dict] = {}
+    ent_source_ok: dict[str, bool] = {}
+    ent_names: dict[str, str] = {}
+    for r in rows:
+        eid = (r["entity_id"] or "").strip()
+        if not eid:
+            continue
+        name = (r["name"] or eid).strip()
+        ent_names.setdefault(eid, name)
+        off = r["off_time"]
+        closed = bool(off and str(off).strip())
+        energy_consumed = r["energy_consumed"]
+        now_kwh = r["now_kwh"]
+        on_power = r["on_power"]
+        power_entity = (r["power_entity"] or "").strip()
+        try:
+            power_rating = float(r["power_rating"] or 0)
+        except (TypeError, ValueError):
+            power_rating = 0.0
+        if (energy_consumed not in (None, "")
+                or (now_kwh is not None and on_power is not None)
+                or power_entity or power_rating > 0):
+            ent_source_ok[eid] = True
+
+        date_key = (r["on_time"] or "")[:10]
+        if not date_key:
+            continue
+        key = (date_key, eid)
+        b = buckets.get(key)
+        if b is None:
+            b = {"date": date_key, "entity_id": eid, "count": 0,
+                 "dur_s": 0.0, "ene": 0.0, "running": False}
+            buckets[key] = b
+        b["count"] += 1
+        if closed:
+            try:
+                b["dur_s"] += float(r["duration"] or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                b["ene"] += float(energy_consumed or 0)
+            except (TypeError, ValueError):
+                pass
+        else:
+            b["running"] = True
+            on_dt = _parse_time(r["on_time"] or "")
+            secs = max((now_dt - on_dt).total_seconds(), 0.0) if on_dt is not None else 0.0
+            b["dur_s"] += secs
+            if now_kwh is not None and on_power is not None:
+                # ① 有用电传感器：now_kwh - on_power
+                b["ene"] += max(float(now_kwh) - float(on_power), 0.0)
+            elif not power_entity and power_rating > 0:
+                # ② 无传感器但有固定功率：功率(kW) × A(小时)
+                b["ene"] += power_rating / 1000.0 * (secs / 3600.0)
+
+    # 组装平铺 + 按日分组（每日附 summary 汇总：count/总时长/总用电量）
+    flat = []
+    days_map: dict[str, dict] = {}
+    day_sum: dict[str, dict] = {}
+    for (date_key, eid), b in sorted(buckets.items(), key=lambda kv: kv[0], reverse=True):
+        item = {
+            "date": date_key,
+            "entity_id": eid,
+            "name": ent_names.get(eid, eid),
+            "count": b["count"],
+            "duration_hour": _hours(b["dur_s"]),
+            "energy_kwh": round(b["ene"], 4) if ent_source_ok.get(eid) else None,
+            "running": b["running"],
+        }
+        flat.append(item)
+        day = days_map.setdefault(date_key, {"date": date_key, "devices": []})
+        day["devices"].append(item)
+        # 当日汇总：总次数 / 总时长(秒) / 总用电(原始累计) / 是否有用电来源
+        ds = day_sum.get(date_key)
+        if ds is None:
+            ds = {"count": 0, "dur_s": 0.0, "ene": 0.0, "source_ok": False}
+            day_sum[date_key] = ds
+        ds["count"] += b["count"]
+        ds["dur_s"] += b["dur_s"]
+        ds["ene"] += b["ene"]
+        if ent_source_ok.get(eid):
+            ds["source_ok"] = True
+
+    days = []
+    for date_key in sorted(days_map, reverse=True):
+        day = days_map[date_key]
+        day["devices"].sort(key=lambda d: d["duration_hour"], reverse=True)
+        ds = day_sum[date_key]
+        days.append({
+            "date": date_key,
+            "summary": {
+                "device_count": len(day["devices"]),   # 当日参与统计的设备数量（去重实体）
+                "count": ds["count"],
+                "duration_hour": _hours(ds["dur_s"]),
+                "energy_kwh": round(ds["ene"], 4) if ds["source_ok"] else None,
+            },
+            "devices": day["devices"],
+        })
+
+    tot_count = sum(b["count"] for b in buckets.values())
+    tot_dur = sum(b["dur_s"] for b in buckets.values())
+    tot_ene = sum(b["ene"] for b in buckets.values())
+    return {
+        "month": month,
+        "totals": {
+            "count": tot_count,
+            "duration_hour": _hours(tot_dur),
+            "energy_kwh": round(tot_ene, 4) if ent_source_ok else None,
+        },
+        "days": days,
+        "flat": flat,
+    }
+
+
 _LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2194,6 +2508,22 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_aggregate_room_monthly, db_path, request)
             elif query_type == "aggregate_room_yearly_daily":
                 result = await self._exec_in_executor(hass, self._query_aggregate_room_yearly_daily, db_path, request)
+            elif query_type == "entity_daily_by_year":
+                result = await self._exec_in_executor(
+                    hass, self._query_entity_daily_usage, db_path, request, True
+                )
+            elif query_type == "entity_daily_all":
+                result = await self._exec_in_executor(
+                    hass, self._query_entity_daily_usage, db_path, request
+                )
+            elif query_type == "entities_daily_flat":
+                result = await self._exec_in_executor(
+                    hass, self._query_entities_daily, db_path, request
+                )
+            elif query_type == "entities_daily_by_day":
+                result = await self._exec_in_executor(
+                    hass, self._query_entities_daily, db_path, request, True
+                )
             elif query_type == "whole_house_usage":
                 result = await self._exec_in_executor(hass, self._query_whole_house_usage, db_path, request)
             elif query_type in ("ranking_daily", "ranking_monthly", "ranking_yearly"):
@@ -3710,6 +4040,45 @@ class QueryView(_BaseDBView):
     # ------------------------------------------------------------------ #
     #  whole_house_usage：全屋用电/用时（三级：总计→房间→设备）               #
     # ------------------------------------------------------------------ #
+    def _query_entities_daily(self, db_path: str, request: web.Request,
+                              grouped: bool = False) -> dict:
+        """指定月内「全部实体按日 × 每设备」聚合。
+
+        参数：
+          month = YYYY-MM（必填）
+        计算规则（running 标记/时长/用电①②③）见模块级函数
+        compute_month_entities_daily_sync 的 docstring。
+        grouped=False → rows 为 日×设备 扁平行；
+        grouped=True  → days 为 每日内 devices 数组。
+        """
+        month = request.query.get("month", "").strip()
+        data = compute_month_entities_daily_sync(db_path, month)
+        result = {
+            "month": data["month"],
+            "totals": data["totals"],
+        }
+        if grouped:
+            result["days"] = data["days"]
+        else:
+            result["rows"] = data["flat"]
+        return result
+
+    def _query_entity_daily_usage(self, db_path: str, request: web.Request,
+                                  require_year: bool = False) -> dict:
+        """实体按日聚合（指定实体；可选限定指定年，空=全部历史）。
+
+        参数：
+          entity_id = 实体 ID（必填）
+          year      = YYYY（可选，填写则限定该年；entity_daily_by_year 必填）
+        计算规则（运行中设备 running 标记/时长/用电①②③）见模块级函数
+        compute_entity_daily_usage_sync 的 docstring。
+        """
+        entity_id = request.query.get("entity_id", "").strip()
+        year = request.query.get("year", "").strip()
+        if require_year and not year:
+            raise ValueError("entity_daily_by_year 需要 year 参数（格式：YYYY）")
+        return compute_entity_daily_usage_sync(db_path, entity_id, year)
+
     def _query_whole_house_usage(self, db_path: str, request: web.Request) -> dict:
         """全屋用电/用时汇总（指定年/月/日），含正在运行的设备。
 

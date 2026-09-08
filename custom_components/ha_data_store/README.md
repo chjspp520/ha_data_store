@@ -696,6 +696,10 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | type | 说明 | 必需参数 |
 |------|------|---------|
 | `device_history` | 设备开关记录（按日/月/年智能返回，内嵌汇总） | entity_id |
+| `entity_daily_by_year` | 实体按日用电（指定年，含 totals 合计与运行中 running 标记） | entity_id, year |
+| `entity_daily_all` | 实体按日用电（全部历史，含 totals 合计与运行中 running 标记） | entity_id |
+| `entities_daily_flat` | 全部实体按月按日（平铺：日×设备扁平行 + totals） | month |
+| `entities_daily_by_day` | 全部实体按月按日（按日分组：days[].devices + totals） | month |
 | `device_summary` | 纯汇总（只返回统计数字，不返回记录） | entity_id, date/month/year(可选) |
 | `env_history` | 环境历史记录（含最新日期、总条数等元数据） | entity_id, metric |
 | `env_latest` | 环境最新一条记录 | entity_id, metric |
@@ -1108,6 +1112,15 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.5.8 新增实体/全实体按日用电接口（2026-09-08）
+
+设备开关记录分组新增四类接口（行级口径统一复用 whole_house_usage 的运行中计算：`running` 标记、时长=当前时间−`on_time`、用电① `now_kwh−on_power` ②固定功率 `功率×A/1000` ③两者皆无 `energy_kwh=null`，按 `on_time` 归日）：
+- `entity_daily_by_year`（`entity_id`+`year`）/ `entity_daily_all`（`entity_id`）：**单实体**按日返回 `rows[{date,count,duration_hour,energy_kwh,running}]` + `totals{count,duration_hour,energy_kwh}`
+- `entities_daily_flat`（`month`）：**全部实体**按月按日返回日×设备**扁平行** + `totals`
+- `entities_daily_by_day`（`month`）：**全部实体**按月按日返回**按日分组** `days[].devices[]` + `totals`，且每日带 `days[].summary`（`device_count` 当日设备数量 / `count` 次数 / `duration_hour` 总时长 / `energy_kwh` 总用电）
+
+API 工具「设备类」新增四个选项：`📈 实体按日用电（指定年/全部）`、`📈 全部实体按月按日（平铺/按日分组）`。
 
 ### v3.5.7 全部用电量 total 改为合计节点（2026-09-08）
 

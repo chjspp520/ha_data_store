@@ -1,5 +1,50 @@
 # 更新日志
 
+## 2026-09-08 — v3.5.8 新增实体/全实体按日用电接口（entity_daily_*、entities_daily_*）
+
+### 🆕 API：实体按日用电（设备开关记录分组）
+
+两个新接口，返回**单实体**按日聚合（每天一行），计算规则与 `whole_house_usage` 行级一致：
+
+- `entity_daily_by_year`：`entity_id`(必填) + `year`(YYYY，必填) → 该实体指定年每日聚合
+- `entity_daily_all`：`entity_id`(必填) → 该实体全部历史每日聚合
+
+返回结构：
+```
+{
+  entity_id, year,
+  totals: { count 次数合计, duration_hour 时长合计(小时), energy_kwh 用电量合计(kWh) },
+  rows:   [{ date, count, duration_hour, energy_kwh, running }]  // 日期倒序
+}
+```
+
+### 🆕 API：全部实体按月按日（同一计算口径，两种结构自选）
+
+- `entities_daily_flat`：`month`(YYYY-MM，必填) → 日×设备**扁平行**
+  ```
+  { month, totals: {count,duration_hour,energy_kwh}, rows: [{date, entity_id, name, count, duration_hour, energy_kwh, running}] }
+  ```
+- `entities_daily_by_day`：`month`(YYYY-MM，必填) → **按日分组**
+  ```
+  { month, totals: {...}, days: [{date,
+      summary: { device_count 当日设备数量, count 次数, duration_hour 总时长, energy_kwh 总用电 },
+      devices: [{entity_id, name, count, duration_hour, energy_kwh, running}] }] }
+  ```
+
+行级/合计口径（两类接口共用，均含 `totals` 全月合计）：
+- 已关闭记录：时长取 `duration`(秒)，用电取 `energy_consumed`(kWh)
+- **运行中记录**（`on_time` 非空且 `off_time` 空）：当日行标 `running=true`；时长 A = 当前时间 − `on_time`（以当前时间为关闭时间）
+  - ① 有用电传感器（`now_kwh`/`on_power` 均有）→ 用电 = `now_kwh − on_power`(kWh)
+  - ② 无传感器但配置固定功率（`entity_configs.power_rating`，W）→ 用电 = `功率(W)/1000 × A(小时)`
+  - ③ 既无用电传感器也未配置功率 → `energy_kwh` 返回 null（空值，含 `totals.energy_kwh`）
+- 运行中记录按 `on_time` 归入当日（系统 0 点自动分割，库内无跨天记录）
+- 实体名称取 `name` 字段（缺失回退 entity_id）
+- API 工具「查询类型 → 设备开关记录」新增选项：
+  `📈 实体按日用电（指定年）` / `📈 实体按日用电（全部）`（仅需填实体 ID，指定年另需年份）/
+  `📈 全部实体按月按日（平铺）` / `📈 全部实体按月按日（按日分组）`（仅需选月份）
+
+实现：`http_api.py` 新增 `compute_entity_daily_usage_sync`（单实体按日）、`compute_month_entities_daily_sync`（全实体按月，供两种结构复用）+ 对应 QueryView 方法 + 4 个调度分支；`db_viewer.html` 增加下拉选项与参数控制。版本 → v3.5.8
+
 ## 2026-09-08 — v3.5.7 全部用电量实体顶层 total 改为合计节点（含房间汇总）
 
 ### ⚡ `sensor.ha_data_store_all_power` attributes.total 结构调整
