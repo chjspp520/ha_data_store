@@ -1,5 +1,62 @@
 # 更新日志
 
+## 2026-09-09 — v3.6.0 新增设备小时开启日期接口 `entity_hour_dates`
+
+### 🆕 API：查询设备「几点开启的都有哪些日期」
+
+`entity_hour_dates`：给定实体与小时（0–23），返回该小时发生过开启的所有日期（去重、升序）。
+
+参数：
+```
+entity_id=xxx（必填）  hour=0-23（必填）
+可选范围（不传 = 全部历史；优先级 start/end > date > month > year）：
+  year=YYYY | month=YYYY-MM | date=YYYY-MM-DD | start=YYYY-MM-DD&end=YYYY-MM-DD
+```
+
+返回：
+```
+{ entity_id, hour, range, count 命中天数, dates: ["YYYY-MM-DD", ...] }
+```
+
+口径：
+- 按 `on_time` 所在小时精确匹配 `hour`（含运行中设备，其 on_time 即开启时刻）
+- 同一天多次开启只记 1 个日期，日期升序
+- db_viewer「设备类」新增「📅 设备小时开启日期（几点开过）」，实体 + 小时下拉(0–23) + 可选时间范围
+
+实现：`http_api.py` 新增 `compute_entity_hour_dates_sync` + `_query_entity_hour_dates` + 调度分支；`db_viewer.html` 增加小时选择行/选项/URL 逻辑。版本 → v3.6.0
+
+## 2026-09-09 — v3.5.9 新增实体时段分布接口 `entity_hour_dist`
+
+### 🆕 API：单实体时段分布（几点最常使用 / 分时用电）
+
+`entity_hour_dist`：返回指定实体按「小时段」分布（0–23）。
+
+参数：
+```
+entity_id=xxx（必填）
+可选范围（不传 = 全部历史；优先级 start/end > date > month > year）：
+  year=YYYY | month=YYYY-MM | date=YYYY-MM-DD | start=YYYY-MM-DD&end=YYYY-MM-DD
+```
+
+返回：
+```
+{
+  entity_id, range,
+  totals: { count 次数, duration_hour 时长合计, energy_kwh 用电合计 },
+  hours:  [{ hour, count, duration_hour, energy_kwh }]   // 仅含有数据时段，hour 0-23
+}
+```
+
+口径：
+- **时长精确拆分**：每次运行区间 `[on_time, 结束]` 按跨越的小时切段、逐小时按真实秒数累计；已关闭用 `off_time`，**运行中**（`on_time` 非空且 `off_time` 空）以**当前时间**为结束
+- **运行中用电**（先算整段再分摊）：① 有用电传感器 `now_kwh−on_power` ② 无传感器但配固定功率 `W/1000×A(小时)` ③ 两者皆无 → 不计电
+- **分时用电（方案 A）**：整段用电按各小时段实际秒数占比**均摊**，闭合守恒；固定功率设备等价于功率×时长
+- `count`（开启次数）按开机时刻所在小时归属
+- 实体全程无任何用电来源 → `hours[].energy_kwh` / `totals.energy_kwh` 为 null
+- db_viewer「设备类」新增「📊 实体时段分布（几点使用/分时用电）」，可选实体 + 时间范围（none 全部 / 月 / 年 / 单日 / 起止）
+
+实现：`http_api.py` 新增 `compute_entity_hour_dist_sync` + `_query_entity_hour_dist` + 调度分支；`db_viewer.html` 增加选项/参数/URL 逻辑。版本 → v3.5.9
+
 ## 2026-09-08 — v3.5.8 新增实体/全实体按日用电接口（entity_daily_*、entities_daily_*）
 
 ### 🆕 API：实体按日用电（设备开关记录分组）

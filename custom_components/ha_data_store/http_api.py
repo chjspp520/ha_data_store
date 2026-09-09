@@ -720,6 +720,270 @@ def compute_month_entities_daily_sync(db_path: str, month: str,
     }
 
 
+def compute_entity_hour_dates_sync(db_path: str, entity_id: str, hour,
+                                   year: str = "", month: str = "",
+                                   date: str = "", start: str = "",
+                                   end: str = "") -> dict:
+    """查询指定实体在「指定小时」发生过开启的所有日期（去重）。
+
+    时间范围（可选，不传 = 全部历史；优先级 start/end > date > month > year）：
+      date=YYYY-MM-DD | month=YYYY-MM | year=YYYY | start/end=YYYY-MM-DD（可单边）
+    只统计 on_time 所在小时 == hour 的记录（含运行中设备，因其 on_time 仍为开启时刻）。
+
+    返回：{entity_id, hour, range, count(天数), dates:["YYYY-MM-DD",...]}（升序）
+    """
+    entity_id = (entity_id or "").strip()
+    if not entity_id:
+        raise ValueError("entity_id 不能为空")
+    try:
+        hour_int = int(hour)
+    except (TypeError, ValueError):
+        raise ValueError("hour 参数格式错误，应为 0-23 的整数")
+    if not (0 <= hour_int <= 23):
+        raise ValueError("hour 参数格式错误，应为 0-23 的整数")
+    year = (year or "").strip()
+    month = (month or "").strip()
+    date = (date or "").strip()
+    start = (start or "").strip()
+    end = (end or "").strip()
+    if year and not re.match(r"^\d{4}$", year):
+        raise ValueError("year 参数格式错误，应为 YYYY")
+    if month and not re.match(r"^\d{4}-\d{2}$", month):
+        raise ValueError("month 参数格式错误，应为 YYYY-MM")
+    if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise ValueError("date 参数格式错误，应为 YYYY-MM-DD")
+    if start and not re.match(r"^\d{4}-\d{2}-\d{2}$", start):
+        raise ValueError("start 参数格式错误，应为 YYYY-MM-DD")
+    if end and not re.match(r"^\d{4}-\d{2}-\d{2}$", end):
+        raise ValueError("end 参数格式错误，应为 YYYY-MM-DD")
+
+    conds = ["dh.entity_id = ?", "substr(dh.on_time, 12, 2) = ?"]
+    params: list = [entity_id, f"{hour_int:02d}"]
+    range_used = ""
+    if start or end:
+        if start:
+            conds.append("dh.on_time >= ?")
+            params.append(f"{start} 00:00:00")
+        if end:
+            conds.append("dh.on_time <= ?")
+            params.append(f"{end} 23:59:59")
+        range_used = f"{start or ''}~{end or ''}"
+    elif date:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{date}%")
+        range_used = date
+    elif month:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{month}-%")
+        range_used = month
+    elif year:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{year}-%")
+        range_used = year
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            f"SELECT DISTINCT substr(dh.on_time, 1, 10) AS d "
+            f"FROM {TABLE_DEVICE_HISTORY} dh WHERE {' AND '.join(conds)} "
+            f"ORDER BY d ASC",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    dates = [r[0] for r in rows if r[0]]
+    return {
+        "entity_id": entity_id,
+        "hour": hour_int,
+        "range": range_used or None,
+        "count": len(dates),
+        "dates": dates,
+    }
+
+
+def compute_entity_hour_dist_sync(db_path: str, entity_id: str,
+                                  year: str = "", month: str = "",
+                                  date: str = "", start: str = "",
+                                  end: str = "",
+                                  now_dt: datetime | None = None) -> dict:
+    """单实体按「小时段」分布（精确拆分跨越小时，用电按段时长比例均摊）。
+
+    时间范围：不传 = 全部历史；可选过滤（优先级区间 start/end > date > month > year）：
+      date=YYYY-MM-DD | month=YYYY-MM | year=YYYY | start/end=YYYY-MM-DD（可单边）
+
+    行级口径（含运行中设备）：
+      - 已关闭：时段=[on_time, off_time]
+      - 运行中（on_time 非空且 off_time 空）：running=true，end=当前时间；
+        用电 ① now_kwh-on_power ② 固定功率(W)/1000×A(总秒→小时) ③ 无来源 → 该行不计电
+      - 整段用电按「各小时段实际秒数占比」均摊到所跨小时（方案 A，闭合守恒）
+      - count（开启次数）按开机时刻所在小时归属
+
+    返回：{entity_id, range, totals:{count,duration_hour,energy_kwh}, hours:[{hour,count,duration_hour,energy_kwh}]}
+      hours 只含有数据(次数或时长>0)的时段，hour 0-23；实体全程无任何用电来源时 energy_kwh 为 null。
+    """
+    entity_id = (entity_id or "").strip()
+    if not entity_id:
+        raise ValueError("entity_id 不能为空")
+    year = (year or "").strip()
+    month = (month or "").strip()
+    date = (date or "").strip()
+    start = (start or "").strip()
+    end = (end or "").strip()
+    if year and not re.match(r"^\d{4}$", year):
+        raise ValueError("year 参数格式错误，应为 YYYY")
+    if month and not re.match(r"^\d{4}-\d{2}$", month):
+        raise ValueError("month 参数格式错误，应为 YYYY-MM")
+    if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise ValueError("date 参数格式错误，应为 YYYY-MM-DD")
+    if start and not re.match(r"^\d{4}-\d{2}-\d{2}$", start):
+        raise ValueError("start 参数格式错误，应为 YYYY-MM-DD")
+    if end and not re.match(r"^\d{4}-\d{2}-\d{2}$", end):
+        raise ValueError("end 参数格式错误，应为 YYYY-MM-DD")
+
+    if now_dt is None:
+        now_dt = datetime.now()
+
+    # 构建过滤（记录按 on_time 归属到范围）
+    conds = ["dh.entity_id = ?"]
+    params: list = [entity_id]
+    range_used = ""
+    if start or end:
+        if start:
+            conds.append("dh.on_time >= ?")
+            params.append(f"{start} 00:00:00")
+        if end:
+            conds.append("dh.on_time <= ?")
+            params.append(f"{end} 23:59:59")
+        range_used = f"{start or ''}~{end or ''}"
+    elif date:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{date}%")
+        range_used = date
+    elif month:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{month}-%")
+        range_used = month
+    elif year:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{year}-%")
+        range_used = year
+
+    def _parse_time(ts: str):
+        try:
+            if len(ts) > 19:
+                ts = ts[:19]
+            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return None
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT dh.on_time AS on_time, dh.off_time AS off_time, "
+            f"dh.duration AS duration, dh.energy_consumed AS energy_consumed, "
+            f"dh.on_power AS on_power, dh.now_kwh AS now_kwh, "
+            f"MAX(ec.power_entity) AS power_entity, MAX(ec.power_rating) AS power_rating "
+            f"FROM {TABLE_DEVICE_HISTORY} dh "
+            f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+            f"WHERE {' AND '.join(conds)} "
+            f"GROUP BY dh.on_time, dh.off_time, dh.duration, "
+            f"dh.energy_consumed, dh.on_power, dh.now_kwh",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # 每小时的累计（0-23）：秒数、次数、用电原始值
+    dur_s = [0.0] * 24
+    cnt = [0] * 24
+    ene = [0.0] * 24
+    any_energy = False
+
+    for r in rows:
+        on_dt = _parse_time(r["on_time"] or "")
+        if on_dt is None:
+            continue
+        off = r["off_time"]
+        closed = bool(off and str(off).strip())
+        off_dt = _parse_time(r["off_time"] or "") if closed else None
+        seg_end_dt = off_dt if closed else now_dt
+        if seg_end_dt <= on_dt:
+            continue
+
+        # 开启时刻所在小时 → count
+        cnt[on_dt.hour] += 1
+
+        # 整段时长与用电
+        dur_total = (seg_end_dt - on_dt).total_seconds()
+        ene_total = 0.0
+        has_ene = False
+        if closed:
+            try:
+                ec = float(r["energy_consumed"] or 0)
+            except (TypeError, ValueError):
+                ec = 0.0
+            if r["energy_consumed"] not in (None, ""):
+                ene_total = ec
+                has_ene = True
+        else:
+            now_kwh = r["now_kwh"]
+            on_power = r["on_power"]
+            power_entity = (r["power_entity"] or "").strip()
+            try:
+                power_rating = float(r["power_rating"] or 0)
+            except (TypeError, ValueError):
+                power_rating = 0.0
+            if now_kwh is not None and on_power is not None:
+                # ① 有用电传感器：now_kwh - on_power
+                ene_total = max(float(now_kwh) - float(on_power), 0.0)
+                has_ene = True
+            elif not power_entity and power_rating > 0:
+                # ② 无传感器但有固定功率：功率(W)/1000 × A(小时)
+                ene_total = power_rating / 1000.0 * (dur_total / 3600.0)
+                has_ene = True
+            # ③ 无来源 → has_ene=False，不计电
+        if has_ene:
+            any_energy = True
+
+        # 精确拆分到每个跨越的小时（方案 A：按实际秒数均摊整段用电）
+        cur = on_dt
+        while cur < seg_end_dt:
+            h = cur.hour
+            hour_end = (cur.replace(minute=0, second=0, microsecond=0)
+                        + timedelta(hours=1))
+            if hour_end > seg_end_dt:
+                hour_end = seg_end_dt
+            seg_sec = (hour_end - cur).total_seconds()
+            if seg_sec > 0:
+                dur_s[h] += seg_sec
+                if has_ene and dur_total > 0:
+                    ene[h] += ene_total * (seg_sec / dur_total)
+            cur = hour_end
+
+    hours = []
+    for h in range(24):
+        if cnt[h] > 0 or dur_s[h] > 0:
+            hours.append({
+                "hour": h,
+                "count": cnt[h],
+                "duration_hour": round(dur_s[h] / 3600.0, 2),
+                "energy_kwh": round(ene[h], 4) if any_energy else None,
+            })
+
+    return {
+        "entity_id": entity_id,
+        "range": range_used or None,
+        "totals": {
+            "count": sum(cnt),
+            "duration_hour": round(sum(dur_s) / 3600.0, 2),
+            "energy_kwh": round(sum(ene), 4) if any_energy else None,
+        },
+        "hours": hours,
+    }
+
+
 _LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2516,6 +2780,14 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(
                     hass, self._query_entity_daily_usage, db_path, request
                 )
+            elif query_type == "entity_hour_dates":
+                result = await self._exec_in_executor(
+                    hass, self._query_entity_hour_dates, db_path, request
+                )
+            elif query_type == "entity_hour_dist":
+                result = await self._exec_in_executor(
+                    hass, self._query_entity_hour_dist, db_path, request
+                )
             elif query_type == "entities_daily_flat":
                 result = await self._exec_in_executor(
                     hass, self._query_entities_daily, db_path, request
@@ -4062,6 +4334,44 @@ class QueryView(_BaseDBView):
         else:
             result["rows"] = data["flat"]
         return result
+
+    def _query_entity_hour_dates(self, db_path: str, request: web.Request) -> dict:
+        """查询指定实体在「指定小时」发生开启的所有日期。
+
+        参数：
+          entity_id = 实体 ID（必填）
+          hour      = 0-23（必填）
+          时间范围（不传 = 全部历史；优先级 start/end > date > month > year）：
+            date/start/end = YYYY-MM-DD；month = YYYY-MM；year = YYYY
+        """
+        entity_id = request.query.get("entity_id", "").strip()
+        hour = request.query.get("hour", "").strip()
+        year = request.query.get("year", "").strip()
+        month = request.query.get("month", "").strip()
+        date = request.query.get("date", "").strip()
+        start = request.query.get("start", "").strip()
+        end = request.query.get("end", "").strip()
+        return compute_entity_hour_dates_sync(db_path, entity_id, hour, year,
+                                              month, date, start, end)
+
+    def _query_entity_hour_dist(self, db_path: str, request: web.Request) -> dict:
+        """单实体「小时段」分布（几点最常使用 + 分时段长/用电）。
+
+        参数：
+          entity_id = 实体 ID（必填）
+          时间范围（不传 = 全部历史；优先级 start/end > date > month > year）：
+            date/start/end = YYYY-MM-DD；month = YYYY-MM；year = YYYY
+        计算规则（精确拆分跨越小时、运行中设备处理、用电比例均摊）
+        见模块级函数 compute_entity_hour_dist_sync 的 docstring。
+        """
+        entity_id = request.query.get("entity_id", "").strip()
+        year = request.query.get("year", "").strip()
+        month = request.query.get("month", "").strip()
+        date = request.query.get("date", "").strip()
+        start = request.query.get("start", "").strip()
+        end = request.query.get("end", "").strip()
+        return compute_entity_hour_dist_sync(db_path, entity_id, year, month,
+                                              date, start, end)
 
     def _query_entity_daily_usage(self, db_path: str, request: web.Request,
                                   require_year: bool = False) -> dict:

@@ -1214,6 +1214,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="entity_daily_all">📈 实体按日用电（全部）</option>
           <option value="entities_daily_flat">📈 全部实体按月按日（平铺）</option>
           <option value="entities_daily_by_day">📈 全部实体按月按日（按日分组）</option>
+          <option value="entity_hour_dist">📊 实体时段分布（几点使用/分时用电）</option>
+          <option value="entity_hour_dates">📅 设备小时开启日期（几点开过）</option>
           <option value="device_summary">设备汇总</option>
           <option value="device_users_list">👥 设备操作用户列表</option>
           <option value="device_user_history">👤 按用户查设备记录</option>
@@ -1405,6 +1407,20 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <label>年份 (YYYY)</label>
       <input type="number" id="apiYear" min="2020" max="2099" placeholder="2026" onchange="generateApiUrl()">
     </div>
+    <div id="apiHourRow" style="display:none">
+      <label>小时 (0-23)</label>
+      <select id="apiHour" onchange="generateApiUrl()">
+        <option value="">请选择</option>
+        <option value="0">0 时</option><option value="1">1 时</option><option value="2">2 时</option>
+        <option value="3">3 时</option><option value="4">4 时</option><option value="5">5 时</option>
+        <option value="6">6 时</option><option value="7">7 时</option><option value="8">8 时</option>
+        <option value="9">9 时</option><option value="10">10 时</option><option value="11">11 时</option>
+        <option value="12">12 时</option><option value="13">13 时</option><option value="14">14 时</option>
+        <option value="15">15 时</option><option value="16">16 时</option><option value="17">17 时</option>
+        <option value="18">18 时</option><option value="19">19 时</option><option value="20">20 时</option>
+        <option value="21">21 时</option><option value="22">22 时</option><option value="23">23 时</option>
+      </select>
+    </div>
     <div id="apiWhScopeRow" style="display:none" class="full">
       <label>统计范围（全屋用电/用时）</label>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;width:100%">
@@ -1574,6 +1590,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">entity_daily_all</td><td>实体按日用电（全部历史）· entity_id · 运行中设备含 running 标记</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entities_daily_flat</td><td>全部实体按月按日（平铺）· month · 日×设备扁平行 + totals</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entities_daily_by_day</td><td>全部实体按月按日（按日分组）· month · days[].summary(device_count/count/时长/用电) + days[].devices + totals</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entity_hour_dist</td><td>实体时段分布（几点使用/分时用电）· entity_id + 可选范围(全部/年/月/date/start+end) · hours[{hour,count,duration_hour,energy_kwh}]+totals</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entity_hour_dates</td><td>设备小时开启日期（几点开过）· entity_id + hour(0-23) + 可选范围(全部/年/月/date/start+end) · {count, dates:[...]}</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_summary</td><td>设备汇总 · entity_id/date/month/year/room</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_users_list</td><td>设备操作用户列表 · date/month/year/room · 各用户开启/关闭次数</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_user_history</td><td>按用户查设备记录 · user_name/direction(on|off|both)/entity_id/date/room/limit · 每条标注 matched</td></tr>
@@ -6614,6 +6632,9 @@ function onApiTypeChange() {
   // 默认隐藏全屋用电/用时范围行；仅 whole_house_usage 分支显示
   const elWhScopeRow = document.getElementById('apiWhScopeRow');
   if (elWhScopeRow) elWhScopeRow.style.display = 'none';
+  // 默认隐藏小时选择行；仅 entity_hour_dates 分支显示
+  const elHourRow = document.getElementById('apiHourRow');
+  if (elHourRow) elHourRow.style.display = 'none';
   const isRoomsDaily = qt === 'rooms_daily';
   const isVacuumHistory = qt === 'vacuum_history';
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
@@ -6632,6 +6653,8 @@ function onApiTypeChange() {
   const isEntitiesDailyFlat = qt === 'entities_daily_flat';
   const isEntitiesDailyByDay = qt === 'entities_daily_by_day';
   const isEntitiesDailyMonth = isEntitiesDailyFlat || isEntitiesDailyByDay;
+  const isEntityHourDist = qt === 'entity_hour_dist';
+  const isEntityHourDates = qt === 'entity_hour_dates';
   const isAggregateRoomDaily = qt === 'aggregate_room_daily';
   const isAggregateRoomMonthly = qt === 'aggregate_room_monthly';
   const isAggregateRoomYearlyDaily = qt === 'aggregate_room_yearly_daily';
@@ -7113,6 +7136,49 @@ function onApiTypeChange() {
     document.getElementById('apiDateMode').parentNode.style.display = isDeviceUserHasMonth ? 'none' : '';
     document.getElementById('apiDateMode').value = isDeviceUserByDate ? 'single' : 'none';
     onDateModeChange();
+    loadApiEntitiesAndRooms();
+  } else if (isEntityHourDates) {
+    // 设备小时开启日期：实体ID + 小时(必填) + 可选时间范围（全部历史/年/月/指定日期/起止范围）
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'block';
+    document.getElementById('apiYearRow').style.display = 'block';
+    document.getElementById('apiHourRow').style.display = 'block';
+    document.getElementById('apiDateMode').parentNode.style.display = '';
+    document.getElementById('apiDateMode').value = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    loadApiEntitiesAndRooms();
+  } else if (isEntityHourDist) {
+    // 实体时段分布：实体ID + 可选时间范围（全部历史/年/月/指定日期/起止范围）
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'block';
+    document.getElementById('apiYearRow').style.display = 'block';
+    document.getElementById('apiDateMode').parentNode.style.display = '';
+    document.getElementById('apiDateMode').value = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
     loadApiEntitiesAndRooms();
   } else if (isEntitiesDailyMonth) {
     // 全部实体按月按日：只需 月份，隐藏其余常规参数
@@ -7725,6 +7791,64 @@ function generateApiUrl() {
       return;
     }
     url += '&month=' + encodeURIComponent(month);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 实体时段分布（几点使用/分时用电）：实体ID + 可选时间范围
+  if (qt === 'entity_hour_dist') {
+    if (!entityId) {
+      document.getElementById('apiUrlOutput').value = url + '（请先选择实体 ID）';
+      return;
+    }
+    url += '&entity_id=' + encodeURIComponent(entityId);
+    const dm = document.getElementById('apiDateMode').value;
+    if (dm === 'single') {
+      const d = document.getElementById('apiDate').value;
+      if (d) url += '&date=' + encodeURIComponent(d);
+    } else if (dm === 'range') {
+      const s = document.getElementById('apiDateStart').value;
+      const e = document.getElementById('apiDateEnd').value;
+      if (s) url += '&start=' + encodeURIComponent(s);
+      if (e) url += '&end=' + encodeURIComponent(e);
+    } else {
+      // 全部历史：如填了月份则按月份，否则按年份（二者取其一）
+      const m = document.getElementById('apiMonth').value;
+      const y = document.getElementById('apiYear').value;
+      if (m) url += '&month=' + encodeURIComponent(m);
+      else if (y) url += '&year=' + encodeURIComponent(y);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 设备小时开启日期（几点开过）：实体ID + hour(必填) + 可选时间范围
+  if (qt === 'entity_hour_dates') {
+    if (!entityId) {
+      document.getElementById('apiUrlOutput').value = url + '（请先选择实体 ID）';
+      return;
+    }
+    const hour = document.getElementById('apiHour').value;
+    if (!hour) {
+      document.getElementById('apiUrlOutput').value = url + '（请先选择小时）';
+      return;
+    }
+    url += '&entity_id=' + encodeURIComponent(entityId) + '&hour=' + encodeURIComponent(hour);
+    const dm = document.getElementById('apiDateMode').value;
+    if (dm === 'single') {
+      const d = document.getElementById('apiDate').value;
+      if (d) url += '&date=' + encodeURIComponent(d);
+    } else if (dm === 'range') {
+      const s = document.getElementById('apiDateStart').value;
+      const e = document.getElementById('apiDateEnd').value;
+      if (s) url += '&start=' + encodeURIComponent(s);
+      if (e) url += '&end=' + encodeURIComponent(e);
+    } else {
+      const m = document.getElementById('apiMonth').value;
+      const y = document.getElementById('apiYear').value;
+      if (m) url += '&month=' + encodeURIComponent(m);
+      else if (y) url += '&year=' + encodeURIComponent(y);
+    }
     document.getElementById('apiUrlOutput').value = url;
     return;
   }

@@ -700,6 +700,8 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `entity_daily_all` | 实体按日用电（全部历史，含 totals 合计与运行中 running 标记） | entity_id |
 | `entities_daily_flat` | 全部实体按月按日（平铺：日×设备扁平行 + totals） | month |
 | `entities_daily_by_day` | 全部实体按月按日（按日分组：days[].devices + totals） | month |
+| `entity_hour_dist` | 实体时段分布（几点使用/分时用电，运行中设备处理） | entity_id + 可选范围 |
+| `entity_hour_dates` | 设备小时开启日期（某小时开过哪些天） | entity_id, hour + 可选范围 |
 | `device_summary` | 纯汇总（只返回统计数字，不返回记录） | entity_id, date/month/year(可选) |
 | `env_history` | 环境历史记录（含最新日期、总条数等元数据） | entity_id, metric |
 | `env_latest` | 环境最新一条记录 | entity_id, metric |
@@ -1112,6 +1114,14 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.6.0 新增设备小时开启日期接口（2026-09-09）
+
+新增 `entity_hour_dates`（`entity_id`+`hour`0–23+可选范围）：返回该小时发生过开启的日期列表 `{count, dates:[YYYY-MM-DD...]}`（按 `on_time` 小时精确匹配，含运行中设备；同日多次只记 1 天，升序）。范围不传=全部历史，可选 `year/month/date/start+end`。db_viewer 新增「📅 设备小时开启日期（几点开过）」。
+
+### v3.5.9 新增实体时段分布接口（2026-09-09）
+
+新增 `entity_hour_dist`：单实体按小时（0–23）返回使用分布 `hours[{hour,count,duration_hour,energy_kwh}]` + `totals`。时长按运行区间精确拆分到跨越的小时（已关闭 `off_time`；**运行中设备**以当前时间为结束，用电①`now_kwh−on_power`②固定功率`W/1000×A`③无来源不计电）；分时用电采用**方案 A**（整段用电按小时实际秒数占比均摊，闭合守恒，固定功率设备等价功率×时长）；`count` 按开机时刻归属。范围不传=全部历史，可选 `year/month/date/start+end`。db_viewer 新增「📊 实体时段分布」。
 
 ### v3.5.8 新增实体/全实体按日用电接口（2026-09-08）
 
