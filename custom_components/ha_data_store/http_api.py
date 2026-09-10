@@ -30,9 +30,11 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     DOMAIN,
+    VERSION,
     TABLE_ENTITY_CONFIGS,
     TABLE_DEVICE_HISTORY,
     TABLE_CUSTOM_ROUTES,
+    TABLE_API_ENDPOINTS,
     TABLE_ATTR_TYPE_DEFS,
     TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS,
@@ -981,6 +983,616 @@ def compute_entity_hour_dist_sync(db_path: str, entity_id: str,
             "energy_kwh": round(sum(ene), 4) if any_energy else None,
         },
         "hours": hours,
+    }
+
+
+def _parse_dt(ts: str):
+    try:
+        if len(ts) > 19:
+            ts = ts[:19]
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_range_params(entity_ids, start="", end="", date="", month="", year=""):
+    """组装多实体 + 时间范围过滤（start/end > date > month > year）。返回 (conds, params, label)。"""
+    conds = []
+    params: list = []
+    label = ""
+    if entity_ids:
+        conds.append(f"dh.entity_id IN ({','.join(['?'] * len(entity_ids))})")
+        params.extend(entity_ids)
+    if start or end:
+        if start:
+            conds.append("dh.on_time >= ?")
+            params.append(f"{start} 00:00:00")
+        if end:
+            conds.append("dh.on_time <= ?")
+            params.append(f"{end} 23:59:59")
+        label = f"{start or ''}~{end or ''}"
+    elif date:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{date}%")
+        label = date
+    elif month:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{month}-%")
+        label = month
+    elif year:
+        conds.append("dh.on_time LIKE ?")
+        params.append(f"{year}-%")
+        label = year
+    return conds, params, label
+
+
+def _fetch_usage_rows(db_path, entity_ids, start="", end="", date="", month="", year=""):
+    """按过滤取 device_history + entity_configs 电量来源字段。返回 rows(Row 列表)。"""
+    conds, params, _label = _usage_range_params(entity_ids, start, end, date, month, year)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            f"SELECT dh.entity_id AS entity_id, MAX(dh.name) AS name, "
+            f"dh.on_time AS on_time, dh.off_time AS off_time, "
+            f"dh.duration AS duration, dh.energy_consumed AS energy_consumed, "
+            f"dh.on_power AS on_power, dh.now_kwh AS now_kwh, "
+            f"MAX(ec.power_entity) AS power_entity, MAX(ec.power_rating) AS power_rating "
+            f"FROM {TABLE_DEVICE_HISTORY} dh "
+            f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+            f"{where} "
+            f"GROUP BY dh.entity_id, dh.on_time, dh.off_time, dh.duration, "
+            f"dh.energy_consumed, dh.on_power, dh.now_kwh",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _row_running_usage(r, now_dt):
+    """单条记录计算 (dur_s, ene_total, has_ene, is_running)；on_time 缺失/区间非法返回 None。
+
+    已关闭：end=off_time；运行中（on_time 非空 off_time 空）end=当前时间。
+    用电：① now_kwh-on_power ② 固定功率(W)/1000×小时 ③ 无来源 has_ene=False。
+    """
+    on_dt = _parse_dt(r["on_time"] or "")
+    if on_dt is None:
+        return None
+    off = r["off_time"]
+    closed = bool(off and str(off).strip())
+    end_dt = _parse_dt(r["off_time"] or "") if closed else now_dt
+    if end_dt is None or end_dt <= on_dt:
+        return None
+    dur_s = (end_dt - on_dt).total_seconds()
+    ene = 0.0
+    has_ene = False
+    if closed:
+        try:
+            ec = float(r["energy_consumed"] or 0)
+        except (TypeError, ValueError):
+            ec = 0.0
+        if r["energy_consumed"] not in (None, ""):
+            ene = ec
+            has_ene = True
+    else:
+        now_kwh = r["now_kwh"]
+        on_power = r["on_power"]
+        power_entity = (r["power_entity"] or "").strip()
+        try:
+            power_rating = float(r["power_rating"] or 0)
+        except (TypeError, ValueError):
+            power_rating = 0.0
+        if now_kwh is not None and on_power is not None:
+            ene = max(float(now_kwh) - float(on_power), 0.0)
+            has_ene = True
+        elif not power_entity and power_rating > 0:
+            ene = power_rating / 1000.0 * (dur_s / 3600.0)
+            has_ene = True
+    return {"dur_s": dur_s, "ene": ene, "has_ene": has_ene,
+            "running": not closed, "end_dt": end_dt}
+
+
+def compute_entities_period_agg_sync(db_path, entity_ids=None, bucket="day",
+                                     view="entity",
+                                     start="", end="", date="", month="", year="",
+                                     now_dt=None) -> dict:
+    """多实体按 日/月/年 汇聚，含运行中设备，支持两种返回结构。
+
+    运行中设备（on_time 非空 off_time 空）：时长 end=当前时间；
+    用电 ①now_kwh-on_power ②固定功率(W)/1000×A ③无来源 → 该实体系列/合计为空值。
+    bucket: day(YYYY-MM-DD) | month(YYYY-MM) | year(YYYY)。
+    view（返回结构）：
+      entity（默认）→ "实体→日期"：entities[].series[]（向后兼容原结构）
+      date         → "日期→实体"：dates[] 唯一，每个 key 下 devices[] 每实体含
+                     count/duration_hour/energy_kwh/running（running=该段存在运行中设备）
+    时间范围优先级 start/end > date > month > year；entity_ids 为空 = 全部实体。
+    """
+    if bucket not in ("day", "month", "year"):
+        raise ValueError("bucket 需为 day|month|year")
+    if view not in ("entity", "date"):
+        raise ValueError("view 需为 entity|date")
+    if now_dt is None:
+        now_dt = datetime.now()
+    eids = [x.strip() for x in (entity_ids or []) if (x or "").strip()]
+    rows = _fetch_usage_rows(db_path, eids, start, end, date, month, year)
+
+    # 每 (实体,key) 桶（记录 running）+ 实体级别来源/名称
+    buckets: dict[tuple, dict] = {}
+    ent_name: dict[str, str] = {}
+    ent_src: dict[str, bool] = {}
+    for r in rows:
+        eid = (r["entity_id"] or "").strip()
+        if not eid:
+            continue
+        ent_name.setdefault(eid, (r["name"] or "").strip() or eid)
+        use = _row_running_usage(r, now_dt)
+        if use is None:
+            continue
+        on_key = (r["on_time"] or "")[:10]
+        if bucket == "month":
+            on_key = on_key[:7]
+        elif bucket == "year":
+            on_key = on_key[:4]
+        if not on_key:
+            continue
+        if use["has_ene"]:
+            ent_src[eid] = True
+        key = (eid, on_key)
+        b = buckets.get(key)
+        if b is None:
+            b = {"count": 0, "dur_s": 0.0, "ene": 0.0, "running": False}
+            buckets[key] = b
+        b["count"] += 1
+        b["dur_s"] += use["dur_s"]
+        b["ene"] += use["ene"]
+        if use["running"]:
+            b["running"] = True
+
+    # 汇总：实体级聚合 + 日期级聚合
+    ent_data: dict[str, dict] = {}
+    date_data: dict[str, dict] = {}
+    for (eid, on_key), b in buckets.items():
+        ed = ent_data.setdefault(eid, {"count": 0, "dur_s": 0.0, "ene": 0.0,
+                                       "series": {}})
+        ed["count"] += b["count"]
+        ed["dur_s"] += b["dur_s"]
+        ed["ene"] += b["ene"]
+        ed["series"][on_key] = b
+        if view == "date":
+            dd = date_data.setdefault(on_key, {"devices": {}})
+            dev_b = dd["devices"].setdefault(eid, {
+                "count": 0, "dur_s": 0.0, "ene": 0.0, "running": False})
+            dev_b["count"] += b["count"]
+            dev_b["dur_s"] += b["dur_s"]
+            dev_b["ene"] += b["ene"]
+            dev_b["running"] = dev_b["running"] or b["running"]
+
+    t_count = 0
+    t_dur = 0.0
+    t_ene = 0.0
+    t_src = False
+
+    if view == "date":
+        # 日期→实体：日期唯一，其下每个实体含 用电量/时长/条数 + running 标记
+        dates = []
+        for k in sorted(date_data):
+            dd = date_data[k]
+            d_count = 0
+            d_dur = 0.0
+            d_ene = 0.0
+            d_src = False
+            devices = []
+            for eid in sorted(dd["devices"], key=lambda x: (ent_name.get(x, x) or "")):
+                db = dd["devices"][eid]
+                src = ent_src.get(eid, False)
+                d_count += db["count"]
+                d_dur += db["dur_s"]
+                d_ene += db["ene"]
+                if src:
+                    d_src = True
+                devices.append({
+                    "entity_id": eid,
+                    "name": ent_name.get(eid, eid),
+                    "count": db["count"],
+                    "duration_hour": round(db["dur_s"] / 3600.0, 2),
+                    "energy_kwh": round(db["ene"], 4) if src else None,
+                    "running": db["running"],
+                })
+            devices.sort(key=lambda d: d["duration_hour"], reverse=True)
+            if d_src:
+                t_src = True
+            t_count += d_count
+            t_dur += d_dur
+            t_ene += d_ene
+            dates.append({
+                "key": k,
+                "count": d_count,
+                "duration_hour": round(d_dur / 3600.0, 2),
+                "energy_kwh": round(d_ene, 4) if d_src else None,
+                "devices": devices,
+            })
+        _c, _p, label = _usage_range_params(eids, start, end, date, month, year)
+        return {
+            "bucket": bucket,
+            "view": "date",
+            "entity_ids": eids or None,
+            "range": label or None,
+            "totals": {
+                "count": t_count,
+                "duration_hour": round(t_dur / 3600.0, 2),
+                "energy_kwh": round(t_ene, 4) if t_src else None,
+            },
+            "dates": dates,
+        }
+
+    # 实体→日期（默认，结构不变）
+    entities = []
+    for eid in sorted(ent_data, key=lambda x: (ent_name.get(x, x) or "")):
+        ed = ent_data[eid]
+        src = ent_src.get(eid, False)
+        if src:
+            t_src = True
+        t_count += ed["count"]
+        t_dur += ed["dur_s"]
+        t_ene += ed["ene"]
+        series = []
+        for k in sorted(ed["series"]):
+            s = ed["series"][k]
+            series.append({"key": k, "count": s["count"],
+                           "duration_hour": round(s["dur_s"] / 3600.0, 2),
+                           "energy_kwh": round(s["ene"], 4) if src else None})
+        entities.append({
+            "entity_id": eid,
+            "name": ent_name.get(eid, eid),
+            "count": ed["count"],
+            "duration_hour": round(ed["dur_s"] / 3600.0, 2),
+            "energy_kwh": round(ed["ene"], 4) if src else None,
+            "series": series,
+        })
+
+    _c, _p, label = _usage_range_params(eids, start, end, date, month, year)
+    return {
+        "bucket": bucket,
+        "view": "entity",
+        "entity_ids": eids or None,
+        "range": label or None,
+        "totals": {
+            "count": t_count,
+            "duration_hour": round(t_dur / 3600.0, 2),
+            "energy_kwh": round(t_ene, 4) if t_src else None,
+        },
+        "entities": entities,
+    }
+
+
+def compute_entities_dates_sync(db_path, entity_ids=None,
+                                start="", end="", date="", month="", year="") -> dict:
+    """多实体：返回哪些日期有开启数据（含运行中设备，其 on_time 即开启日）。
+
+    entity_ids 为空 = 全部实体。返回：
+      { entity_ids, range, all_count, all_dates(去重升序),
+        entities: [{entity_id, name, count, dates}] }
+    """
+    eids = [x.strip() for x in (entity_ids or []) if (x or "").strip()]
+    rows = _fetch_usage_rows(db_path, eids, start, end, date, month, year)
+    ent_map: dict[str, dict] = {}
+    all_set = set()
+    for r in rows:
+        eid = (r["entity_id"] or "").strip()
+        d = (r["on_time"] or "")[:10]
+        if not eid or not d:
+            continue
+        em = ent_map.setdefault(eid, {"entity_id": eid,
+                                      "name": (r["name"] or "").strip() or eid,
+                                      "date_set": set()})
+        em["date_set"].add(d)
+        all_set.add(d)
+
+    entities = []
+    for eid in sorted(ent_map):
+        em = ent_map[eid]
+        entities.append({
+            "entity_id": eid,
+            "name": em["name"],
+            "count": len(em["date_set"]),
+            "dates": sorted(em["date_set"]),
+        })
+    _c, _p, label = _usage_range_params(eids, start, end, date, month, year)
+    return {
+        "entity_ids": eids or None,
+        "range": label or None,
+        "all_count": len(all_set),
+        "all_dates": sorted(all_set),
+        "entities": entities,
+    }
+
+
+def compute_entities_hours_sync(db_path, entity_ids=None,
+                                start="", end="", date="", month="", year="",
+                                now_dt=None) -> dict:
+    """多实体：时段(小时 0-23)分布——按实体分组 + 全部合并，两种一起返回。
+
+    复用与单实体 entity_hour_dist 完全一致的行级口径：
+      - 精确拆分到跨越小时；运行中设备 end=当前时间
+      - 用电按各小时实际秒数占比均摊整段（方案 A）；无用电来源实体能源为 None
+    返回：
+      { entity_ids, range,
+        merged: {totals, hours:[{hour,count,duration_hour,energy_kwh}]},
+        entities: [{entity_id, name, totals, hours:[...]}] }
+    """
+    if now_dt is None:
+        now_dt = datetime.now()
+    eids = [x.strip() for x in (entity_ids or []) if (x or "").strip()]
+    rows = _fetch_usage_rows(db_path, eids, start, end, date, month, year)
+    ent_name: dict[str, str] = {}
+
+    # merged / per-entity 小时桶（0-23）与来源标记
+    m_cnt = [0] * 24
+    m_dur = [0.0] * 24
+    m_ene = [0.0] * 24
+    m_src = False
+    per: dict[str, dict] = {}
+
+    for r in rows:
+        eid = (r["entity_id"] or "").strip()
+        if not eid:
+            continue
+        ent_name.setdefault(eid, (r["name"] or "").strip() or eid)
+        on_dt = _parse_dt(r["on_time"] or "")
+        if on_dt is None:
+            continue
+        use = _row_running_usage(r, now_dt)
+        if use is None:
+            continue
+        if use["has_ene"]:
+            m_src = True
+
+        pe = per.setdefault(eid, {
+            "cnt": [0] * 24, "dur": [0.0] * 24, "ene": [0.0] * 24, "src": False,
+        })
+        if use["has_ene"]:
+            pe["src"] = True
+        pe["cnt"][on_dt.hour] += 1
+        m_cnt[on_dt.hour] += 1
+
+        dur_total = use["dur_s"]
+        cur = on_dt
+        while cur < use["end_dt"]:
+            h = cur.hour
+            hour_end = (cur.replace(minute=0, second=0, microsecond=0)
+                        + timedelta(hours=1))
+            if hour_end > use["end_dt"]:
+                hour_end = use["end_dt"]
+            seg = (hour_end - cur).total_seconds()
+            if seg > 0:
+                pe["dur"][h] += seg
+                m_dur[h] += seg
+                if use["has_ene"] and dur_total > 0:
+                    val = use["ene"] * (seg / dur_total)
+                    pe["ene"][h] += val
+                    m_ene[h] += val
+            cur = hour_end
+
+    def _pack(tot_cnt, tot_dur, tot_ene, cnt, dur, ene, src_ok):
+        hours = []
+        for h in range(24):
+            if cnt[h] > 0 or dur[h] > 0:
+                hours.append({"hour": h, "count": cnt[h],
+                              "duration_hour": round(dur[h] / 3600.0, 2),
+                              "energy_kwh": round(ene[h], 4) if src_ok else None})
+        return {
+            "totals": {"count": sum(cnt),
+                       "duration_hour": round(sum(dur) / 3600.0, 2),
+                       "energy_kwh": round(sum(ene), 4) if src_ok else None},
+            "hours": hours,
+        }
+
+    merged = _pack(sum(m_cnt), sum(m_dur), sum(m_ene), m_cnt, m_dur, m_ene, m_src)
+    entities = []
+    for eid in sorted(per, key=lambda x: (ent_name.get(x, x) or "")):
+        p = per[eid]
+        entities.append({
+            "entity_id": eid,
+            "name": ent_name.get(eid, eid),
+            **_pack(sum(p["cnt"]), sum(p["dur"]), sum(p["ene"]),
+                    p["cnt"], p["dur"], p["ene"], p["src"]),
+        })
+
+    _c, _p, label = _usage_range_params(eids, start, end, date, month, year)
+    return {"entity_ids": eids or None, "range": label or None,
+            "merged": merged, "entities": entities}
+
+
+def compute_entities_grid_hours_sync(db_path, entity_ids=None, dim="week",
+                                     start="", end="", date="", month="",
+                                     year="", group=0,
+                                     now_dt=None) -> dict:
+    """多实体 × 时间段 ×「分组维度 × 24 小时」聚合使用情况（通用网格）。
+
+    dim（分组维度）：
+      week  → 星期几（0=周一…6=周日，7 格）
+      month → 月份 1–12（跨年同名月份合并，12 格）
+      day   → 几号 1–31（跨月同号合并，31 格）
+    行级口径与 entity_hour_dist / entities_hours_agg 完全一致：
+      - 逐小时精确拆分（跨小时/跨天按真实时间切段，各段归其自然时刻的维度格+小时）
+      - 运行中设备（on_time 非空 off_time 空）end=当前时间
+      - 用电按各小时实际秒数占比均摊整段（方案 A）；无来源实体能源为 None
+      - count（开启次数）按开机时刻所在的 维度格+小时 归属
+    hours 固定输出 0-23 全部 24 项（无数据为 0），便于前端 N×24 网格直接渲染。
+    group=1 → 每个维度格另含 devices[]（按实体分组的 totals/hours）
+    返回：{entity_ids, range, dim, group, totals,
+           cells: [{index, label, totals, hours:[{hour,count,duration_hour,energy_kwh}], devices?}]}
+    """
+    if now_dt is None:
+        now_dt = datetime.now()
+    dim = (dim or "week").strip().lower()
+    if dim not in ("week", "month", "day"):
+        raise ValueError("dim 需为 week|month|day")
+    eids = [x.strip() for x in (entity_ids or []) if (x or "").strip()]
+    want_group = bool(group)
+
+    if dim == "week":
+        size = 7
+        labels = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    elif dim == "month":
+        size = 12
+        labels = tuple(f"{i}月" for i in range(1, 13))
+    else:
+        size = 31
+        labels = tuple(f"{i}号" for i in range(1, 32))
+
+    def _dim_index(dt_obj) -> int:
+        if dim == "week":
+            return dt_obj.weekday()
+        if dim == "month":
+            return dt_obj.month - 1
+        return dt_obj.day - 1
+
+    rows = _fetch_usage_rows(db_path, eids, start, end, date, month, year)
+    ent_name: dict[str, str] = {}
+
+    def _blank():
+        return {"cnt": [0] * 24, "dur": [0.0] * 24, "ene": [0.0] * 24, "src": False}
+
+    grid = [_blank() for _ in range(size)]
+    per: dict[str, list] = {}   # eid → [size 个 blank]
+    all_src = False
+
+    for r in rows:
+        eid = (r["entity_id"] or "").strip()
+        if not eid:
+            continue
+        ent_name.setdefault(eid, (r["name"] or "").strip() or eid)
+        on_dt = _parse_dt(r["on_time"] or "")
+        if on_dt is None:
+            continue
+        use = _row_running_usage(r, now_dt)
+        if use is None:
+            continue
+        if use["has_ene"]:
+            all_src = True
+
+        idx = _dim_index(on_dt)
+        gb = grid[idx]
+        if use["has_ene"]:
+            gb["src"] = True
+        gb["cnt"][on_dt.hour] += 1
+
+        pb = None
+        if want_group:
+            plist = per.setdefault(eid, [_blank() for _ in range(size)])
+            pb = plist[idx]
+            if use["has_ene"]:
+                pb["src"] = True
+            pb["cnt"][on_dt.hour] += 1
+
+        dur_total = use["dur_s"]
+        cur = on_dt
+        while cur < use["end_dt"]:
+            h = cur.hour
+            hour_end = (cur.replace(minute=0, second=0, microsecond=0)
+                        + timedelta(hours=1))
+            if hour_end > use["end_dt"]:
+                hour_end = use["end_dt"]
+            seg = (hour_end - cur).total_seconds()
+            if seg > 0:
+                gi = _dim_index(cur)   # 跨天/跨月段归其自然时刻的维度格
+                gb2 = grid[gi]
+                gb2["dur"][h] += seg
+                if use["has_ene"] and dur_total > 0:
+                    gb2["ene"][h] += use["ene"] * (seg / dur_total)
+                if want_group and pb is not None:
+                    pb2 = per[eid][gi]
+                    pb2["dur"][h] += seg
+                    if use["has_ene"] and dur_total > 0:
+                        pb2["ene"][h] += use["ene"] * (seg / dur_total)
+            cur = hour_end
+
+    def _hours_grid(b):
+        # 固定输出 0-23 全部 24 项（无数据为 0），便于 N×24 网格渲染
+        return [{
+            "hour": h, "count": b["cnt"][h],
+            "duration_hour": round(b["dur"][h] / 3600.0, 2),
+            "energy_kwh": round(b["ene"][h], 4) if b["src"] else None,
+        } for h in range(24)]
+
+    def _totals_of(b):
+        return {
+            "count": sum(b["cnt"]),
+            "duration_hour": round(sum(b["dur"]) / 3600.0, 2),
+            "energy_kwh": round(sum(b["ene"]), 4) if b["src"] else None,
+        }
+
+    cells = []
+    for i in range(size):
+        b = grid[i]
+        item = {
+            "index": i,
+            "label": labels[i],
+            "totals": _totals_of(b),
+            "hours": _hours_grid(b),
+        }
+        if want_group:
+            devices = []
+            for eid in sorted(per, key=lambda x: (ent_name.get(x, x) or "")):
+                pb = per[eid][i]
+                devices.append({
+                    "entity_id": eid,
+                    "name": ent_name.get(eid, eid),
+                    "totals": _totals_of(pb),
+                    "hours": _hours_grid(pb),
+                })
+            item["devices"] = devices
+        cells.append(item)
+
+    t_cnt = sum(sum(m["cnt"]) for m in grid)
+    t_dur = sum(sum(m["dur"]) for m in grid)
+    t_ene = sum(sum(m["ene"]) for m in grid)
+    _c, _p, label = _usage_range_params(eids, start, end, date, month, year)
+    return {
+        "entity_ids": eids or None,
+        "range": label or None,
+        "dim": dim,
+        "group": 1 if want_group else 0,
+        "totals": {
+            "count": t_cnt,
+            "duration_hour": round(t_dur / 3600.0, 2),
+            "energy_kwh": round(t_ene, 4) if all_src else None,
+        },
+        "cells": cells,
+    }
+
+
+def compute_entities_weekday_hours_sync(db_path, entity_ids=None,
+                                        start="", end="", date="", month="",
+                                        year="", group=0,
+                                        now_dt=None) -> dict:
+    """「星期几 × 24 小时」聚合（compute_entities_grid_hours_sync 的 week 维度包装）。
+
+    返回结构保持 v3.6.2 兼容：weekdays[{weekday, weekday_name, totals, hours, devices?}]
+    """
+    data = compute_entities_grid_hours_sync(
+        db_path, entity_ids, dim="week", start=start, end=end, date=date,
+        month=month, year=year, group=group, now_dt=now_dt,
+    )
+    weekdays = []
+    for cell in data["cells"]:
+        item = {
+            "weekday": cell["index"],
+            "weekday_name": cell["label"],
+            "totals": cell["totals"],
+            "hours": cell["hours"],
+        }
+        if "devices" in cell:
+            item["devices"] = cell["devices"]
+        weekdays.append(item)
+    return {
+        "entity_ids": data["entity_ids"],
+        "range": data["range"],
+        "group": data["group"],
+        "totals": data["totals"],
+        "weekdays": weekdays,
     }
 
 
@@ -2784,6 +3396,22 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(
                     hass, self._query_entity_hour_dates, db_path, request
                 )
+            elif query_type == "entities_period_agg":
+                result = await self._exec_in_executor(
+                    hass, self._query_entities_period_agg, db_path, request
+                )
+            elif query_type == "entities_dates":
+                result = await self._exec_in_executor(
+                    hass, self._query_entities_dates, db_path, request
+                )
+            elif query_type == "entities_hours_agg":
+                result = await self._exec_in_executor(
+                    hass, self._query_entities_hours, db_path, request
+                )
+            elif query_type == "entities_weekday_hours":
+                result = await self._exec_in_executor(
+                    hass, self._query_entities_weekday_hours, db_path, request
+                )
             elif query_type == "entity_hour_dist":
                 result = await self._exec_in_executor(
                     hass, self._query_entity_hour_dist, db_path, request
@@ -3029,6 +3657,7 @@ class QueryView(_BaseDBView):
         end = params["end"]
 
         conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row   # 汇总结果按字段名取值（避免 tuple 索引报错）
         try:
             conditions = []
             sql_params: list = []
@@ -4310,6 +4939,99 @@ class QueryView(_BaseDBView):
             conn.close()
 
     # ------------------------------------------------------------------ #
+    #  多实体接口：汇聚(entities_period_agg) / 日期(entities_dates) / 时段  #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _parse_multi_entities(request) -> list | None:
+        raw = (request.query.get("entities", "") or "").strip()
+        if not raw:
+            raw = (request.query.get("entity_id", "") or "").strip()
+        if not raw:
+            return None
+        parts = [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+        return parts or None
+
+    def _query_entities_period_agg(self, db_path, request) -> dict:
+        """多实体按日/月/年汇聚，可选时间段，两种返回结构。
+
+        参数：
+          entities(逗号分隔，空=全部) bucket=day|month|year
+          view=entity|date（entity=实体→日期默认；date=日期→实体，实体含 running 标记）
+          start/end/date/month/year（时间范围）
+        """
+        return compute_entities_period_agg_sync(
+            db_path, self._parse_multi_entities(request),
+            bucket=(request.query.get("bucket", "day") or "").strip(),
+            view=(request.query.get("view", "entity") or "").strip(),
+            start=(request.query.get("start", "") or "").strip(),
+            end=(request.query.get("end", "") or "").strip(),
+            date=(request.query.get("date", "") or "").strip(),
+            month=(request.query.get("month", "") or "").strip(),
+            year=(request.query.get("year", "") or "").strip(),
+        )
+
+    def _query_entities_dates(self, db_path, request) -> dict:
+        """多实体：返回哪些日期有数据（group=1 按实体分组；否则合并日期列表）。"""
+        data = compute_entities_dates_sync(
+            db_path, self._parse_multi_entities(request),
+            start=(request.query.get("start", "") or "").strip(),
+            end=(request.query.get("end", "") or "").strip(),
+            date=(request.query.get("date", "") or "").strip(),
+            month=(request.query.get("month", "") or "").strip(),
+            year=(request.query.get("year", "") or "").strip(),
+        )
+        grouped = (request.query.get("group", "") or "").strip() == "1"
+        if grouped:
+            return {k: data[k] for k in ("entity_ids", "range", "entities")}
+        return {k: data[k] for k in ("entity_ids", "range", "all_count", "all_dates")}
+
+    def _query_entities_hours(self, db_path, request) -> dict:
+        """多实体时段分布：group=1 按实体分组；否则只返回全部合并(merged)。"""
+        data = compute_entities_hours_sync(
+            db_path, self._parse_multi_entities(request),
+            start=(request.query.get("start", "") or "").strip(),
+            end=(request.query.get("end", "") or "").strip(),
+            date=(request.query.get("date", "") or "").strip(),
+            month=(request.query.get("month", "") or "").strip(),
+            year=(request.query.get("year", "") or "").strip(),
+        )
+        grouped = (request.query.get("group", "") or "").strip() == "1"
+        if grouped:
+            return {k: data[k] for k in ("entity_ids", "range", "merged", "entities")}
+        return {k: data[k] for k in ("entity_ids", "range", "merged")}
+
+    def _query_entities_weekday_hours(self, db_path, request) -> dict:
+        """多实体 × 时间段 ×「分组维度 × 24 小时」聚合使用情况。
+
+        参数：
+          entities(逗号,空=全部) start/end（可选）
+          dim=week|month|day（默认 week=星期几；month=月份1-12；day=几号1-31）
+          group=0 合并 / 1 每维度格另含按实体分组 devices[]
+        dim=week 返回兼容旧结构（weekdays 键）；month/day 返回 cells 键。
+        """
+        dim = (request.query.get("dim", "week") or "").strip() or "week"
+        if dim == "week":
+            return compute_entities_weekday_hours_sync(
+                db_path, self._parse_multi_entities(request),
+                start=(request.query.get("start", "") or "").strip(),
+                end=(request.query.get("end", "") or "").strip(),
+                date=(request.query.get("date", "") or "").strip(),
+                month=(request.query.get("month", "") or "").strip(),
+                year=(request.query.get("year", "") or "").strip(),
+                group=1 if (request.query.get("group", "") or "").strip() == "1" else 0,
+            )
+        return compute_entities_grid_hours_sync(
+            db_path, self._parse_multi_entities(request),
+            dim=dim,
+            start=(request.query.get("start", "") or "").strip(),
+            end=(request.query.get("end", "") or "").strip(),
+            date=(request.query.get("date", "") or "").strip(),
+            month=(request.query.get("month", "") or "").strip(),
+            year=(request.query.get("year", "") or "").strip(),
+            group=1 if (request.query.get("group", "") or "").strip() == "1" else 0,
+        )
+
+    # ------------------------------------------------------------------ #
     #  whole_house_usage：全屋用电/用时（三级：总计→房间→设备）               #
     # ------------------------------------------------------------------ #
     def _query_entities_daily(self, db_path: str, request: web.Request,
@@ -4904,7 +5626,14 @@ class QueryView(_BaseDBView):
 
     @staticmethod
     def _calc_device_summary_by_where(conn: sqlite3.Connection, where_clause: str, where_params: list, pattern: str) -> dict:
-        """计算设备汇总：通过自定义 WHERE 条件过滤（支持 entity_id 和 room 组合）。"""
+        """计算设备汇总：通过自定义 WHERE 条件过滤（支持 entity_id 和 room 组合）。
+
+        注意：不依赖调用方连接设置，内部统一启用 Row 工厂，
+        否则无 row_factory 的连接会返回 tuple，row["xx"] 将报
+        TypeError: tuple indices must be integers or slices, not str。
+        """
+        if conn.row_factory is not sqlite3.Row:
+            conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             f"SELECT COUNT(*) AS on_count, "
             f"  COALESCE(SUM(energy_consumed), 0) AS total_energy, "
@@ -4944,7 +5673,12 @@ class QueryView(_BaseDBView):
         where_clause: str, where_params: list,
         range_conds: list[str], range_params: list,
     ) -> dict:
-        """计算设备汇总：区间（on_time >=/<）过滤版本。"""
+        """计算设备汇总：区间（on_time >=/<）过滤版本。
+
+        同 _calc_device_summary_by_where：内部统一启用 Row 工厂，避免依赖调用方设置。
+        """
+        if conn.row_factory is not sqlite3.Row:
+            conn.row_factory = sqlite3.Row
         full_conds = f"{where_clause} AND " + " AND ".join(range_conds) if range_conds else where_clause
         cursor = conn.execute(
             f"SELECT COUNT(*) AS on_count, "
@@ -6897,9 +7631,12 @@ class DBViewerView(_BaseDBView):
                 conn.close()
             except Exception:
                 pass
+            # 注入第一个 API Key + 集成版本号到 JS 全局变量
+            inject = 'window.__HDS_VERSION__="' + VERSION + '";\n'
             if first_key:
-                inject = 'window.__HDS_FIRST_KEY__="' + first_key + '";\n'
-                html = html.replace("<script>\n// ==============================", "<script>\n" + inject + "// ==============================")
+                inject += 'window.__HDS_FIRST_KEY__="' + first_key + '";\n'
+            html = html.replace("<script>\n// ==============================",
+                                "<script>\n" + inject + "// ==============================")
             return web.Response(text=html, content_type="text/html", charset="utf-8")
         # 未登录 → 返回登录页
         error = request.query.get("error", "")
@@ -8339,9 +9076,12 @@ class ApiSourceConfigView(_BaseDBView):
 
 
 # ========================================================================== #
-#  数据库浏览器 HTML 加载（从独立文件读取，带缓存）                                 #
+#  数据库浏览器 HTML 加载（带缓存 + 文件变化自动热重载）                             #
+#  每次请求检查 db_viewer.html 的 mtime/size，文件变动即重新读取：                #
+#  只改 HTML 布局/样式时无需重启 HA；改后端 .py 仍需手动重启。                      #
 # ========================================================================== #
 _DB_VIEWER_HTML_CACHE: str | None = None
+_DB_VIEWER_HTML_STAMP: tuple | None = None
 
 
 # ========================================================================== #
@@ -11347,14 +12087,30 @@ class MediaNowPlayingView(_BaseDBView):
 
 
 async def _load_db_viewer_html(hass: HomeAssistant) -> str:
-    """从同目录下的 db_viewer.html 读取页面内容，首次读取后缓存。"""
-    global _DB_VIEWER_HTML_CACHE
-    if _DB_VIEWER_HTML_CACHE is not None:
-        return _DB_VIEWER_HTML_CACHE
+    """从同目录下的 db_viewer.html 读取页面内容。
+
+    带缓存但会检查文件 mtime/size：修改 HTML（布局/样式）后刷新页面即可生效，
+    无需重启 HA；读取失败时若有旧缓存则继续使用旧内容。
+    """
+    global _DB_VIEWER_HTML_CACHE, _DB_VIEWER_HTML_STAMP
     html_path = Path(__file__).parent / "db_viewer.html"
-    _DB_VIEWER_HTML_CACHE = await hass.async_add_executor_job(
-        lambda: html_path.read_text(encoding="utf-8")
-    )
+
+    def _read_with_stamp():
+        st = html_path.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+        if _DB_VIEWER_HTML_CACHE is not None and _DB_VIEWER_HTML_STAMP == stamp:
+            return None  # 文件未变化，沿用缓存
+        return html_path.read_text(encoding="utf-8"), stamp
+
+    try:
+        res = await hass.async_add_executor_job(_read_with_stamp)
+    except Exception as exc:  # 文件缺失/读取失败
+        _LOGGER.error("[HDS] 读取 db_viewer.html 失败: %s", exc)
+        return _DB_VIEWER_HTML_CACHE or "<html><body>db_viewer.html 读取失败</body></html>"
+
+    if res is None:
+        return _DB_VIEWER_HTML_CACHE
+    _DB_VIEWER_HTML_CACHE, _DB_VIEWER_HTML_STAMP = res
     return _DB_VIEWER_HTML_CACHE
 
 
@@ -11415,17 +12171,19 @@ class ReportEntitiesView(_BaseDBView):
                     source = (item.get("source") or "room_elves").strip() or "room_elves"
                     # rooms：前端去重后合并的"使用房间"列表（多房间逗号连接），可为空
                     rooms = (item.get("rooms") or "").strip()
-                    # 实体来源/设备/区域：前端从 hass 注册表映射后上报，可为空
+                    # 实体来源/设备/区域/卡片类型：前端从 hass 注册表映射后上报，可为空
                     entity_type = (item.get("entity_type") or "").strip()
                     entity_device = (item.get("entity_device") or "").strip()
                     entity_area = (item.get("entity_area") or "").strip()
+                    # card_type：该实体所属卡片的类型（如 ac/sensor/switch...），前端自行组织上报
+                    card_type = (item.get("card_type") or "").strip()
                     conn.execute(
                         f"INSERT INTO {TABLE_REPORT_ENTITIES} "
                         f"(entity_id, name, icon, room_name, source, rooms, "
-                        f"entity_type, entity_device, entity_area, last_report_time) "
-                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        f"entity_type, entity_device, entity_area, card_type, last_report_time) "
+                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (eid, name, icon, room_name, source, rooms,
-                         entity_type, entity_device, entity_area, now),
+                         entity_type, entity_device, entity_area, card_type, now),
                     )
                     inserted += 1
                 conn.commit()
@@ -11460,7 +12218,7 @@ class ReportEntitiesView(_BaseDBView):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     f"SELECT entity_id, name, icon, room_name, source, rooms, "
-                    f"entity_type, entity_device, entity_area, last_report_time "
+                    f"entity_type, entity_device, entity_area, card_type, last_report_time "
                     f"FROM {TABLE_REPORT_ENTITIES} ORDER BY room_name, entity_id"
                 )
                 return [dict(r) for r in cursor.fetchall()]
@@ -11502,7 +12260,7 @@ class ReportAutoEntitiesView(_BaseDBView):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     f"SELECT id, entity_id, name, icon, room_name, source, rooms, "
-                    f"entity_type, entity_device, entity_area, last_report_time "
+                    f"entity_type, entity_device, entity_area, card_type, last_report_time "
                     f"FROM {TABLE_REPORT_ENTITIES} "
                     f"WHERE entity_id LIKE 'automation.%' "
                     f"ORDER BY entity_id, name"
@@ -11516,6 +12274,512 @@ class ReportAutoEntitiesView(_BaseDBView):
             return self.json({"success": True, "total": len(rows), "data": rows})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# =========================================================================== #
+#  实体上报 - 复合条件查询 API — ReportSearchView                                 #
+#  按字段对 report_entities 做多条件（精确 eq / 模糊 like）查询，条件之间支持       #
+#  AND / OR 自由组合，可选 limit/offset 与排序。                                  #
+# =========================================================================== #
+_REPORT_SEARCH_FIELDS = ("entity_id", "name", "icon", "room_name", "source",
+                         "rooms", "entity_type", "entity_device",
+                         "entity_area", "card_type")
+
+
+class ReportSearchView(_BaseDBView):
+    """按给定值对 report_entities 进行复合条件查询（精确/模糊）。
+
+    GET /api/ha_data_store/report/search?key=xxx&f=<字段>&op=<eq|like>&v=<值>&c=<and|or>&...
+      f/op/v/c 可重复出现形成多个条件（每个条件一组），条件按出现顺序
+      用 c（and/or，第一条忽略，默认 and）线性组合并加括号（严格从左到右）。
+      支持字段见 _REPORT_SEARCH_FIELDS。
+      可选：limit=<n>（默认不限）&offset=<n>（默认0）
+            order_by=<字段>&order=<asc|desc>（默认 room_name, entity_id 升序）
+    返回：{success, data: {count, limit, offset, order, rows: [...]}}
+    """
+
+    url = "/api/ha_data_store/report/search"
+    name = "api:ha_data_store:report_search"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+
+        q = request.query
+        fields = q.getall("f", [])
+        ops = q.getall("op", [])
+        vals = q.getall("v", [])
+        conns = q.getall("c", [])
+        try:
+            limit = int(q.get("limit", "") or 0)
+            offset = int(q.get("offset", "") or 0)
+        except (TypeError, ValueError):
+            return self.json({"success": False, "error": "limit/offset 需为整数"}, status_code=400)
+        if limit < 0 or offset < 0:
+            return self.json({"success": False, "error": "limit/offset 不能为负"}, status_code=400)
+        order_by = (q.get("order_by", "") or "").strip() or None
+        order = (q.get("order", "") or "").strip().lower() or "asc"
+        if order not in ("asc", "desc"):
+            return self.json({"success": False, "error": "order 需为 asc|desc"}, status_code=400)
+
+        # 收集有效条件（跳过空值条件）；同下标字段/操作/值/连接符为一组
+        conds = []
+        n = max(len(fields), len(ops), len(vals))
+        for i in range(n):
+            f = (fields[i] if i < len(fields) else "").strip()
+            op = (ops[i] if i < len(ops) else "").strip().lower()
+            v = (vals[i] if i < len(vals) else "").strip()
+            if not f or not v:
+                continue
+            if f not in _REPORT_SEARCH_FIELDS:
+                return self.json(
+                    {"success": False,
+                     "error": f"不支持的字段: {f}（可选 {', '.join(_REPORT_SEARCH_FIELDS)}）"},
+                    status_code=400,
+                )
+            if op not in ("eq", "like"):
+                return self.json({"success": False, "error": "op 需为 eq|like"}, status_code=400)
+            if i < len(conns):
+                c = conns[i].strip().lower()
+            else:
+                c = ""
+            conds.append({"field": f, "op": op, "value": v, "conn": c})
+
+        def _query() -> dict:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                where_sql = ""
+                params: list = []
+                for idx, cd in enumerate(conds):
+                    if cd["op"] == "like":
+                        piece = f"{cd['field']} LIKE ?"
+                        params.append(f"%{cd['value']}%")
+                    else:
+                        piece = f"{cd['field']} = ?"
+                        params.append(cd["value"])
+                    if idx == 0:
+                        where_sql = piece
+                    else:
+                        rel = cd["conn"] if cd["conn"] in ("and", "or") else "and"
+                        where_sql = f"({where_sql}) {rel.upper()} ({piece})"
+                where_sql = (" WHERE " + where_sql) if where_sql else ""
+
+                sel_fields = ", ".join(_REPORT_SEARCH_FIELDS)
+                if order_by is not None:
+                    if order_by not in _REPORT_SEARCH_FIELDS:
+                        return {"error": f"order_by 不支持字段: {order_by}"}
+                    order_sql = f"{order_by} {order.upper()}"
+                else:
+                    order_sql = "room_name ASC, entity_id ASC"
+
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM {TABLE_REPORT_ENTITIES}{where_sql}", params
+                ).fetchone()[0]
+
+                sql = (f"SELECT id, {sel_fields}, last_report_time "
+                       f"FROM {TABLE_REPORT_ENTITIES}{where_sql} "
+                       f"ORDER BY {order_sql}")
+                if limit > 0:
+                    sql += " LIMIT ? OFFSET ?"
+                    params = params + [limit, offset]
+                rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+                return {"total": total, "rows": rows}
+            finally:
+                conn.close()
+
+        try:
+            result = await self._exec_in_executor(hass, _query)
+            if "error" in result:
+                return self.json({"success": False, "error": result["error"]}, status_code=400)
+            return self.json({"success": True, "data": {
+                "count": result["total"],
+                "limit": limit or None,
+                "offset": offset,
+                "order": order_by or "room_name,entity_id",
+                "order_dir": order,
+                "rows": result["rows"],
+            }})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# =========================================================================== #
+#  新接口管理模块 — ext 接口（声明式定义，运行时加载执行）                        #
+#  设计要点：                                                                   #
+#   1) 固定通配路由 /ext/{name}（setup 时注册一次，此后路由表永不变）            #
+#   2) 接口定义存 api_endpoints 表，运行时读取 → 新增/修改/启停接口无需重启 HA   #
+#   3) 鉴权完全复用现有 _check_api_enabled（接口）与 _check_db_edit_enabled     #
+#      （管理增删改），不新增任何开关、不改动现有鉴权逻辑                        #
+#   4) 旧接口（custom_routes / query 等）保持原样，不纳入本模块                 #
+# =========================================================================== #
+
+def _ext_valid_name(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_\-]{0,63}", name or ""))
+
+
+def _ext_load_def(db_path: str, name: str) -> dict | None:
+    """读取并解析接口定义（executor 内调用）。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            f"SELECT name, title, description, query_def, enabled, max_rows "
+            f"FROM {TABLE_API_ENDPOINTS} WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            return None
+        raw = row["query_def"] or ""
+        try:
+            qd = json.loads(raw) if raw else {}
+        except Exception:
+            qd = {}
+        if not isinstance(qd, dict):
+            qd = {}
+        return {
+            "name": row["name"], "title": row["title"] or "",
+            "description": row["description"] or "",
+            "query_def": qd, "enabled": int(row["enabled"] or 0),
+            "max_rows": int(row["max_rows"] or 1000),
+        }
+    finally:
+        conn.close()
+
+
+class ExtApiView(_BaseDBView):
+    """新接口模块执行路由：GET/POST /api/ha_data_store/ext/{name}
+
+    参数由接口定义中的 filters 动态参数决定；每次请求实时读取定义（变更立即生效）。
+    """
+
+    url = "/api/ha_data_store/ext/{name}"
+    name = "api:ha_data_store:ext"
+
+    async def _handle(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        db_path = self._db_path
+        name = (request.match_info.get("name") or "").strip()
+        if not _ext_valid_name(name):
+            return self.json({"success": False, "error": "接口名非法"}, status_code=400)
+
+        # 每次请求实时读取定义（不缓存定义内容 → 管理页改完即刻生效，无需重启）
+        try:
+            ep = await self._exec_in_executor(hass, _ext_load_def, db_path, name)
+        except Exception as exc:
+            _LOGGER.exception("[ext] 读取接口定义失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+        if ep is None:
+            return self.json({"success": False, "error": f"接口 '{name}' 不存在"}, status_code=404)
+        if not ep["enabled"]:
+            return self.json({"success": False, "error": f"接口 '{name}' 已停用"}, status_code=403)
+
+        qd = ep["query_def"]
+        if not qd.get("table"):
+            return self.json({"success": False, "error": "接口定义不完整（缺少数据表）"}, status_code=500)
+
+        # 收集参数值：query → body(json) 合并
+        values: dict = {}
+        for k, v in request.query.items():
+            values[k] = v
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                if isinstance(body, dict):
+                    for k, v in body.items():
+                        values[k] = v
+            except Exception:
+                pass
+        # 排除控制参数
+        for ctrl in ("key", "_debug", "include_sql", "_", "limit", "offset"):
+            values.pop(ctrl, None)
+
+        try:
+            result = await self._exec_in_executor(
+                hass, _bv2_execute, db_path, qd, values, ep["max_rows"]
+            )
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            _LOGGER.exception("[ext] 接口 %s 执行失败", name)
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        out = {
+            "success": True,
+            "endpoint": {"name": ep["name"], "title": ep["title"],
+                         "description": ep["description"]},
+            "count": result.get("count"),
+            "columns": result.get("columns") or [],
+            "rows": result.get("rows") or [],
+            "aggs": result.get("aggs") or {},
+        }
+        if request.query.get("_debug") == "1":
+            out["sql"] = result.get("sql")
+        return self.json(out)
+
+    async def get(self, request: web.Request) -> web.Response:
+        return await self._handle(request)
+
+    async def post(self, request: web.Request) -> web.Response:
+        return await self._handle(request)
+
+
+class ExtApiManageView(_BaseDBView):
+    """新接口管理：GET 列表 / POST 新增或更新或启停。
+
+    鉴权：沿用 _check_db_edit_enabled（管理面板登录 + 编辑开关），与自定义路由管理一致。
+    """
+
+    url = "/api/ha_data_store/ext_manage"
+    name = "api:ha_data_store:ext_manage"
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        db_path = self._db_path
+
+        def _load():
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    f"SELECT name, title, description, enabled, max_rows, "
+                    f"created_at, updated_at FROM {TABLE_API_ENDPOINTS} "
+                    f"ORDER BY name"
+                ).fetchall()
+                out = []
+                for r in rows:
+                    item = dict(r)
+                    raw_qd = conn.execute(
+                        f"SELECT query_def FROM {TABLE_API_ENDPOINTS} WHERE name = ?",
+                        (r["name"],)
+                    ).fetchone()["query_def"] or "{}"
+                    item["query_def"] = raw_qd
+                    try:
+                        qd = json.loads(raw_qd)
+                    except Exception:
+                        qd = {}
+                    if isinstance(qd, dict):
+                        item["table"] = qd.get("table") or ""
+                        item["params"] = _bv2_param_schema(qd)
+                    out.append(item)
+                return out
+            finally:
+                conn.close()
+
+        try:
+            data = await self._exec_in_executor(hass, _load)
+            return self.json({"success": True, "data": data})
+        except Exception as exc:
+            _LOGGER.exception("[ext] 读取接口列表失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        db_path = self._db_path
+        tz = hass.data.get(DOMAIN, {}).get("timezone", DEFAULT_TIMEZONE)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        name = str(body.get("name") or "").strip()
+        if not _ext_valid_name(name):
+            return self.json(
+                {"success": False, "error": "name 需以字母开头，仅含字母/数字/下划线/中划线，长度≤64"},
+                status_code=400,
+            )
+
+        # 启停切换：仅带 name + enabled
+        if "enabled" in body and "query_def" not in body and "title" not in body:
+            try:
+                enabled = 1 if int(body.get("enabled", 1)) else 0
+            except (TypeError, ValueError):
+                return self.json({"success": False, "error": "enabled 必须为 0/1"}, status_code=400)
+
+            def _toggle():
+                conn = sqlite3.connect(db_path)
+                try:
+                    cur = conn.execute(
+                        f"UPDATE {TABLE_API_ENDPOINTS} SET enabled = ?, updated_at = ? WHERE name = ?",
+                        (enabled, _get_local_iso(tz), name),
+                    )
+                    conn.commit()
+                    return cur.rowcount
+                finally:
+                    conn.close()
+
+            try:
+                n = await self._exec_in_executor(hass, _toggle)
+                if n == 0:
+                    return self.json({"success": False, "error": f"接口 '{name}' 不存在"}, status_code=404)
+                return self.json({"success": True, "message": f"接口 '{name}' 已{'启用' if enabled else '停用'}",
+                                  "enabled": enabled})
+            except Exception as exc:
+                return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        qd_raw = body.get("query_def")
+        if isinstance(qd_raw, str):
+            try:
+                qd = json.loads(qd_raw) if qd_raw.strip() else {}
+            except Exception as exc:
+                return self.json({"success": False, "error": f"query_def 不是合法 JSON: {exc}"}, status_code=400)
+        elif isinstance(qd_raw, dict):
+            qd = qd_raw
+        else:
+            qd = {}
+
+        title = str(body.get("title") or "").strip()
+        description = str(body.get("description") or "").strip()
+        try:
+            max_rows = int(body.get("max_rows") or 1000)
+        except (TypeError, ValueError):
+            max_rows = 1000
+        max_rows = max(1, min(max_rows, 50000))
+
+        # 保存前先严格校验定义（表/列/操作符/聚合白名单）
+        try:
+            await self._exec_in_executor(hass, _bv2_validate, qd, db_path)
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        def _save():
+            conn = sqlite3.connect(db_path)
+            try:
+                now = _get_local_iso(tz)
+                exists = conn.execute(
+                    f"SELECT 1 FROM {TABLE_API_ENDPOINTS} WHERE name = ?", (name,)
+                ).fetchone()
+                if exists:
+                    conn.execute(
+                        f"UPDATE {TABLE_API_ENDPOINTS} SET title = ?, description = ?, "
+                        f"query_def = ?, max_rows = ?, updated_at = ? WHERE name = ?",
+                        (title, description, json.dumps(qd, ensure_ascii=False), max_rows, now, name),
+                    )
+                    action = "更新"
+                else:
+                    conn.execute(
+                        f"INSERT INTO {TABLE_API_ENDPOINTS} "
+                        f"(name, title, description, query_def, enabled, cache_sql, max_rows, created_at, updated_at) "
+                        f"VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?)",
+                        (name, title, description, json.dumps(qd, ensure_ascii=False), max_rows, now, now),
+                    )
+                    action = "新增"
+                conn.commit()
+                return action
+            finally:
+                conn.close()
+
+        try:
+            action = await self._exec_in_executor(hass, _save)
+            return self.json({"success": True, "message": f"接口 '{name}' 已{action}", "name": name})
+        except Exception as exc:
+            _LOGGER.exception("[ext] 保存接口失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class ExtApiDeleteView(_BaseDBView):
+    """新接口管理：删除接口 POST /api/ha_data_store/ext_manage/delete"""
+
+    url = "/api/ha_data_store/ext_manage/delete"
+    name = "api:ha_data_store:ext_manage_delete"
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        db_path = self._db_path
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return self.json({"success": False, "error": "name 不能为空"}, status_code=400)
+
+        def _delete():
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.execute(
+                    f"DELETE FROM {TABLE_API_ENDPOINTS} WHERE name = ?", (name,)
+                )
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+        try:
+            n = await self._exec_in_executor(hass, _delete)
+            if n == 0:
+                return self.json({"success": False, "error": f"接口 '{name}' 不存在"}, status_code=404)
+            return self.json({"success": True, "message": f"接口 '{name}' 已删除"})
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class ExtApiTestView(_BaseDBView):
+    """新接口管理：试运行（不保存，直接校验+执行）POST /api/ha_data_store/ext_manage/test"""
+
+    url = "/api/ha_data_store/ext_manage/test"
+    name = "api:ha_data_store:ext_manage_test"
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        db_path = self._db_path
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        qd = body.get("query_def")
+        if isinstance(qd, str):
+            try:
+                qd = json.loads(qd) if qd.strip() else {}
+            except Exception as exc:
+                return self.json({"success": False, "error": f"query_def 不是合法 JSON: {exc}"}, status_code=400)
+        if not isinstance(qd, dict):
+            qd = {}
+        values = body.get("values") if isinstance(body.get("values"), dict) else {}
+        try:
+            max_rows = int(body.get("max_rows") or 50)
+        except (TypeError, ValueError):
+            max_rows = 50
+
+        try:
+            await self._exec_in_executor(hass, _bv2_validate, qd, db_path)
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        try:
+            result = await self._exec_in_executor(
+                hass, _bv2_execute, db_path, qd, values, max_rows
+            )
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        return self.json({
+            "success": True,
+            "sql": result.get("sql"),
+            "columns": result.get("columns") or [],
+            "rows": result.get("rows") or [],
+            "count": result.get("count"),
+            "aggs": result.get("aggs") or {},
+        })
 
 
 # =========================================================================== #

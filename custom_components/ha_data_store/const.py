@@ -10,6 +10,7 @@ DATABASE_FILENAME = "ha_data_store.db"
 TABLE_ENTITY_CONFIGS = "entity_configs"
 TABLE_DEVICE_HISTORY = "device_history"
 TABLE_CUSTOM_ROUTES = "custom_routes"
+TABLE_API_ENDPOINTS = "api_endpoints"
 TABLE_ATTR_TYPE_DEFS = "attr_type_defs"
 TABLE_EXPORT_CONFIGS = "export_configs"
 TABLE_FILE_SOURCE_CONFIGS = "file_source_configs"
@@ -107,4 +108,4 @@ AUTOMATION_LOG_RETENTION_DAYS = 30  # 执行记录保留天数（自动清理）
 AUTOMATION_LOG_CLEANUP_EVERY = 60   # 每 N 次 tick 清理一次过期执行记录
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "3.6.0"
+VERSION = "3.6.5"

@@ -12,7 +12,11 @@
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
          background: var(--bg); color: var(--text); padding: 0; min-height: 100vh; }
   .header-bar { position: sticky; top: 0; z-index: 100; background: var(--bg); padding: 16px 20px 0; }
-  h1 { font-size: 1.5rem; margin-bottom: 12px; color: var(--accent); }
+  h1 { font-size: 1.5rem; margin-bottom: 12px; color: var(--accent);
+       display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  .hds-version { font-size: 12px; font-weight: 500; color: var(--text2);
+                 background: var(--card); border: 1px solid var(--border);
+                 border-radius: 10px; padding: 3px 10px; margin-left: auto; letter-spacing: .3px; }
   /* tabs */
   .tabs { display: flex; gap: 2px; margin-bottom: 0; border-bottom: 2px solid var(--border); background: var(--bg); }
   .content-area { padding: 16px 20px 20px; }
@@ -211,7 +215,7 @@
 </head>
 <body>
 <div class="header-bar">
-<h1>管理面板 - HA数据统一存储系统</h1>
+<h1>管理面板 - HA数据统一存储系统<span id="hdsVersion" class="hds-version"></span></h1>
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('monitor')">系统监控</button>
@@ -1197,6 +1201,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="api-sub-tab-btn active" onclick="switchApiSubTab('gen')">🔗 API 地址生成器</button>
     <button class="api-sub-tab-btn" onclick="switchApiSubTab('routes')">🛠 自定义路由管理</button>
     <button class="api-sub-tab-btn" onclick="switchApiSubTab('builder')">🧩 查询构造器</button>
+    <button class="api-sub-tab-btn" onclick="switchApiSubTab('ext')">🧩 接口管理（新接口）</button>
   </div>
   <div id="apisub-gen" class="api-sub-panel active">
   <div class="section" style="margin-bottom:10px">
@@ -1216,6 +1221,10 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="entities_daily_by_day">📈 全部实体按月按日（按日分组）</option>
           <option value="entity_hour_dist">📊 实体时段分布（几点使用/分时用电）</option>
           <option value="entity_hour_dates">📅 设备小时开启日期（几点开过）</option>
+          <option value="entities_period_agg">📈 多实体按日/月/年汇聚（时长/用电/条数）</option>
+          <option value="entities_dates"> 1️⃣ 多实体有数据日期</option>
+          <option value="entities_hours_agg">🕐 多实体时段分布（分时用电）</option>
+          <option value="entities_weekday_hours">📊 多实体时段分布（周几/月/几号 × 小时）</option>
           <option value="device_summary">设备汇总</option>
           <option value="device_users_list">👥 设备操作用户列表</option>
           <option value="device_user_history">👤 按用户查设备记录</option>
@@ -1321,8 +1330,11 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </optgroup>
         <optgroup label="实体上报">
           <option value="report_auto_entities">🤖 自动化实体列表</option>
+          <option value="report_search">🔎 实体上报复合查询</option>
         </optgroup>
         <optgroup label="自定义路由" id="apiCustomRoutesGroup">
+        </optgroup>
+        <optgroup label="🧩 新接口（ext·免重启）" id="apiExtGroup">
         </optgroup>
       </select>
     </div>
@@ -1418,8 +1430,84 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <option value="12">12 时</option><option value="13">13 时</option><option value="14">14 时</option>
         <option value="15">15 时</option><option value="16">16 时</option><option value="17">17 时</option>
         <option value="18">18 时</option><option value="19">19 时</option><option value="20">20 时</option>
-        <option value="21">21 时</option><option value="22">22 时</option><option value="23">23 时</option>
+        <option value="21">21 时</option>        <option value="22">22 时</option><option value="23">23 时</option>
       </select>
+    </div>
+    <div id="apiReportSearchRow" style="display:none">
+      <label>条件组合（AND/OR，从上到下依次组合）</label>
+      <div id="reportCondList"></div>
+      <button type="button" class="apiMiniBtn" onclick="_addReportCondRow()">＋ 添加条件</button>
+      <div style="margin-top:6px">
+        <label style="width:auto">limit(可选)</label>
+        <input type="number" id="reportLimit" min="0" placeholder="默认不限" style="width:90px" oninput="generateApiUrl()">
+        <label style="width:auto;margin-left:12px">offset(可选)</label>
+        <input type="number" id="reportOffset" min="0" value="0" style="width:90px" oninput="generateApiUrl()">
+        <label style="width:auto;margin-left:12px">排序字段(可选)</label>
+        <select id="reportOrderField" onchange="generateApiUrl()">
+          <option value="">默认(房间,实体)</option>
+          <option value="entity_id">实体ID</option>
+          <option value="name">名称</option>
+          <option value="icon">图标</option>
+          <option value="room_name">房间</option>
+          <option value="rooms">使用房间</option>
+          <option value="entity_type">类型</option>
+          <option value="entity_device">设备</option>
+          <option value="entity_area">区域</option>
+          <option value="card_type">卡片类型</option>
+          <option value="source">来源</option>
+        </select>
+        <select id="reportOrderDir" onchange="generateApiUrl()">
+          <option value="asc">升序</option>
+          <option value="desc">降序</option>
+        </select>
+      </div>
+    </div>
+    <div id="apiEntitiesAggRow" style="display:none" class="full">
+      <label>多实体接口（entities 逗号分隔，留空 = 全部；时间段可选）</label>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;width:100%">
+        <div style="flex:1 1 220px">
+          <label>实体ID(逗号分隔)</label>
+          <input type="text" id="apiMultiEntities" placeholder="switch.a,switch.b（留空=全部）" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px" oninput="generateApiUrl()">
+        </div>
+        <div id="apiAggBucketWrap" style="display:none">
+          <label>汇聚粒度</label>
+          <select id="apiAggBucket" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="day">按日</option>
+            <option value="month">按月</option>
+            <option value="year">按年</option>
+          </select>
+        </div>
+        <div id="apiAggViewWrap" style="display:none">
+          <label>返回结构</label>
+          <select id="apiAggView" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="entity">实体→日期（每实体含系列）</option>
+            <option value="date">日期→实体（日期唯一，实体含 running）</option>
+          </select>
+        </div>
+        <div id="apiGridDimWrap" style="display:none">
+          <label>分组维度</label>
+          <select id="apiGridDim" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="week">星期几（周一~周日）</option>
+            <option value="month">月份（1~12月）</option>
+            <option value="day">几号（1~31日）</option>
+          </select>
+        </div>
+        <div id="apiMultiGroupWrap" style="display:none">
+          <label>分组方式</label>
+          <select id="apiMultiGroup" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="0">① 合并返回</option>
+            <option value="1">② 按实体分组</option>
+          </select>
+        </div>
+        <div>
+          <label>开始日期(可选)</label>
+          <input type="date" id="apiAggStart" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+        </div>
+        <div>
+          <label>结束日期(可选)</label>
+          <input type="date" id="apiAggEnd" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+        </div>
+      </div>
     </div>
     <div id="apiWhScopeRow" style="display:none" class="full">
       <label>统计范围（全屋用电/用时）</label>
@@ -1592,6 +1680,10 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">entities_daily_by_day</td><td>全部实体按月按日（按日分组）· month · days[].summary(device_count/count/时长/用电) + days[].devices + totals</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entity_hour_dist</td><td>实体时段分布（几点使用/分时用电）· entity_id + 可选范围(全部/年/月/date/start+end) · hours[{hour,count,duration_hour,energy_kwh}]+totals</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entity_hour_dates</td><td>设备小时开启日期（几点开过）· entity_id + hour(0-23) + 可选范围(全部/年/月/date/start+end) · {count, dates:[...]}</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entities_period_agg</td><td>多实体按日/月/年汇聚 · entities(逗号)+bucket+view(entity实体→日期/date日期→实体,实体含running)+start/end · 顶层 totals</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entities_dates</td><td>多实体有数据日期 · entities+start/end+group(0合并日期/1按实体) · {all_dates 或 entities[].dates}</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entities_hours_agg</td><td>多实体时段分布 · entities+start/end+group(0全部合并/1按实体) · hours[{hour,count,duration_hour,energy_kwh}]+totals</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entities_weekday_hours</td><td>多实体时段分布（周几/月/几号 × 小时）· entities+start/end+dim(week|month|day)+group(0合并/1每格含devices) · dim=week→weekdays[兼容]；month/day→cells[{index,label,totals,hours[24],devices?}]</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_summary</td><td>设备汇总 · entity_id/date/month/year/room</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_users_list</td><td>设备操作用户列表 · date/month/year/room · 各用户开启/关闭次数</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_user_history</td><td>按用户查设备记录 · user_name/direction(on|off|both)/entity_id/date/room/limit · 每条标注 matched</td></tr>
@@ -1956,12 +2048,79 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
   </div>
 </div>
 
+  <!-- 🧩 接口管理（新接口）面板 —— 新增/修改接口无需重启 HA -->
+  <div id="apisub-ext" class="api-sub-panel">
+    <style>
+      #apisub-ext input, #apisub-ext select, #apisub-ext textarea, #apisub-ext button {
+        min-width: 0; box-sizing: border-box;
+      }
+      #extTable th, #extTable td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12px; text-align: left; vertical-align: middle; }
+      #extTable th { color: var(--text2); font-weight: 600; }
+      #extTable tr:hover { background: var(--bg); }
+      .ext-badge { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; border:1px solid var(--border); }
+      .ext-badge.on { color: var(--green); }
+      .ext-badge.off { color: var(--text3); }
+    </style>
+    <div class="section" style="margin-top:16px">
+      <h3>🧩 接口管理（新接口）</h3>
+      <div class="hint">
+        新接口统一走固定路由 <code>GET/POST /api/ha_data_store/ext/{接口名}</code>：定义存库、运行时加载，
+        <b>新增 / 修改 / 启停接口均无需重启 HA</b>（改 .py 后端逻辑仍需重启）。
+        <b>旧接口（自定义路由 / query 等）不在本模块内，保持原样。</b>
+        鉴权与现有接口完全一致（<code>api_enabled</code> + API Key + 局域网判断），未新增任何开关。
+      </div>
+
+      <div style="display:flex;gap:8px;margin:10px 0;align-items:center;flex-wrap:wrap">
+        <button class="btn-green" onclick="extNewForm()" style="padding:6px 14px">➕ 新建接口</button>
+        <button class="btn-accent" onclick="extLoadList()" style="padding:6px 14px">🔄 刷新列表</button>
+        <span id="extListStatus" style="font-size:12px;color:var(--text2)"></span>
+      </div>
+
+      <!-- 编辑表单 -->
+      <div id="extFormWrap" style="display:none;margin:10px 0;background:var(--bg);padding:12px;border-radius:6px;border:1px solid var(--border)">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label>接口名 name（URL 中使用，字母开头）</label>
+            <input type="text" id="extName" placeholder="如：device_hour_dist" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+          <div><label>显示名 title</label>
+            <input type="text" id="extTitle" placeholder="如：设备时段分布" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label>描述 description</label>
+            <input type="text" id="extDesc" placeholder="接口用途说明" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+          <div><label>最大返回行数 max_rows</label>
+            <input type="number" id="extMaxRows" value="1000" min="1" max="50000" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+        </div>
+        <div style="margin-bottom:8px">
+          <label>接口定义 query_def（JSON，可在「查询构造器」里配好后复制过来）</label>
+          <textarea id="extQueryDef" placeholder='{"table":"device_history","filters":[...],"aggs":[...]}' style="width:100%;height:150px;padding:6px;font-family:monospace;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;resize:vertical"></textarea>
+        </div>
+        <div id="extParamsWrap" style="margin-bottom:8px"></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn-green" onclick="extSave()" style="padding:6px 14px">💾 保存（立即生效，无需重启）</button>
+          <button class="btn-accent" onclick="extTest()" style="padding:6px 14px">▶ 试运行</button>
+          <button onclick="extCancelForm()" style="padding:6px 12px">取消</button>
+          <span id="extFormStatus" style="font-size:12px;color:var(--text2)"></span>
+        </div>
+        <div id="extTestResult" style="margin-top:10px;display:none"></div>
+      </div>
+
+      <!-- 列表 -->
+      <div id="extListWrap" style="border:1px solid var(--border);border-radius:6px;overflow:auto;max-height:420px"></div>
+    </div>
+  </div>
 </div>
 
 <script>
 // ==============================
 //  API Key 自动注入
 // ==============================
+// 右上角显示集成版本号（服务端注入 window.__HDS_VERSION__）
+(function () {
+  var v = window.__HDS_VERSION__ || '';
+  var el = document.getElementById('hdsVersion');
+  if (el && v) el.textContent = 'v' + v;
+})();
+
 function getPageKey() { return new URLSearchParams(window.location.search).get('key') || window.__HDS_FIRST_KEY__ || ''; }
 const origFetch = window.fetch;
 window.fetch = function(url, opts) {
@@ -2475,11 +2634,13 @@ function renderCustomRouteParams(path) {
   generateApiUrl();
 }
 
-// 初始化时加载路由列表 + 填充地址生成器下拉
+// 初始化时加载路由列表 + 新接口列表 + 填充地址生成器下拉
 document.addEventListener('DOMContentLoaded', () => {
   setTimeout(() => {
     if (typeof loadCustomRoutes === 'function') loadCustomRoutes();
     if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
+    // 新接口（ext）：填充地址生成器的 ext 分组
+    if (typeof extLoadIntoApi === 'function') extLoadIntoApi();
   }, 500);
 });
 
@@ -4073,6 +4234,10 @@ function switchApiSubTab(name) {
   }
   if (name === 'builder' && typeof builderTabOpen === 'function') {
     builderTabOpen();
+  }
+  // 切到「接口管理（新接口）」时刷新列表
+  if (name === 'ext' && typeof extTabOpen === 'function') {
+    extTabOpen();
   }
 }
 
@@ -6607,6 +6772,58 @@ function _showMediaApiRows(qt) {
   }
 }
 
+// 实体上报复合查询：添加/删除一行条件（字段 / 匹配方式 / 值 / 且或连接符）
+function _addReportCondRow() {
+  const list = document.getElementById('reportCondList');
+  const row = document.createElement('div');
+  row.className = 'rep-cond';
+  row.style.margin = '3px 0';
+  row.style.display = 'flex';
+  row.style.alignItems = 'center';
+  row.style.gap = '6px';
+  row.style.flexWrap = 'wrap';
+  const fields = ['entity_id','name','icon','room_name','source','rooms','entity_type','entity_device','entity_area','card_type'];
+  const labels = {'entity_id':'实体ID','name':'名称','icon':'图标','room_name':'房间','source':'来源','rooms':'使用房间','entity_type':'类型','entity_device':'设备','entity_area':'区域','card_type':'卡片类型'};
+  const selF = document.createElement('select');
+  selF.className = 'rep-field';
+  selF.style.minWidth = '130px';
+  fields.forEach(f => {
+    const o = document.createElement('option');
+    o.value = f; o.textContent = labels[f] || f;
+    selF.appendChild(o);
+  });
+  const selOp = document.createElement('select');
+  selOp.className = 'rep-op';
+  selOp.style.minWidth = '90px';
+  const oE = document.createElement('option'); oE.value = 'like'; oE.textContent = '模糊 LIKE'; selOp.appendChild(oE);
+  const oQ = document.createElement('option'); oQ.value = 'eq'; oQ.textContent = '精确 ='; selOp.appendChild(oQ);
+  const inV = document.createElement('input');
+  inV.className = 'rep-val';
+  inV.type = 'text';
+  inV.placeholder = '值';
+  inV.style.width = '150px';
+  const selC = document.createElement('select');
+  selC.className = 'rep-conn';
+  selC.style.minWidth = '96px';
+  const oA = document.createElement('option'); oA.value = 'and'; oA.textContent = '且 AND'; selC.appendChild(oA);
+  const oO = document.createElement('option'); oO.value = 'or'; oO.textContent = '或 OR'; selC.appendChild(oO);
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'apiMiniBtn';
+  del.textContent = '删除';
+  del.onclick = () => row.remove();
+  const lbl = document.createElement('span');
+  lbl.textContent = '连接:';
+  lbl.style.fontSize = '12px';
+  row.appendChild(selF);
+  row.appendChild(selOp);
+  row.appendChild(inV);
+  row.appendChild(lbl);
+  row.appendChild(selC);
+  row.appendChild(del);
+  list.appendChild(row);
+}
+
 // 简单自动化：根据查询类型显示对应专用字段
 function _showAutoApiRows(qt) {
   if (['auto_update','auto_delete','auto_run'].indexOf(qt) !== -1) {
@@ -6627,6 +6844,9 @@ function onApiTypeChange() {
   // 自定义路由：value 格式 "custom:{route_path}"
   const isCustomRoute = qt.startsWith('custom:');
   const isCustomRoutePath = isCustomRoute ? qt.slice('custom:'.length) : '';
+  // 新接口（ext）：value 格式 "ext:{name}"，定义存库、免重启
+  const isExt = qt.startsWith('ext:');
+  const isExtPath = isExt ? qt.slice('ext:'.length) : '';
   // 默认隐藏自定义参数区；仅自定义路由分支会重新显示
   document.getElementById('apiCustomParamsRow').style.display = 'none';
   // 默认隐藏全屋用电/用时范围行；仅 whole_house_usage 分支显示
@@ -6635,6 +6855,12 @@ function onApiTypeChange() {
   // 默认隐藏小时选择行；仅 entity_hour_dates 分支显示
   const elHourRow = document.getElementById('apiHourRow');
   if (elHourRow) elHourRow.style.display = 'none';
+  // 默认隐藏实体上报复合查询区；仅 report_search 分支显示
+  const elReportSearch = document.getElementById('apiReportSearchRow');
+  if (elReportSearch) elReportSearch.style.display = 'none';
+  // 默认隐藏多实体接口区；仅相关分支显示
+  const elEntitiesAgg = document.getElementById('apiEntitiesAggRow');
+  if (elEntitiesAgg) elEntitiesAgg.style.display = 'none';
   const isRoomsDaily = qt === 'rooms_daily';
   const isVacuumHistory = qt === 'vacuum_history';
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
@@ -6679,6 +6905,14 @@ function onApiTypeChange() {
   const isAutoApi = qt.startsWith('auto_');
   // 实体上报 RESTful API（自动化实体列表，无参数仅 key）
   const isReportAutoEntities = qt === 'report_auto_entities';
+  // 实体上报复合查询 RESTful API（独立路径 /report/search）
+  const isReportSearch = qt === 'report_search';
+  // 多实体接口：汇聚(period_agg)/日期(dates)/时段(hours_agg)
+  const isEntitiesAgg = qt === 'entities_period_agg';
+  const isEntitiesDates = qt === 'entities_dates';
+  const isEntitiesHours = qt === 'entities_hours_agg';
+  const isEntitiesWeekly = qt === 'entities_weekday_hours';
+  const isMultiEntitiesApi = isEntitiesAgg || isEntitiesDates || isEntitiesHours || isEntitiesWeekly;
   // 用电计量 RESTful API（独立路径 /power_energy）
   const isPowerApi = qt.startsWith('power_');
   // 用户动作查询组
@@ -6737,6 +6971,35 @@ function onApiTypeChange() {
     restoreDateFieldSelect();
   } else {
     document.getElementById('apiDateFieldRow').style.display = 'none';
+  }
+
+  if (isExtPath) {
+    // 新接口（ext）：隐藏所有常规输入行，只显示参数区（复用自定义参数区）
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiHealthNameRow').style.display = 'none';
+    document.getElementById('apiHealthTypeRow').style.display = 'none';
+    document.getElementById('apiMediaUserRow').style.display = 'none';
+    document.getElementById('apiMediaIdRow').style.display = 'none';
+    document.getElementById('apiMediaNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    document.getElementById('apiCustomParamsRow').style.display = 'block';
+    renderExtParams(isExtPath);
+    return;
   }
 
   if (isCustomRoute) {
@@ -7037,6 +7300,15 @@ function onApiTypeChange() {
     // 音乐媒体：隐藏所有常规控件，只显示对应专用字段
     _hideAllApiFormRows();
     _showMediaApiRows(qt);
+  } else if (isReportSearch) {
+    // 实体上报复合查询：显示动态条件区（字段/匹配方式/值/AND/OR + limit/offset/排序）
+    _hideAllApiFormRows();
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiReportSearchRow').style.display = 'block';
+    if (document.querySelectorAll('#reportCondList .rep-cond').length === 0) {
+      _addReportCondRow();
+    }
   } else if (isReportAutoEntities) {
     // 实体上报：自动化实体列表，无参数，仅 key
     _hideAllApiFormRows();
@@ -7137,6 +7409,31 @@ function onApiTypeChange() {
     document.getElementById('apiDateMode').value = isDeviceUserByDate ? 'single' : 'none';
     onDateModeChange();
     loadApiEntitiesAndRooms();
+  } else if (isMultiEntitiesApi) {
+    // 多实体接口：显示多实体 + 时间段 区（汇聚接口另显粒度；日期/时段接口显示分组方式）
+    document.getElementById('apiEntityId').parentNode.style.display = 'none';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
+    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiMetricsRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    document.getElementById('apiMonthRow').style.display = 'none';
+    document.getElementById('apiYearRow').style.display = 'none';
+    document.getElementById('apiHourRow').style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    document.getElementById('apiEntitiesAggRow').style.display = 'block';
+    document.getElementById('apiAggBucketWrap').style.display = isEntitiesAgg ? '' : 'none';
+    document.getElementById('apiAggViewWrap').style.display = isEntitiesAgg ? '' : 'none';
+    document.getElementById('apiGridDimWrap').style.display = isEntitiesWeekly ? '' : 'none';
+    document.getElementById('apiMultiGroupWrap').style.display = (isEntitiesDates || isEntitiesHours || isEntitiesWeekly) ? '' : 'none';
   } else if (isEntityHourDates) {
     // 设备小时开启日期：实体ID + 小时(必填) + 可选时间范围（全部历史/年/月/指定日期/起止范围）
     document.getElementById('apiEntityId').parentNode.style.display = '';
@@ -7463,6 +7760,27 @@ function generateApiUrl() {
   let url = BASE_PATH + BASE_URL + '?type=' + qt;
   if (selectedApiKey) url += '&key=' + encodeURIComponent(selectedApiKey);
 
+  // 新接口（ext）：独立 RESTful 路径 /ext/{name}，参数从 apiCustomParamsBox 读取
+  if (qt.startsWith('ext:')) {
+    const extName = qt.slice('ext:'.length);
+    let extUrl = BASE_PATH + '/api/ha_data_store/ext/' + encodeURIComponent(extName);
+    if (selectedApiKey) extUrl += '?key=' + encodeURIComponent(selectedApiKey);
+    const params = {};
+    document.querySelectorAll('#apiCustomParamsBox input').forEach(inp => {
+      const key = inp.getAttribute('data-name');
+      const val = inp.value;
+      if (key && val !== '') params[key] = val;
+    });
+    const keys = Object.keys(params).sort();
+    let sep = selectedApiKey ? '&' : '?';
+    for (const k of keys) {
+      extUrl += sep + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+      sep = '&';
+    }
+    document.getElementById('apiUrlOutput').value = extUrl;
+    return;
+  }
+
   // 自定义路由：独立 RESTful 路径，参数从 apiCustomParamsBox 读取，按字母序拼接
   if (qt.startsWith('custom:')) {
     const routePath = qt.slice('custom:'.length);
@@ -7619,6 +7937,37 @@ function generateApiUrl() {
     document.getElementById('apiUrlOutput').value = reUrl;
     return;
   }
+
+  // 实体上报复合查询（独立 RESTful 路径 /api/ha_data_store/report/search）
+  if (qt === 'report_search') {
+    let rsUrl = BASE_PATH + '/api/ha_data_store/report/search';
+    if (selectedApiKey) rsUrl += '?key=' + encodeURIComponent(selectedApiKey);
+    const rows = document.querySelectorAll('#reportCondList .rep-cond');
+    let condCount = 0;
+    rows.forEach(row => {
+      const f = (row.querySelector('.rep-field') ? row.querySelector('.rep-field').value : '');
+      const op = (row.querySelector('.rep-op') ? row.querySelector('.rep-op').value : 'eq');
+      const v = (row.querySelector('.rep-val') ? row.querySelector('.rep-val').value : '').trim();
+      if (!f || !v) return;
+      const c = (row.querySelector('.rep-conn') ? row.querySelector('.rep-conn').value : 'and');
+      const sep = (rsUrl.indexOf('?') === -1) ? '?' : '&';
+      rsUrl += sep + 'f=' + encodeURIComponent(f) + '&op=' + encodeURIComponent(op)
+             + '&v=' + encodeURIComponent(v) + '&c=' + encodeURIComponent(c);
+      condCount++;
+    });
+    const limit = document.getElementById('reportLimit').value;
+    const offset = document.getElementById('reportOffset').value;
+    const of = document.getElementById('reportOrderField').value;
+    const od = document.getElementById('reportOrderDir').value;
+    if (limit !== '') rsUrl += (rsUrl.indexOf('?') === -1 ? '?' : '&') + 'limit=' + encodeURIComponent(limit);
+    if (offset && offset !== '0') rsUrl += (rsUrl.indexOf('?') === -1 ? '?' : '&') + 'offset=' + encodeURIComponent(offset);
+    if (of) rsUrl += (rsUrl.indexOf('?') === -1 ? '?' : '&') + 'order_by=' + encodeURIComponent(of)
+                   + '&order=' + encodeURIComponent(od);
+    if (condCount === 0) rsUrl += (rsUrl.indexOf('?') === -1 ? '?' : '&') + '_all=1';
+    document.getElementById('apiUrlOutput').value = rsUrl;
+    return;
+  }
+
 
   // 用电计量 API（独立 RESTful 路径 /api/ha_data_store/power_energy）
   if (qt.startsWith('power_')) {
@@ -7848,6 +8197,28 @@ function generateApiUrl() {
       const y = document.getElementById('apiYear').value;
       if (m) url += '&month=' + encodeURIComponent(m);
       else if (y) url += '&year=' + encodeURIComponent(y);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
+  // 多实体接口：汇聚 / 日期 / 时段（entities 逗号分隔，留空=全部；可选时间段）
+  if (qt === 'entities_period_agg' || qt === 'entities_dates'
+      || qt === 'entities_hours_agg' || qt === 'entities_weekday_hours') {
+    const ents = document.getElementById('apiMultiEntities').value.trim();
+    if (ents) url += '&entities=' + encodeURIComponent(ents);
+    const sD = document.getElementById('apiAggStart').value;
+    const eD = document.getElementById('apiAggEnd').value;
+    if (sD) url += '&start=' + encodeURIComponent(sD);
+    if (eD) url += '&end=' + encodeURIComponent(eD);
+    if (qt === 'entities_period_agg') {
+      url += '&bucket=' + encodeURIComponent(document.getElementById('apiAggBucket').value)
+           + '&view=' + encodeURIComponent(document.getElementById('apiAggView').value);
+    } else if (qt === 'entities_weekday_hours') {
+      url += '&dim=' + encodeURIComponent(document.getElementById('apiGridDim').value)
+           + '&group=' + encodeURIComponent(document.getElementById('apiMultiGroup').value);
+    } else {
+      url += '&group=' + encodeURIComponent(document.getElementById('apiMultiGroup').value);
     }
     document.getElementById('apiUrlOutput').value = url;
     return;
@@ -9244,6 +9615,311 @@ async function builderSave() {
     loadCustomRoutes();
     if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
   } catch (e) { bldErr('保存请求失败：' + e); }
+}
+
+// ============================================================
+//  接口管理（新接口）— ext 模块
+//  新增/修改/启停接口即时生效，无需重启 HA（改 .py 仍需重启）
+// ============================================================
+const EXT_API = '/api/ha_data_store/ext_manage';
+const EXT_API_DELETE = '/api/ha_data_store/ext_manage/delete';
+const EXT_API_TEST = '/api/ha_data_store/ext_manage/test';
+
+function extTabOpen() { extLoadList(); }
+
+function extNewForm() {
+  document.getElementById('extName').value = '';
+  document.getElementById('extName').disabled = false;
+  document.getElementById('extTitle').value = '';
+  document.getElementById('extDesc').value = '';
+  document.getElementById('extMaxRows').value = 1000;
+  document.getElementById('extQueryDef').value = '';
+  document.getElementById('extParamsWrap').innerHTML = '';
+  document.getElementById('extTestResult').style.display = 'none';
+  document.getElementById('extFormWrap').style.display = '';
+  document.getElementById('extFormStatus').textContent = '';
+}
+function extCancelForm() {
+  document.getElementById('extFormWrap').style.display = 'none';
+  document.getElementById('extFormStatus').textContent = '';
+}
+function extStatus(msg, ok) {
+  const el = document.getElementById('extFormStatus');
+  if (el) { el.textContent = msg; el.style.color = ok ? 'var(--green)' : 'var(--red)'; }
+}
+function extListStatus(msg) {
+  const el = document.getElementById('extListStatus');
+  if (el) el.textContent = msg;
+}
+
+// 当前表单中的定义（解析失败返回 null）
+function extCurrentDef() {
+  const raw = document.getElementById('extQueryDef').value.trim();
+  if (!raw) { extStatus('请填写接口定义 query_def', false); return null; }
+  try {
+    const qd = JSON.parse(raw);
+    if (!qd || typeof qd !== 'object') throw new Error('定义必须是 JSON 对象');
+    return qd;
+  } catch (e) {
+    extStatus('query_def 不是合法 JSON：' + e.message, false);
+    return null;
+  }
+}
+
+async function extSave() {
+  const name = document.getElementById('extName').value.trim();
+  if (!name) { extStatus('请填写接口名 name', false); return; }
+  if (!/^[A-Za-z][A-Za-z0-9_\-]{0,63}$/.test(name)) {
+    extStatus('name 需字母开头，仅含字母/数字/下划线/中划线，长度≤64', false); return;
+  }
+  const qd = extCurrentDef();
+  if (!qd) return;
+  const payload = {
+    name: name,
+    title: document.getElementById('extTitle').value.trim(),
+    description: document.getElementById('extDesc').value.trim(),
+    max_rows: parseInt(document.getElementById('extMaxRows').value || '1000', 10),
+    query_def: qd,
+  };
+  try {
+    const resp = await fetch(EXT_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const json = await resp.json();
+    if (!json.success) { extStatus('保存失败：' + (json.error || ''), false); return; }
+    extStatus('已保存并立即生效：/api/ha_data_store/ext/' + name, true);
+    extLoadList();
+    if (typeof extLoadIntoApi === 'function') extLoadIntoApi();
+  } catch (e) { extStatus('保存请求失败：' + e, false); }
+}
+
+// 试运行：按定义中的动态参数渲染输入框，执行后展示结果
+function extRenderParams(qd) {
+  const wrap = document.getElementById('extParamsWrap');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  const filters = (qd && qd.filters) ? qd.filters : [];
+  // 从 filters 推导动态参数（与后端 _bv2_param_schema 同口径）：
+  // 跳过 fixed；op=between 额外产生一个 "_to" 参数
+  const dyn = [];
+  filters.forEach(function (f) {
+    if (!f || f.fixed) return;
+    const param = String(f.param || '').trim();
+    if (!param) return;
+    const base = String(f.desc || f.column || param);
+    dyn.push({ name: param, desc: base, def: f.default || '' });
+    if (String(f.op || '').toLowerCase() === 'between') {
+      dyn.push({ name: String(f.param2 || (param + '_to')), desc: base + ' 止', def: f.default2 || '' });
+    }
+  });
+  if (!dyn.length) { wrap.innerHTML = '<div style="font-size:12px;color:var(--text2)">（该接口无动态参数）</div>'; return; }
+  let html = '<label>试运行参数</label><div style="display:flex;gap:8px;flex-wrap:wrap">';
+  dyn.forEach(function (p) {
+    html += '<div style="min-width:150px"><label style="font-size:11px">' + escHtml(p.desc)
+         + '（' + escHtml(p.name) + '）</label>'
+         + '<input type="text" class="ext-param" data-param="' + escAttr(p.name) + '" value="' + escAttr(p.def || '') + '" '
+         + 'style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box"></div>';
+  });
+  html += '</div>';
+  wrap.innerHTML = html;
+}
+
+async function extTest() {
+  const qd = extCurrentDef();
+  if (!qd) return;
+  extRenderParams(qd);
+  const values = {};
+  document.querySelectorAll('#extParamsWrap .ext-param').forEach(function (inp) {
+    const k = inp.getAttribute('data-param');
+    const v = (inp.value || '').trim();
+    if (k && v !== '') values[k] = v;
+  });
+  const box = document.getElementById('extTestResult');
+  box.style.display = '';
+  box.innerHTML = '<div class="loading">试运行中...</div>';
+  try {
+    const resp = await fetch(EXT_API_TEST, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query_def: qd, values: values, max_rows: 50 }),
+    });
+    const json = await resp.json();
+    if (!json.success) { box.innerHTML = '<div class="empty">试运行失败：' + escHtml(json.error || '') + '</div>'; return; }
+    const cols = json.columns || [];
+    const rows = json.rows || [];
+    let h = '<div style="font-size:12px;color:var(--text2);margin-bottom:6px">返回 ' + (json.count != null ? json.count : rows.length) + ' 行</div>';
+    if (json.sql) {
+      h += '<div style="font-size:11px;color:var(--text2);margin-bottom:6px;word-break:break-all"><b>SQL：</b>' + escHtml(json.sql) + '</div>';
+    }
+    if (!rows.length) { h += '<div class="empty">无数据</div>'; }
+    else {
+      h += '<div style="overflow:auto;max-height:260px;border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12px">';
+      h += '<tr>' + cols.map(function (c) { return '<th style="padding:4px 6px;border-bottom:1px solid var(--border);text-align:left">' + escHtml(c) + '</th>'; }).join('') + '</tr>';
+      rows.slice(0, 50).forEach(function (r) {
+        h += '<tr>' + cols.map(function (c) { return '<td style="padding:4px 6px;border-bottom:1px solid var(--border)">' + escHtml(r[c]) + '</td>'; }).join('') + '</tr>';
+      });
+      h += '</table></div>';
+    }
+    box.innerHTML = h;
+  } catch (e) {
+    box.innerHTML = '<div class="empty">试运行请求失败：' + escHtml(e) + '</div>';
+  }
+}
+
+async function extToggle(name, enabled) {
+  try {
+    const resp = await fetch(EXT_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, enabled: enabled ? 1 : 0 }),
+    });
+    const json = await resp.json();
+    if (!json.success) { alert('操作失败：' + (json.error || '')); return; }
+    extLoadList();
+    if (typeof extLoadIntoApi === 'function') extLoadIntoApi();
+  } catch (e) { alert('操作请求失败：' + e); }
+}
+
+async function extDelete(name) {
+  if (!confirm('确定删除接口「' + name + '」？此操作不可恢复。')) return;
+  try {
+    const resp = await fetch(EXT_API_DELETE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    const json = await resp.json();
+    if (!json.success) { alert('删除失败：' + (json.error || '')); return; }
+    extLoadList();
+    if (typeof extLoadIntoApi === 'function') extLoadIntoApi();
+  } catch (e) { alert('删除请求失败：' + e); }
+}
+
+async function extEdit(name) {
+  try {
+    const resp = await fetch(EXT_API);
+    const json = await resp.json();
+    if (!json.success) { alert('读取失败：' + (json.error || '')); return; }
+    const list = json.data || [];
+    const ep = list.find(function (x) { return x.name === name; });
+    if (!ep) { alert('接口不存在：' + name); return; }
+    extNewForm();
+    document.getElementById('extName').value = ep.name || '';
+    document.getElementById('extName').disabled = true;   // 名称为主键，编辑时不可改
+    document.getElementById('extTitle').value = ep.title || '';
+    document.getElementById('extDesc').value = ep.description || '';
+    document.getElementById('extMaxRows').value = ep.max_rows || 1000;
+    // 列表接口已返回 query_def 原文（JSON 字符串）
+    let qdText = ep.query_def || '';
+    try {
+      if (qdText) qdText = JSON.stringify(JSON.parse(qdText), null, 2);
+    } catch (e) { /* 保持原样 */ }
+    document.getElementById('extQueryDef').value = qdText;
+    document.getElementById('extFormWrap').style.display = '';
+    extStatus('编辑接口「' + name + '」，保存后立即生效', true);
+  } catch (e) { alert('读取接口失败：' + e); }
+}
+
+// 把新接口填充到「API 地址生成器」的查询类型下拉（ext 分组）
+async function extLoadIntoApi() {
+  const group = document.getElementById('apiExtGroup');
+  if (!group) return;
+  try {
+    const resp = await fetch(EXT_API);
+    const json = await resp.json();
+    const list = (json && json.success) ? (json.data || []) : [];
+    window.__extCache = list;
+    group.innerHTML = '';
+    const enabled = list.filter(function (x) { return x.enabled; });
+    if (!enabled.length) {
+      group.innerHTML = '<option value="" disabled>暂无新接口</option>';
+      return;
+    }
+    enabled.forEach(function (ep) {
+      const opt = document.createElement('option');
+      opt.value = 'ext:' + ep.name;
+      opt.textContent = '🧩 ' + (ep.title || ep.description || ep.name);
+      group.appendChild(opt);
+    });
+  } catch (e) { /* 忽略 */ }
+}
+
+// 渲染 ext 接口的参数输入框（基于定义中的动态参数 params 结构）
+function renderExtParams(name) {
+  const box = document.getElementById('apiCustomParamsBox');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = window.__extCache || [];
+  const ep = list.find(function (x) { return x.name === name; });
+  if (!ep) {
+    box.innerHTML = '<div style="font-size:12px;color:var(--text2);grid-column:1/-1">接口未找到（可点「🔄 刷新列表」重试）</div>';
+    generateApiUrl();
+    return;
+  }
+  const params = Array.isArray(ep.params) ? ep.params : [];
+  if (!params.length) {
+    box.innerHTML = '<div style="font-size:12px;color:var(--text2);grid-column:1/-1">该接口无动态参数</div>';
+    generateApiUrl();
+    return;
+  }
+  params.forEach(function (p) {
+    const t = String(p.type || 'text');
+    const inputType = (t === 'date' || t === 'month' || t === 'number') ? t : 'text';
+    const wrapDiv = document.createElement('div');
+    wrapDiv.innerHTML = '<label style="font-size:11px">' + escHtml(p.desc || p.name)
+      + '（' + escHtml(p.name) + '）' + (p.required ? ' *' : '') + '</label>'
+      + '<input type="' + inputType + '" data-name="' + escAttr(p.name) + '" value="' + escAttr(p.default || '') + '" '
+      + 'placeholder="' + escAttr(p.desc || '') + '" oninput="generateApiUrl()" '
+      + 'style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">';
+    box.appendChild(wrapDiv);
+  });
+  generateApiUrl();
+}
+
+async function extLoadList() {
+  const wrap = document.getElementById('extListWrap');
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="loading">加载中...</div>';
+  try {
+    const resp = await fetch(EXT_API);
+    const json = await resp.json();
+    if (!json.success) {
+      wrap.innerHTML = '<div class="empty">加载失败：' + escHtml(json.error || '') + '</div>';
+      extListStatus('');
+      return;
+    }
+    const list = json.data || [];
+    if (!list.length) {
+      wrap.innerHTML = '<div class="empty">暂无新接口，点击「➕ 新建接口」添加（保存后无需重启）</div>';
+      extListStatus('共 0 个');
+      return;
+    }
+    let h = '<table id="extTable" style="width:100%;border-collapse:collapse">';
+    h += '<tr><th>接口名</th><th>显示名</th><th>数据表</th><th>状态</th><th>最大行数</th><th>更新时间</th><th style="width:230px">操作</th></tr>';
+    list.forEach(function (ep) {
+      const on = !!ep.enabled;
+      h += '<tr>'
+        + '<td><code>' + escHtml(ep.name) + '</code></td>'
+        + '<td>' + escHtml(ep.title || '-') + '</td>'
+        + '<td>' + escHtml(ep.table || '-') + '</td>'
+        + '<td><span class="ext-badge ' + (on ? 'on' : 'off') + '">' + (on ? '启用' : '停用') + '</span></td>'
+        + '<td>' + (ep.max_rows || '-') + '</td>'
+        + '<td>' + escHtml(ep.updated_at || '-') + '</td>'
+        + '<td>'
+        + '<button class="btn-accent" style="padding:3px 8px;font-size:11px" onclick="extEdit(\'' + escAttr(ep.name) + '\')">编辑</button> '
+        + '<button style="padding:3px 8px;font-size:11px" onclick="extToggle(\'' + escAttr(ep.name) + '\',' + (on ? 0 : 1) + ')">' + (on ? '停用' : '启用') + '</button> '
+        + '<button class="btn-red" style="padding:3px 8px;font-size:11px" onclick="extDelete(\'' + escAttr(ep.name) + '\')">删除</button>'
+        + '</td></tr>';
+    });
+    h += '</table>';
+    wrap.innerHTML = h;
+    extListStatus('共 ' + list.length + ' 个接口');
+  } catch (e) {
+    wrap.innerHTML = '<div class="empty">加载失败：' + escHtml(e) + '</div>';
+    extListStatus('');
+  }
 }
 
 // ---------- 新建 / 编辑回填 ----------

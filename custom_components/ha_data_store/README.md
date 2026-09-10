@@ -664,6 +664,39 @@ GET /api/ha_data_store/custom/{route_path}?key=你的Key&entity_id=sensor.a&star
 
 ---
 
+## 16. 接口管理（新接口 · 免重启）
+
+「API 工具」内新增 **🧩 接口管理（新接口）** 子页，用于发布**新接口**，特点是**新增 / 修改 / 启停 / 删除接口均无需重启 HA**。
+
+**原理**：HA 的 `register_view()` 仅在集成 setup 时注册路由且无公开注销 API，故以往新增接口必须重启。本模块用一个**固定通配路由** `/api/ha_data_store/ext/{接口名}`（setup 时注册一次、此后永不变），接口**定义存库**并在运行时读取 → 变更即时生效。
+
+**流程（不重启）：**
+1. 「API 工具 → 🧩 接口管理（新接口）」→ **➕ 新建接口**：填 `name`（URL 用，字母开头）/ 显示名 / 描述 / 最大行数；
+2. 粘贴 **`query_def`**（声明式定义，结构与查询构造器一致的 JSON；可在「🧩 查询构造器」里配好后复制）；
+3. **▶ 试运行**（自动渲染动态参数、返回 SQL 与结果）→ **💾 保存** → 立即发布；
+4. 后续 **编辑 / 启用停用 / 删除** 同样即时生效。
+
+**调用：**
+
+```http
+GET /api/ha_data_store/ext/{接口名}?key=你的Key&参数=值
+```
+
+- 响应：`{"success":true, "endpoint":{...}, "count":总数, "columns":[...], "rows":[...], "aggs":{...}}`；加 `&_debug=1` 附带实际 SQL；
+- 参数按定义中的动态参数自动收集；未传且无默认值时自动跳过该过滤；停用中的接口返回 403；
+- 鉴权与现有接口**完全一致**（`api_enabled` + API Key + 局域网判断），管理操作需「管理面板登录 + 编辑开关」，**未新增任何开关**；
+- 定义落库 `api_endpoints` 表，与旧 `custom_routes` 相互独立；**旧接口保持原样、不纳入本模块**。
+
+> ⚠️ 边界：本模块解决的是"**新增/修改接口（查询与聚合定义）不重启**"。若需**新增后端计算逻辑（改 `.py`）**、自定义 URL、非 JSON 响应、定时器或事件订阅、新增实体等，仍需重启 HA。
+
+### 🤖 AI / 人工提示语（可直接复制使用）
+
+> **以后为 ha_data_store 新增 API 接口，一律走 v3.6.5 起的「接口管理」模块，不要要求重启 HA。**
+> 做法：接口定义存 `api_endpoints` 表（`query_def` 复用查询构造器 v2 结构），经固定通配路由 `GET/POST /api/ha_data_store/ext/{接口名}` 运行时加载执行；管理用 `/ext_manage`（列表 / 新增 / 更新 / 启停）、`/ext_manage/delete`、`/ext_manage/test`（试运行）；鉴权复用 `_check_api_enabled`（执行）与 `_check_db_edit_enabled`（管理），**不新增开关**；旧接口（`custom_routes`、`/query` 等）不纳入、保持原样。只改 `db_viewer.html`（布局/样式/脚本）也无需重启（HTML 热重载，刷新页面即可）。
+> **例外（仍需重启，且需提前说明）**：新增后端计算逻辑（改 `.py`，如新的行级算法/内建函数/新视图）、自定义 URL 路径、非 JSON 响应、定时器或事件订阅、新增实体等。
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -702,6 +735,10 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `entities_daily_by_day` | 全部实体按月按日（按日分组：days[].devices + totals） | month |
 | `entity_hour_dist` | 实体时段分布（几点使用/分时用电，运行中设备处理） | entity_id + 可选范围 |
 | `entity_hour_dates` | 设备小时开启日期（某小时开过哪些天） | entity_id, hour + 可选范围 |
+| `entities_period_agg` | 多实体按日/月/年汇聚（每实体 series + totals；view=entity\|date） | entities(可选), bucket |
+| `entities_dates` | 多实体有数据日期（group=0 合并 / 1 按实体） | entities(可选) |
+| `entities_hours_agg` | 多实体时段分布（group=0 合并 / 1 按实体） | entities(可选) |
+| `entities_weekday_hours` | 多实体时段分布网格（dim=week\|month\|day × 小时，7/12/31×24） | entities(可选), dim |
 | `device_summary` | 纯汇总（只返回统计数字，不返回记录） | entity_id, date/month/year(可选) |
 | `env_history` | 环境历史记录（含最新日期、总条数等元数据） | entity_id, metric |
 | `env_latest` | 环境最新一条记录 | entity_id, metric |
@@ -904,6 +941,8 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 ## 内置数据库浏览器
 
 访问 `http://你的HA地址:8123/api/ha_data_store/db_viewer`
+
+> 💡 **开发提示**：页面 HTML 带热重载——只修改 `db_viewer.html`（布局/CSS/JS）后**刷新浏览器页面即可生效，无需重启 HA**（建议 Ctrl+F5 强刷避开浏览器缓存）；修改任何 `.py` 文件仍需重启 HA。页面标题栏右侧会显示当前集成版本号。
 
 **特性：**
 - 表结构查看（列名、类型、约束）
@@ -1114,6 +1153,26 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.6.5 新增「接口管理」模块：新增/修改接口无需重启（2026-09-10）
+
+新增 **🧩 接口管理（新接口）** 子页与新表 `api_endpoints`：接口以声明式 `query_def` 存库，通过固定通配路由 `GET/POST /api/ha_data_store/ext/{name}` 在运行时加载执行——**新增 / 修改 / 启停 / 删除接口均无需重启 HA**。配套管理接口 `/ext_manage`（列表/保存/启停）、`/ext_manage/delete`、`/ext_manage/test`（试运行）。定义复用查询构造器 v2 结构并做白名单校验，执行复用 v2 引擎；鉴权完全复用现行开关（未新增），旧接口（`custom_routes`、`/query` 等）保持原样。「API 地址生成器」下拉新增「🧩 新接口（ext·免重启）」分组，自动列出并渲染参数表单。详见「16. 接口管理（新接口 · 免重启）」。
+
+### v3.6.4 db_viewer 体验改进：标题版本号 + HTML 热重载（2026-09-10）
+
+**HTML 热重载**：`_load_db_viewer_html` 每次请求检查 `db_viewer.html` 的文件指纹（`st_mtime_ns`+`st_size`），变化即重读并刷新缓存——**只改 HTML 布局/CSS/JS 时，保存后刷新页面（建议 Ctrl+F5）即可生效，无需重启 HA**；改 `.py` 仍需手动重启（本次改动本身在 `.py` 中，需重启一次启用热重载）。读取失败时保留旧缓存避免整页不可用。**标题版本号**：服务端注入 `window.__HDS_VERSION__`，标题栏右侧显示 `vX.Y.Z` 徽标，随 `const.py` 的 `VERSION` 自动同步。
+
+### v3.6.3 实体时段分布泛化：星期几/月份/几号 × 小时（2026-09-10）
+
+`entities_weekday_hours` 泛化为通用 N×24 时段聚合网格，新增 `dim` 参数：`week`（星期几，默认，返回兼容 `weekdays[]` 结构）/ `month`（月份 1–12，跨年同名月合并）/ `day`（几号 1–31，跨月同号合并），month/day 返回 `cells[{index,label,totals,hours[24],devices?}]`；`hours` 固定输出 0–23 全 24 项（无数据为 0），`group=1` 每格另含按实体分组 `devices[]`。行级口径复用运行中设备规则（当前时间为结束计长、用电①②③、方案 A 均摊、按开机时刻归属）。db_viewer 选项更名「📊 多实体时段分布（周几/月/几号 × 小时）」并新增分组维度下拉。
+
+### v3.6.2 新增多实体统计接口（2026-09-09）
+
+新增 `entities_period_agg`（多实体按 `bucket=day|month|year` 汇聚 + 顶层 `totals`；支持 `view=entity`「实体→日期」每实体 `series[]`，或 `view=date`「日期→实体」`dates[].devices[]` 且实体含 `running` 标记）、`entities_dates`（有数据日期：`group=0` 合并 / `group=1` 按实体分组）、`entities_hours_agg`（时段分布：`group=0` 全部合并 / `group=1` 含每实体分组）。参数 `entities`（逗号分隔，留空=全部）+ 可选 `start/end`；统一复用运行中设备口径（当前时间为结束计长，用电①`now_kwh−on_power`②固定功率×A/1000③无来源 null）。db_viewer「设备类」新增 3 项（含返回结构选择）。
+
+### v3.6.1 report_entities 新增 card_type + 实体上报复合查询（2026-09-09）
+
+`report_entities` 表新增 `card_type`（卡片类型，`TEXT DEFAULT ''`），旧表自动迁移补列；POST `/api/ha_data_store/report` 写入与 GET `/report`、`/report/auto_entities` 返回均含 `card_type`（未传为空串，兼容旧前端）。新增实体上报复合查询接口 `GET /api/ha_data_store/report/search`：多条件（`f`+`op=eq|like`+`v`）重复参数，支持 AND/OR 任意组合（`c=and|or`，从左到右加括号），可选 `limit/offset` 与 `order_by/order`，可查字段含 `card_type`。db_viewer「实体上报」新增「🔎 实体上报复合查询」动态条件构建。
 
 ### v3.6.0 新增设备小时开启日期接口（2026-09-09）
 

@@ -32,6 +32,7 @@ from .const import (
     TABLE_DEVICE_HISTORY,
     TABLE_ENVIRONMENT_HISTORY,
     TABLE_CUSTOM_ROUTES,
+    TABLE_API_ENDPOINTS,
     TABLE_ATTR_TYPE_DEFS,
     TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS,
@@ -364,6 +365,43 @@ def _init_database(db_path: str) -> None:
             );
             """
         )
+        # 4.1) 新接口管理模块表（声明式接口定义，运行时加载执行 → 新增/修改无需重启 HA）
+        #      与旧 custom_routes 完全独立；旧接口不迁移、逻辑不变
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_API_ENDPOINTS} (
+                name          TEXT PRIMARY KEY,          -- 接口名（URL: /ext/<name>）
+                title         TEXT NOT NULL DEFAULT '',   -- 中文显示名
+                description   TEXT NOT NULL DEFAULT '',
+                query_def     TEXT NOT NULL DEFAULT '',   -- 声明式定义（复用查询构造器 v2 结构）
+                enabled       INTEGER NOT NULL DEFAULT 1,
+                cache_sql     INTEGER NOT NULL DEFAULT 1,
+                max_rows      INTEGER NOT NULL DEFAULT 1000,
+                created_at    TEXT NOT NULL DEFAULT '',
+                updated_at    TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_api_endpoints_enabled "
+            f"ON {TABLE_API_ENDPOINTS} (enabled);"
+        )
+        # 迁移：已有表补充列
+        _ep_existing_cols = [
+            row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_API_ENDPOINTS})")
+        ]
+        for _c, _def in (
+            ("title", "TEXT NOT NULL DEFAULT ''"),
+            ("cache_sql", "INTEGER NOT NULL DEFAULT 1"),
+        ):
+            if _c not in _ep_existing_cols:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE {TABLE_API_ENDPOINTS} ADD COLUMN {_c} {_def}"
+                    )
+                except Exception as e:
+                    _LOGGER.warning("[HDS] api_endpoints 补充列 %s 失败（可忽略）: %s", _c, e)
+
         # 迁移：已有表补充查询构造器所需列
         _cr_existing_cols = [
             row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_CUSTOM_ROUTES})")
@@ -529,6 +567,7 @@ def _init_database(db_path: str) -> None:
                 entity_type     TEXT NOT NULL DEFAULT '',
                 entity_device   TEXT NOT NULL DEFAULT '',
                 entity_area     TEXT NOT NULL DEFAULT '',
+                card_type       TEXT NOT NULL DEFAULT '',
                 last_report_time TEXT NOT NULL DEFAULT ''
             );
             """
@@ -541,11 +580,12 @@ def _init_database(db_path: str) -> None:
             conn.execute(
                 f"ALTER TABLE {TABLE_REPORT_ENTITIES} ADD COLUMN rooms TEXT NOT NULL DEFAULT ''"
             )
-        # 迁移：为已存在的旧表补充实体来源/设备/区域列（前端上报）
+        # 迁移：为已存在的旧表补充实体来源/设备/区域/卡片类型列（前端上报）
         for _col, _col_default in (
             ('entity_type', "''"),
             ('entity_device', "''"),
             ('entity_area', "''"),
+            ('card_type', "''"),
         ):
             _has_col = conn.execute(
                 f"SELECT COUNT(*) FROM pragma_table_info('{TABLE_REPORT_ENTITIES}') WHERE name = '{_col}'"
@@ -4172,6 +4212,11 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         CreateTableView,
         ReportEntitiesView,
         ReportAutoEntitiesView,
+        ReportSearchView,
+        ExtApiView,
+        ExtApiManageView,
+        ExtApiDeleteView,
+        ExtApiTestView,
         ActionLogView,
         AutomationsView,
         AutomationItemView,
@@ -4240,6 +4285,12 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(TableColumnsView(db_path))
     hass.http.register_view(ReportEntitiesView(db_path))
     hass.http.register_view(ReportAutoEntitiesView(db_path))
+    hass.http.register_view(ReportSearchView(db_path))
+    # 新接口管理模块（固定通配路由，定义存库 → 新增/修改接口无需重启）
+    hass.http.register_view(ExtApiView(db_path))
+    hass.http.register_view(ExtApiManageView(db_path))
+    hass.http.register_view(ExtApiDeleteView(db_path))
+    hass.http.register_view(ExtApiTestView(db_path))
     hass.http.register_view(ActionLogView(db_path))
     hass.http.register_view(AutomationsView(db_path))
     hass.http.register_view(AutomationItemView(db_path))
