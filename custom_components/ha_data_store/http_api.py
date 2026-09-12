@@ -1093,6 +1093,920 @@ def _row_running_usage(r, now_dt):
             "running": not closed, "end_dt": end_dt}
 
 
+def compute_device_usage_multi_sync(db_path, entity_ids=None,
+                                    bucket="day", view="entity",
+                                    start="", end="", date="", month="", year="",
+                                    include_devices=True,
+                                    now_dt=None) -> dict:
+    """多实体设备用时/用电（device_history）多维聚合，支持两种返回结构。
+
+    与 compute_power_energy_multi_sync 结构对齐（bucket/view/时间过滤/两种返回形状），
+    但数据源是 device_history（设备开关记录），指标为：
+      count         开启次数
+      duration_hour 时长（小时，保留 2 位）。运行中记录按"当前时间 - on_time"计入
+      energy_kwh    用电量（kWh）。已关闭取 energy_consumed；
+                    运行中按 ① now_kwh-on_power ② 固定功率/1000×小时 ③ 无来源 → null
+      running       该时间桶内是否存在运行中的记录
+
+    参数与返回结构同 power_energy_multi：
+      bucket → day(YYYY-MM-DD) | month(YYYY-MM) | year(YYYY)
+      view   → entity(实体→时间桶) | date(时间桶→实体)
+      时间过滤 start/end > date > month > year；全不传 = 全部时间
+    无用电来源的实体，其 energy_kwh 为 null（与 device_history 系列接口口径一致）。
+    """
+    if bucket not in ("day", "month", "year"):
+        bucket = "day"
+    if view not in ("entity", "date"):
+        view = "entity"
+    entity_ids = [x for x in (entity_ids or []) if x]
+    if now_dt is None:
+        now_dt = datetime.now()
+
+    conds, params, label = _usage_range_params(
+        entity_ids, start=start, end=end, date=date, month=month, year=year)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT dh.entity_id AS entity_id, MAX(dh.name) AS name, "
+            f"dh.on_time AS on_time, dh.off_time AS off_time, "
+            f"dh.duration AS duration, dh.energy_consumed AS energy_consumed, "
+            f"dh.on_power AS on_power, dh.now_kwh AS now_kwh, "
+            f"MAX(ec.power_entity) AS power_entity, MAX(ec.power_rating) AS power_rating, "
+            f"MAX(ec.room) AS room "
+            f"FROM {TABLE_DEVICE_HISTORY} dh "
+            f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+            f"{where} "
+            f"GROUP BY dh.entity_id, dh.on_time, dh.off_time, dh.duration, "
+            f"dh.energy_consumed, dh.on_power, dh.now_kwh "
+            f"ORDER BY dh.on_time ASC",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # (entity_id, bucket) → 累加桶；运行中记录按 on_time 归入当日（与其它接口一致）
+    acc: dict = {}
+    any_energy_global = False
+    for r in rows:
+        info = _row_running_usage(r, now_dt)
+        if info is None:
+            continue
+        on_dt = _parse_dt(r["on_time"] or "")
+        if on_dt is None:
+            continue
+        # 按维度截取：day=YYYY-MM-DD(10) / month=YYYY-MM(7) / year=YYYY(4)
+        key = on_dt.strftime("%Y-%m-%d")[:{"day": 10, "month": 7, "year": 4}[bucket]]
+        eid = r["entity_id"]
+        b = acc.setdefault((eid, key), {
+            "count": 0, "dur_s": 0.0, "ene": 0.0, "running": False,
+            "name": r["name"] or "", "room": r["room"] or "",
+        })
+        b["count"] += 1
+        b["dur_s"] += info["dur_s"]
+        if info["running"]:
+            b["running"] = True
+        if info["has_ene"]:
+            b["ene"] += info["ene"]
+            any_energy_global = True
+        if r["name"]:
+            b["name"] = r["name"]
+        if r["room"]:
+            b["room"] = r["room"]
+
+    def _hours(sec: float) -> float:
+        return round(float(sec) / 3600.0, 2)
+
+    # 每实体是否有用电来源（决定 energy_kwh 是否返回 null，与口径一致）
+    ent_has_ene: dict = {}
+    for (eid, _k), b in acc.items():
+        if b["ene"] > 0:
+            ent_has_ene[eid] = True
+
+    range_info = {"start": start, "end": end, "date": date,
+                  "month": month, "year": year, "label": label}
+
+    if view == "date":
+        buckets: dict = {}
+        for (eid, key), b in acc.items():
+            g = buckets.setdefault(key, {
+                "key": key, "totals": {"count": 0, "duration_hour": 0.0,
+                                       "energy_kwh": 0.0},
+                "devices": [], "_any": False, "_running": False,
+            })
+            dur = _hours(b["dur_s"])
+            g["totals"]["count"] += b["count"]
+            g["totals"]["duration_hour"] = round(g["totals"]["duration_hour"] + dur, 2)
+            g["totals"]["energy_kwh"] = round(g["totals"]["energy_kwh"] + b["ene"], 4)
+            if b["ene"] > 0:
+                g["_any"] = True
+            if b["running"]:
+                g["_running"] = True
+            g["devices"].append({
+                "entity_id": eid,
+                "name": b["name"],
+                "room": b["room"],
+                "count": b["count"],
+                "duration_hour": dur,
+                "energy_kwh": round(b["ene"], 4) if ent_has_ene.get(eid) else None,
+                "running": b["running"],
+            })
+        dates = []
+        for key in sorted(buckets.keys(), reverse=True):
+            g = buckets.pop(key)
+            g["devices"].sort(
+                key=lambda d: (d["duration_hour"], d["energy_kwh"] or 0), reverse=True)
+            g["device_count"] = len(g["devices"])
+            g["totals"]["device_count"] = g["device_count"]
+            if not g["_any"]:
+                g["totals"]["energy_kwh"] = None
+            g["running"] = g.pop("_running", False)
+            g.pop("_any", None)
+            if not include_devices:
+                g.pop("devices", None)
+            dates.append(g)
+        tot_dur = round(sum(float(d["totals"]["duration_hour"]) for d in dates), 2)
+        tot_cnt = sum(int(d["totals"]["count"]) for d in dates)
+        tot_ene = round(sum(float(d["totals"]["energy_kwh"] or 0) for d in dates), 4)
+        return {
+            "view": "date", "bucket": bucket, "range": range_info,
+            "entity_count": len({e for e, _ in acc}),
+            "totals": {
+                "count": tot_cnt, "duration_hour": tot_dur,
+                "energy_kwh": tot_ene if any_energy_global else None,
+                "bucket_count": len(dates),
+                "entity_count": len({e for e, _ in acc}),
+            },
+            "dates": dates,
+        }
+
+    ents: dict = {}
+    for (eid, key), b in acc.items():
+        it = ents.setdefault(eid, {
+            "entity_id": eid, "name": b["name"], "room": b["room"],
+            "totals": {"count": 0, "duration_hour": 0.0, "energy_kwh": 0.0},
+            "series": [], "_any": False, "_running": False,
+        })
+        dur = _hours(b["dur_s"])
+        it["totals"]["count"] += b["count"]
+        it["totals"]["duration_hour"] = round(it["totals"]["duration_hour"] + dur, 2)
+        it["totals"]["energy_kwh"] = round(it["totals"]["energy_kwh"] + b["ene"], 4)
+        if b["ene"] > 0:
+            it["_any"] = True
+        if b["running"]:
+            it["_running"] = True
+        if b["name"]:
+            it["name"] = b["name"]
+        if b["room"]:
+            it["room"] = b["room"]
+        it["series"].append({
+            "key": key, "count": b["count"], "duration_hour": dur,
+            "energy_kwh": round(b["ene"], 4) if ent_has_ene.get(eid) else None,
+            "running": b["running"],
+        })
+    entities = []
+    for it in ents.values():
+        it["series"].sort(key=lambda s: s["key"], reverse=True)
+        if not it["_any"]:
+            it["totals"]["energy_kwh"] = None
+        it["running"] = it.pop("_running", False)
+        it.pop("_any", None)
+        entities.append(it)
+    entities.sort(key=lambda d: (d["totals"]["duration_hour"],
+                                 d["totals"]["energy_kwh"] or 0), reverse=True)
+    tot_dur = round(sum(float(e["totals"]["duration_hour"]) for e in entities), 2)
+    tot_cnt = sum(int(e["totals"]["count"]) for e in entities)
+    tot_ene = round(sum(float(e["totals"]["energy_kwh"] or 0) for e in entities), 4)
+    return {
+        "view": "entity", "bucket": bucket, "range": range_info,
+        "entity_count": len(entities),
+        "totals": {
+            "count": tot_cnt, "duration_hour": tot_dur,
+            "energy_kwh": tot_ene if any_energy_global else None,
+            "entity_count": len(entities),
+        },
+        "entities": entities,
+    }
+
+
+def _dev_meta(db_path, entity_ids) -> dict:
+    """取实体的展示元信息（name / room），供各设备类接口统一补齐。"""
+    out: dict = {}
+    if not entity_ids:
+        return out
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        ph = ",".join(["?"] * len(entity_ids))
+        for r in conn.execute(
+            f"SELECT entity_id, MAX(name) AS name FROM {TABLE_DEVICE_HISTORY} "
+            f"WHERE entity_id IN ({ph}) GROUP BY entity_id", entity_ids
+        ).fetchall():
+            out[r["entity_id"]] = {"name": r["name"] or "", "room": ""}
+        for r in conn.execute(
+            f"SELECT entity_id, MAX(room) AS room FROM {TABLE_ENTITY_CONFIGS} "
+            f"WHERE entity_id IN ({ph}) GROUP BY entity_id", entity_ids
+        ).fetchall():
+            out.setdefault(r["entity_id"], {"name": "", "room": ""})
+            out[r["entity_id"]]["room"] = r["room"] or ""
+    finally:
+        conn.close()
+    return out
+
+
+def compute_device_usage_detail_sync(db_path, entity_ids=None,
+                                     start="", end="", date="", month="", year="",
+                                     limit=0, offset=0, full=False,
+                                     include_summary=True, now_dt=None) -> dict:
+    """【设备类·接口 1】多实体明细查询（**不聚合**）。
+
+    返回每条 device_history 记录一行，含起止时间、时长、用电量、是否运行中。
+    支持按实体过滤 + 指定日期/时间段；按 on_time 倒序（最新在前）。
+
+    参数：
+      entity_ids → 多实体（空 = 全部）
+      start/end  → 时间段（可单边）；date/month/year → 指定某日/某月/某年
+      limit/offset → 分页（limit=0 表示不限）
+      full       → True 返回**全部字段**（device_history 全列 + 计算字段），
+                   否则只返回精简字段（entity_id/name/room/on_time/off_time/
+                   duration_hour/energy_kwh/running）
+
+    full=True 时额外字段：
+      id, on_power, off_power, energy_consumed, duration(秒), cross_day,
+      state_attr(解析后的 JSON 数组), now_kwh, on_user, off_user,
+      on_snapshot, off_snapshot, power_entity, power_rating
+    返回：
+      { full, range, entity_count, total, returned, limit, offset,
+        summary:{ totals:{count,duration_hour,energy_kwh,running_count,
+                          entity_count},
+                  entities:[{entity_id,name,room,count,duration_hour,
+                             energy_kwh,running_count}] },
+        records[] }
+
+    注意：summary 是针对**全量匹配记录**（不受 limit/offset 影响）的合计，
+    因为分页只用于翻看明细，合计应始终反映整个查询范围。
+    """
+    entity_ids = [x for x in (entity_ids or []) if x]
+    if now_dt is None:
+        now_dt = datetime.now()
+    conds, params, label = _usage_range_params(
+        entity_ids, start=start, end=end, date=date, month=month, year=year)
+
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if full:
+            # 全字段：device_history 全列 + entity_configs 补充字段。
+            # 注意：
+            #  · room 用 COALESCE 合并到**原名**（dh.room 可能为空）
+            #  · power_entity / power_rating 只存在于 entity_configs，
+            #    这里补成**原名**输出，因为 _row_running_usage 依赖这两个键名
+            #    计算运行中用电；切勿改成 cfg_xxx 别名，否则 helper 取键报错。
+            rows = conn.execute(
+                f"SELECT dh.*, "
+                f"  COALESCE(NULLIF(dh.room, ''), ec.room, '') AS room, "
+                f"  COALESCE(ec.power_entity, '') AS power_entity, "
+                f"  COALESCE(ec.power_rating, 0) AS power_rating "
+                f"FROM {TABLE_DEVICE_HISTORY} dh "
+                f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+                f"{where} "
+                f"ORDER BY dh.on_time DESC",
+                params,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT dh.entity_id AS entity_id, MAX(dh.name) AS name, "
+                f"  MAX(ec.room) AS room, "
+                f"  dh.on_time AS on_time, dh.off_time AS off_time, "
+                f"  dh.duration AS duration, dh.energy_consumed AS energy_consumed, "
+                f"  dh.on_power AS on_power, dh.now_kwh AS now_kwh, "
+                f"  MAX(ec.power_entity) AS power_entity, MAX(ec.power_rating) AS power_rating "
+                f"FROM {TABLE_DEVICE_HISTORY} dh "
+                f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+                f"{where} "
+                f"GROUP BY dh.entity_id, dh.on_time, dh.off_time, dh.duration, "
+                f"  dh.energy_consumed, dh.on_power, dh.now_kwh "
+                f"ORDER BY dh.on_time DESC",
+                params,
+            ).fetchall()
+    finally:
+        conn.close()
+
+    recs = []
+    for r in rows:
+        info = _row_running_usage(r, now_dt)
+        if info is None:
+            continue
+        d = dict(r)
+        if full:
+            # room / power_entity / power_rating 已在 SQL 侧合并到原名
+            # state_attr 字符串 → JSON 数组（与 device_history 接口一致）
+            sa = d.get("state_attr")
+            if sa:
+                try:
+                    d["state_attr"] = json.loads(sa)
+                except (json.JSONDecodeError, TypeError):
+                    d["state_attr"] = []
+            else:
+                d["state_attr"] = []
+            # 计算字段
+            d["duration_hour"] = round(float(info["dur_s"]) / 3600.0, 2)
+            d["energy_kwh"] = round(float(info["ene"]), 4) if info["has_ene"] else None
+            d["running"] = info["running"]
+        else:
+            d = {
+                "entity_id": d["entity_id"],
+                "name": d.get("name") or "",
+                "room": d.get("room") or "",
+                "on_time": d.get("on_time") or "",
+                "off_time": d.get("off_time") or "",
+                "duration_hour": round(float(info["dur_s"]) / 3600.0, 2),
+                "energy_kwh": round(float(info["ene"]), 4) if info["has_ene"] else None,
+                "running": info["running"],
+            }
+        recs.append(d)
+
+    # 合计节点：基于**全量匹配记录**（分页前）计算，含每实体合计 + 全局总计。
+    # 单条记录的 running 只表示"该次会话仍在进行"，无法直接相加，
+    # 因此这里额外给出 running_count（当前仍在运行的会话条数）。
+    # include_summary=False 时跳过计算（纯明细场景可减小响应体积）。
+    agg: dict = {}
+    for rec in (recs if include_summary else []):
+        eid = rec["entity_id"]
+        b = agg.setdefault(eid, {
+            "entity_id": eid,
+            "name": rec.get("name", ""), "room": rec.get("room", ""),
+            "count": 0, "duration_hour": 0.0, "energy_kwh": 0.0,
+            "has_ene": False, "running_count": 0,
+        })
+        b["count"] += 1
+        b["duration_hour"] = round(b["duration_hour"] + float(rec.get("duration_hour") or 0), 2)
+        if rec.get("energy_kwh") is not None:
+            b["energy_kwh"] = round(b["energy_kwh"] + float(rec["energy_kwh"]), 4)
+            b["has_ene"] = True
+        if rec.get("running"):
+            b["running_count"] += 1
+        if rec.get("name"):
+            b["name"] = rec["name"]
+        if rec.get("room"):
+            b["room"] = rec["room"]
+
+    sum_entities = []
+    for b in agg.values():
+        sum_entities.append({
+            "entity_id": b["entity_id"], "name": b["name"], "room": b["room"],
+            "count": b["count"], "duration_hour": b["duration_hour"],
+            "energy_kwh": b["energy_kwh"] if b["has_ene"] else None,
+            "running_count": b["running_count"],
+        })
+    sum_entities.sort(key=lambda d: (d["duration_hour"], d["energy_kwh"] or 0),
+                      reverse=True)
+    any_ene = any(e["energy_kwh"] is not None for e in sum_entities)
+    summary = {
+        "totals": {
+            "count": sum(int(e["count"]) for e in sum_entities),
+            "duration_hour": round(sum(float(e["duration_hour"]) for e in sum_entities), 2),
+            "energy_kwh": (round(sum(float(e["energy_kwh"] or 0) for e in sum_entities), 4)
+                           if any_ene else None),
+            "entity_count": len(sum_entities),
+            "running_count": sum(int(e["running_count"]) for e in sum_entities),
+        },
+        "entities": sum_entities,
+    }
+
+    total = len(recs)
+    if offset and offset > 0:
+        recs = recs[offset:]
+    if limit and limit > 0:
+        recs = recs[:limit]
+    out = {
+        "full": bool(full),
+        "range": {"start": start, "end": end, "date": date,
+                  "month": month, "year": year, "label": label},
+        "entity_count": summary["totals"]["entity_count"] or len({r["entity_id"] for r in recs}) or len(entity_ids),
+        "total": total,
+        "returned": len(recs),
+        "limit": limit, "offset": offset,
+        "records": recs,
+    }
+    if include_summary:
+        out["summary"] = summary
+    return out
+
+
+def compute_device_usage_total_sync(db_path, entity_ids=None,
+                                    scope="all", year="", month="", date="",
+                                    now_dt=None) -> dict:
+    """【设备类·接口 2】多实体合计数据（按 年/月/日/全部）。
+
+    scope 决定聚合范围：
+      all（默认，全部时间）| year（需 year）| month（需 year+month）| date（需 date）
+    返回每个实体一行合计 + 全局合计，指标口径与 device_history 系列一致：
+      count 次数 / duration_hour 时长 / energy_kwh 用电量（无来源为 null）
+
+    返回：
+      { scope, range:{...}, entity_count,
+        totals:{count, duration_hour, energy_kwh},
+        entities:[{entity_id, name, room, count, duration_hour, energy_kwh}] }
+    """
+    entity_ids = [x for x in (entity_ids or []) if x]
+    if now_dt is None:
+        now_dt = datetime.now()
+    scope = (scope or "all").strip().lower()
+    if scope not in ("all", "year", "month", "date"):
+        scope = "all"
+
+    # 宽容拼装时间范围：month 支持 "9"（配 year）/"09"/"2026-09" 三种写法
+    kw = {}
+    month = (month or "").strip()
+    year = (year or "").strip()
+    if scope == "date" and date:
+        kw["date"] = date
+    elif scope == "month" and month:
+        if len(month) == 7:                       # 已是 YYYY-MM
+            kw["month"] = month
+        elif month.isdigit() and len(month) <= 2 and year:
+            kw["month"] = f"{year}-{int(month):02d}"
+        elif month.isdigit() and len(month) <= 2:
+            kw["month"] = month                    # 只给 MM → 走 LIKE 'MM-%' 不匹配，退化为 all
+            scope = "all"
+            kw = {}
+        else:
+            kw["year"] = year
+            scope = "all"
+            kw = {}
+    elif scope == "year" and year:
+        kw["year"] = year
+    else:
+        scope = "all"
+
+    rows = _fetch_usage_rows(db_path, entity_ids, **kw)
+    meta = _dev_meta(db_path, entity_ids or [r["entity_id"] for r in rows])
+
+    agg: dict = {}
+    for r in rows:
+        info = _row_running_usage(r, now_dt)
+        if info is None:
+            continue
+        eid = r["entity_id"]
+        b = agg.setdefault(eid, {"count": 0, "dur_s": 0.0, "ene": 0.0,
+                                 "has_ene": False, "running": False})
+        b["count"] += 1
+        b["dur_s"] += info["dur_s"]
+        if info["has_ene"]:
+            b["ene"] += info["ene"]
+            b["has_ene"] = True
+        if info["running"]:
+            b["running"] = True
+
+    entities = []
+    for eid, b in agg.items():
+        m = meta.get(eid, {})
+        entities.append({
+            "entity_id": eid,
+            "name": m.get("name", ""),
+            "room": m.get("room", ""),
+            "count": b["count"],
+            "duration_hour": round(b["dur_s"] / 3600.0, 2),
+            "energy_kwh": round(b["ene"], 4) if b["has_ene"] else None,
+            "running": b["running"],
+        })
+    entities.sort(key=lambda d: (d["duration_hour"], d["energy_kwh"] or 0), reverse=True)
+
+    any_ene = any(e["energy_kwh"] is not None for e in entities)
+    tot_dur = round(sum(float(e["duration_hour"]) for e in entities), 2)
+    tot_cnt = sum(int(e["count"]) for e in entities)
+    tot_ene = round(sum(float(e["energy_kwh"] or 0) for e in entities), 4)
+    return {
+        "scope": scope,
+        "range": {"scope": scope, **kw},
+        "entity_count": len(entities),
+        "totals": {
+            "count": tot_cnt, "duration_hour": tot_dur,
+            "energy_kwh": tot_ene if any_ene else None,
+        },
+        "entities": entities,
+    }
+
+
+def compute_device_usage_history_sync(db_path, entity_ids=None,
+                                      scope="today", now_dt=None) -> dict:
+    """【设备类·接口 3】多实体「历史同期」合计（历史今日 / 历史本月）。
+
+    scope=today → 取往年**同月同日**（不含今年），如 09-11 对应历年 09-11
+    scope=month → 取往年**同月**（不含本月/今年），如 9 月对应历年 9 月
+    另返回今年同期（year_current）便于对比。
+
+    返回：
+      { scope, month_day, current:{label,totals,entity_count},
+        history:{ years:n, totals, entities:[{entity_id,name,room,years,
+                 count,duration_hour,energy_kwh}] },
+        by_year:[{year, totals}] }
+    """
+    entity_ids = [x for x in (entity_ids or []) if x]
+    if now_dt is None:
+        now_dt = datetime.now()
+    scope = (scope or "today").strip().lower()
+    if scope not in ("today", "month"):
+        scope = "today"
+
+    mm = now_dt.strftime("%m")
+    dd = now_dt.strftime("%d")
+    cur_year = str(now_dt.year)
+
+    if scope == "today":
+        like_hist = f"%-{mm}-{dd} %"          # 历年同月同日（时刻前有空格，避免 LIKE 歧义）
+        like_cur = f"{cur_year}-{mm}-{dd} %"
+        month_day = f"{mm}-{dd}"
+    else:
+        like_hist = f"%-{mm}-%"
+        like_cur = f"{cur_year}-{mm}-%"
+        month_day = mm
+
+    def _run(like, exclude_year="", only_year=""):
+        conds = ["dh.on_time LIKE ?"]
+        params: list = [like]
+        if entity_ids:
+            conds.append(f"dh.entity_id IN ({','.join(['?'] * len(entity_ids))})")
+            params.extend(entity_ids)
+        if exclude_year:
+            conds.append("dh.on_time NOT LIKE ?")
+            params.append(f"{exclude_year}-%")
+        if only_year:
+            conds.append("dh.on_time LIKE ?")
+            params.append(f"{only_year}-%")
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(
+                f"SELECT dh.entity_id AS entity_id, MAX(dh.name) AS name, "
+                f"  MAX(ec.room) AS room, dh.on_time AS on_time, dh.off_time AS off_time, "
+                f"  dh.duration AS duration, dh.energy_consumed AS energy_consumed, "
+                f"  dh.on_power AS on_power, dh.now_kwh AS now_kwh, "
+                f"  MAX(ec.power_entity) AS power_entity, MAX(ec.power_rating) AS power_rating "
+                f"FROM {TABLE_DEVICE_HISTORY} dh "
+                f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+                f"WHERE {' AND '.join(conds)} "
+                f"GROUP BY dh.entity_id, dh.on_time, dh.off_time, dh.duration, "
+                f"  dh.energy_consumed, dh.on_power, dh.now_kwh "
+                f"ORDER BY dh.on_time ASC",
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def _agg(rows):
+        out: dict = {}
+        for r in rows:
+            info = _row_running_usage(r, now_dt)
+            if info is None:
+                continue
+            eid = r["entity_id"]
+            b = out.setdefault(eid, {"count": 0, "dur_s": 0.0, "ene": 0.0,
+                                     "has_ene": False, "name": r["name"] or "",
+                                     "room": r["room"] or "", "years": set()})
+            b["count"] += 1
+            b["dur_s"] += info["dur_s"]
+            if info["has_ene"]:
+                b["ene"] += info["ene"]
+                b["has_ene"] = True
+            if r["name"]:
+                b["name"] = r["name"]
+            if r["room"]:
+                b["room"] = r["room"]
+            ts = str(r["on_time"] or "")[:4]
+            if ts.isdigit():
+                b["years"].add(int(ts))
+        return out
+
+    hist_rows = _run(like_hist, exclude_year=cur_year)
+    cur_rows = _run(like_cur, only_year=cur_year)
+    hist, cur = _agg(hist_rows), _agg(cur_rows)
+
+    def _pack(d):
+        ents = []
+        for eid, b in d.items():
+            ents.append({
+                "entity_id": eid, "name": b["name"], "room": b["room"],
+                "years": sorted(b["years"]),
+                "count": b["count"],
+                "duration_hour": round(b["dur_s"] / 3600.0, 2),
+                "energy_kwh": round(b["ene"], 4) if b["has_ene"] else None,
+            })
+        ents.sort(key=lambda x: (x["duration_hour"], x["energy_kwh"] or 0), reverse=True)
+        any_e = any(e["energy_kwh"] is not None for e in ents)
+        return ents, {
+            "count": sum(e["count"] for e in ents),
+            "duration_hour": round(sum(e["duration_hour"] for e in ents), 2),
+            "energy_kwh": round(sum(float(e["energy_kwh"] or 0) for e in ents), 4) if any_e else None,
+        }
+
+    h_ents, h_tot = _pack(hist)
+    c_ents, c_tot = _pack(cur)
+
+    # 逐年合计
+    year_agg: dict = {}
+    for r in hist_rows:
+        info = _row_running_usage(r, now_dt)
+        if info is None:
+            continue
+        y = str(r["on_time"] or "")[:4]
+        if not y.isdigit():
+            continue
+        b = year_agg.setdefault(int(y), {"count": 0, "dur_s": 0.0, "ene": 0.0, "has_ene": False})
+        b["count"] += 1
+        b["dur_s"] += info["dur_s"]
+        if info["has_ene"]:
+            b["ene"] += info["ene"]
+            b["has_ene"] = True
+    by_year = [{
+        "year": y,
+        "totals": {
+            "count": v["count"],
+            "duration_hour": round(v["dur_s"] / 3600.0, 2),
+            "energy_kwh": round(v["ene"], 4) if v["has_ene"] else None,
+        },
+    } for y, v in sorted(year_agg.items())]
+
+    return {
+        "scope": scope,
+        "month_day": month_day,
+        "current": {"label": cur_year if scope == "month" else f"{cur_year}-{month_day}",
+                    "entity_count": len(c_ents), "totals": c_tot, "entities": c_ents},
+        "history": {"years": len({y for e in h_ents for y in e["years"]}),
+                    "entity_count": len(h_ents), "totals": h_tot,
+                    "entities": h_ents, "by_year": by_year},
+    }
+
+
+def compute_device_usage_avg_sync(db_path, entity_ids=None,
+                                  start="", end="", date="", month="", year="",
+                                  now_dt=None) -> dict:
+    """【设备类·接口 4】多实体平均指标。
+
+    返回每个实体的：
+      avg_daily_count   平均每日使用次数（= 次数 / 有数据天数）
+      avg_daily_hour    平均每日使用时长（小时，对外命名 avg_daily_duration_hour）
+      avg_per_count_hour 平均每次时长（小时，= 总时长 / 次数）
+      days_with_data    参与统计的天数（按实际出现记录的日期数）
+      span_days         首末记录跨越的自然天数（用于对比口径）
+    全局平均按**加权**计算（总时长/总次数、总次数/总天数），而非各实体简单平均。
+
+    返回：
+      { range, entity_count,
+        totals:{count, duration_hour, energy_kwh_days,
+                avg_daily_count, avg_daily_duration_hour, avg_per_count_hour},
+        entities:[{entity_id,name,room,count,active_days,duration_hour,
+                   avg_daily_count,avg_daily_duration_hour,avg_per_count_hour}] }
+    """
+    entity_ids = [x for x in (entity_ids or []) if x]
+    if now_dt is None:
+        now_dt = datetime.now()
+    rows = _fetch_usage_rows(db_path, entity_ids, start=start, end=end,
+                             date=date, month=month, year=year)
+    meta = _dev_meta(db_path, entity_ids or [r["entity_id"] for r in rows])
+
+    agg: dict = {}
+    for r in rows:
+        info = _row_running_usage(r, now_dt)
+        if info is None:
+            continue
+        eid = r["entity_id"]
+        day = str(r["on_time"] or "")[:10]
+        b = agg.setdefault(eid, {"count": 0, "dur_s": 0.0, "ene": 0.0,
+                                 "has_ene": False, "days": set(), "all_days": set()})
+        b["count"] += 1
+        b["dur_s"] += info["dur_s"]
+        if info["has_ene"]:
+            b["ene"] += info["ene"]
+            b["has_ene"] = True
+        if len(day) == 10:
+            b["days"].add(day)
+        if len(day) == 10:
+            b["all_days"].add(day)
+
+    entities = []
+    for eid, b in agg.items():
+        m = meta.get(eid, {})
+        n = b["count"]
+        days = len(b["days"]) or 0
+        dur_h = round(b["dur_s"] / 3600.0, 2)
+        entities.append({
+            "entity_id": eid,
+            "name": m.get("name", ""),
+            "room": m.get("room", ""),
+            "count": n,
+            "active_days": days,
+            "duration_hour": dur_h,
+            "energy_kwh": round(b["ene"], 4) if b["has_ene"] else None,
+            "avg_daily_count": round(n / days, 2) if days else None,
+            "avg_daily_duration_hour": round(dur_h / days, 2) if days else None,
+            "avg_per_count_hour": round(dur_h / n, 2) if n else None,
+        })
+    entities.sort(key=lambda d: (d["duration_hour"], d["count"]), reverse=True)
+
+    # 全局：按天数并集算"平均每日"，按总次数算"平均每次"
+    all_days: set = set()
+    for b in agg.values():
+        all_days |= b["all_days"]
+    t_cnt = sum(e["count"] for e in entities)
+    t_dur = round(sum(e["duration_hour"] for e in entities), 2)
+    t_days = len(all_days)
+    any_e = any(e["energy_kwh"] is not None for e in entities)
+    return {
+        "range": {"start": start, "end": end, "date": date,
+                  "month": month, "year": year,
+                  "label": _usage_range_params([], start, end, date, month, year)[2]},
+        "entity_count": len(entities),
+        "totals": {
+            "count": t_cnt,
+            "duration_hour": t_dur,
+            "active_days": t_days,
+            "energy_kwh": round(sum(float(e["energy_kwh"] or 0) for e in entities), 4) if any_e else None,
+            "avg_daily_count": round(t_cnt / t_days, 2) if t_days else None,
+            "avg_daily_duration_hour": round(t_dur / t_days, 2) if t_days else None,
+            "avg_per_count_hour": round(t_dur / t_cnt, 2) if t_cnt else None,
+        },
+        "entities": entities,
+    }
+
+
+def compute_power_energy_multi_sync(db_path, entity_ids=None,
+                                    bucket="day", view="entity",
+                                    start="", end="", date="", month="", year="",
+                                    include_devices=True) -> dict:
+    """多实体用电量（power_energy_daily）多维聚合，支持两种返回结构。
+
+    数据源：power_energy_daily（按天存储的 kwh），LEFT JOIN power_meter_configs
+    取 device_name / room / id_slug / daily_entity_id（配置缺失时回退日表自带值）。
+
+    参数：
+      entity_ids → 多个实体（逗号分隔已在调用方解析）；为空 = 全部实体
+      bucket     → 聚合维度：day(YYYY-MM-DD) | month(YYYY-MM) | year(YYYY)
+      view       → 返回结构：
+                     entity（默认）→ "实体 → 时间桶"：entities[{entity_id,...,series[],totals}]
+                     date         → "时间桶 → 实体"：dates[{key,...,devices[],totals}]
+      start/end  → 日期区间（可单边）；与 date/month/year 互斥，优先级最高
+      date/month/year → 指定某日 / 某月 / 某年（优先级递减）
+      不传任何时间参数 = 全部时间
+
+    返回：
+      {view, bucket, range:{start,end,date,month,year,label},
+       entity_count, totals:{kwh, day_count, entity_count},
+       entities:[...] 或 dates:[...]}
+    """
+    if bucket not in ("day", "month", "year"):
+        bucket = "day"
+    if view not in ("entity", "date"):
+        view = "entity"
+    entity_ids = [x for x in (entity_ids or []) if x]
+
+    # --- 时间过滤（start/end > date > month > year；全空 = 全部） ---
+    conds: list = []
+    params: list = []
+    label = ""
+    if start or end:
+        if start:
+            conds.append("de.date >= ?")
+            params.append(start)
+        if end:
+            conds.append("de.date <= ?")
+            params.append(end)
+        label = f"{start or ''}~{end or ''}"
+    elif date:
+        conds.append("de.date = ?")
+        params.append(date)
+        label = date
+    elif month:
+        conds.append("de.date LIKE ?")
+        params.append(f"{month}-%")
+        label = month
+    elif year:
+        conds.append("de.date LIKE ?")
+        params.append(f"{year}-%")
+        label = year
+    if entity_ids:
+        conds.append(f"de.entity_id IN ({','.join(['?'] * len(entity_ids))})")
+        params.extend(entity_ids)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+
+    # 时间桶表达式（SQLite substr，uniform 长度便于字符串排序）
+    bucket_expr = {
+        "day": "de.date",
+        "month": "substr(de.date, 1, 7)",
+        "year": "substr(de.date, 1, 4)",
+    }[bucket]
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        # 逐条明细：实体 × 时间桶（同时拿到展示用元信息）
+        rows = conn.execute(
+            f"SELECT de.entity_id AS entity_id, "
+            f"  COALESCE(NULLIF(mc.device_name, ''), de.device_name, '') AS device_name, "
+            f"  COALESCE(NULLIF(mc.room, ''), de.room, '') AS room, "
+            f"  COALESCE(mc.id_slug, '') AS id_slug, "
+            f"  COALESCE(NULLIF(de.daily_entity_id, ''), mc.daily_entity_id, '') AS daily_entity_id, "
+            f"  {bucket_expr} AS bucket, "
+            f"  ROUND(SUM(de.kwh), 4) AS kwh, "
+            f"  COUNT(*) AS day_count "
+            f"FROM {TABLE_POWER_ENERGY_DAILY} de "
+            f"LEFT JOIN {TABLE_POWER_METER_CONFIGS} mc ON de.entity_id = mc.entity_id "
+            f"{where} "
+            f"GROUP BY de.entity_id, bucket "
+            f"ORDER BY de.entity_id ASC, bucket ASC",
+            params,
+        ).fetchall()
+        entries = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    # --- 汇总 ---
+    grand = round(sum(float(e.get("kwh") or 0.0) for e in entries), 4)
+    all_days = sum(int(e.get("day_count") or 0) for e in entries)
+    range_info = {"start": start, "end": end, "date": date,
+                  "month": month, "year": year, "label": label}
+
+    if view == "date":
+        # 时间桶 → 实体
+        buckets: dict = {}
+        for e in entries:
+            b = buckets.setdefault(e["bucket"], {
+                "key": e["bucket"], "totals": {"kwh": 0.0, "day_count": 0},
+                "devices": [], "_idx": {},
+            })
+            kwh = round(float(e.get("kwh") or 0.0), 4)
+            b["totals"]["kwh"] = round(b["totals"]["kwh"] + kwh, 4)
+            b["totals"]["day_count"] += int(e.get("day_count") or 0)
+            item = {
+                "entity_id": e["entity_id"],
+                "device_name": e.get("device_name", ""),
+                "room": e.get("room", ""),
+                "id_slug": e.get("id_slug", ""),
+                "daily_entity_id": e.get("daily_entity_id", ""),
+                "kwh": kwh,
+                "day_count": int(e.get("day_count") or 0),
+            }
+            b["devices"].append(item)
+            b["_idx"][e["entity_id"]] = len(b["devices"]) - 1
+        dates = []
+        for key in sorted(buckets.keys(), reverse=True):
+            b = buckets.pop(key)
+            b["devices"].sort(key=lambda d: (-float(d.get("kwh") or 0), d["entity_id"]))
+            b["device_count"] = len(b["devices"])
+            b["totals"]["entity_count"] = b["device_count"]
+            b["totals"]["kwh"] = round(b["totals"]["kwh"], 4)
+            b.pop("_idx", None)
+            if not include_devices:
+                b.pop("devices", None)
+            dates.append(b)
+        return {
+            "view": "date", "bucket": bucket, "range": range_info,
+            "entity_count": len({e["entity_id"] for e in entries}),
+            "totals": {"kwh": grand, "day_count": all_days,
+                       "bucket_count": len(dates),
+                       "entity_count": len({e["entity_id"] for e in entries})},
+            "dates": dates,
+        }
+
+    # 实体 → 时间桶（默认）
+    ents: dict = {}
+    for e in entries:
+        it = ents.setdefault(e["entity_id"], {
+            "entity_id": e["entity_id"],
+            "device_name": e.get("device_name", ""),
+            "room": e.get("room", ""),
+            "id_slug": e.get("id_slug", ""),
+            "daily_entity_id": e.get("daily_entity_id", ""),
+            "totals": {"kwh": 0.0, "day_count": 0},
+            "series": [],
+        })
+        kwh = round(float(e.get("kwh") or 0.0), 4)
+        it["totals"]["kwh"] = round(it["totals"]["kwh"] + kwh, 4)
+        it["totals"]["day_count"] += int(e.get("day_count") or 0)
+        # device_name/room 取最新非空值（同一实体在不同日行可能补填过）
+        if e.get("device_name"):
+            it["device_name"] = e["device_name"]
+        if e.get("room"):
+            it["room"] = e["room"]
+        it["series"].append({
+            "key": e["bucket"], "kwh": kwh,
+            "day_count": int(e.get("day_count") or 0),
+        })
+    entities = sorted(ents.values(),
+                      key=lambda d: (-float(d["totals"]["kwh"]), d["entity_id"]))
+    return {
+        "view": "entity", "bucket": bucket, "range": range_info,
+        "entity_count": len(entities),
+        "totals": {"kwh": grand, "day_count": all_days,
+                   "entity_count": len(entities)},
+        "entities": entities,
+    }
+
+
 def compute_entities_period_agg_sync(db_path, entity_ids=None, bucket="day",
                                      view="entity",
                                      start="", end="", date="", month="", year="",
@@ -1267,27 +2181,61 @@ def compute_entities_period_agg_sync(db_path, entity_ids=None, bucket="day",
 
 
 def compute_entities_dates_sync(db_path, entity_ids=None,
-                                start="", end="", date="", month="", year="") -> dict:
+                                start="", end="", date="", month="", year="",
+                                group="all") -> dict:
     """多实体：返回哪些日期有开启数据（含运行中设备，其 on_time 即开启日）。
 
-    entity_ids 为空 = 全部实体。返回：
-      { entity_ids, range, all_count, all_dates(去重升序),
-        entities: [{entity_id, name, count, dates}] }
+    entity_ids 为空 = 全部实体。
+
+    group 分组方式（5 种）：
+      all    ① 合并返回：去重日期总表 `all_dates` + 每实体日期
+      entity ② 按实体分组：`entities[].dates`（与上一版 group=1 等价）
+      count  ③ **按日期数量返回**：把"当天有数据的实体数"相同的日期聚成一组，
+               返回 `count_groups:[{date_count, dates[], date_total}]`
+               另附 `date_counts`（每个日期 → 当天实体数）速查表
+      both   ④ **按日期数量 + 实体返回**：在 ③ 的基础上，每组日期再带出
+               当天具体是哪些实体（`details[]` / `entities[]`）
+      simple ⑤ **极简返回**：直接给 `[{date, count}]` 扁平数组（`list`），
+               `count` = 当天有数据的实体数，按日期倒序，开箱即用
+
+    注：为向后兼容，group 仍接受布尔式写法 `1`(→entity) / `0`(→all)。
+
+    返回（按 group 逐项出现）：
+      { entity_ids, range, group,
+        all_count, all_dates,                     # all / entity
+        entities:[{entity_id,name,count,dates}],  # all / entity / both
+        date_counts:{date:entity_count},           # count / both
+        count_groups:[{date_count, dates:[], date_total, entities?}],
+        list:[{date, count}] }                     # simple
     """
+    # 兼容旧的 0/1 写法
+    g = str(group if group is not None else "all").strip().lower()
+    if g in ("1", "true", "yes"):
+        g = "entity"
+    elif g in ("0", "false", "no", ""):
+        g = "all"
+    if g not in ("all", "entity", "count", "both", "simple"):
+        g = "all"
+
     eids = [x.strip() for x in (entity_ids or []) if (x or "").strip()]
     rows = _fetch_usage_rows(db_path, eids, start, end, date, month, year)
+
+    # date -> {entity_id: name}
+    date_ents: dict[str, dict] = {}
+    # entity_id -> {name, date_set}
     ent_map: dict[str, dict] = {}
-    all_set = set()
     for r in rows:
         eid = (r["entity_id"] or "").strip()
         d = (r["on_time"] or "")[:10]
         if not eid or not d:
             continue
-        em = ent_map.setdefault(eid, {"entity_id": eid,
-                                      "name": (r["name"] or "").strip() or eid,
-                                      "date_set": set()})
+        nm = (r["name"] or "").strip() or eid
+        date_ents.setdefault(d, {})[eid] = nm
+        em = ent_map.setdefault(eid, {"entity_id": eid, "name": nm, "date_set": set()})
         em["date_set"].add(d)
-        all_set.add(d)
+
+    all_dates = sorted(date_ents.keys())
+    date_counts = {d: len(date_ents[d]) for d in all_dates}
 
     entities = []
     for eid in sorted(ent_map):
@@ -1298,14 +2246,62 @@ def compute_entities_dates_sync(db_path, entity_ids=None,
             "count": len(em["date_set"]),
             "dates": sorted(em["date_set"]),
         })
+
     _c, _p, label = _usage_range_params(eids, start, end, date, month, year)
-    return {
+    out: dict = {
         "entity_ids": eids or None,
         "range": label or None,
-        "all_count": len(all_set),
-        "all_dates": sorted(all_set),
-        "entities": entities,
+        "group": g,
     }
+
+    if g in ("all", "entity"):
+        out["all_count"] = len(all_dates)
+        out["all_dates"] = all_dates
+        out["entities"] = entities
+        return out
+
+    # ---- group=simple：极简 [{date, count}]（日期倒序） ----
+    if g == "simple":
+        out["date_count"] = len(all_dates)
+        out["list"] = [{"date": d, "count": date_counts[d]}
+                       for d in sorted(all_dates, reverse=True)]
+        return out
+
+    # ---- group=count / both：按"当天有数据的实体数"分组 ----
+    buckets: dict[int, list] = {}
+    for d in all_dates:
+        buckets.setdefault(date_counts[d], []).append(d)
+
+    count_groups = []
+    for n in sorted(buckets.keys()):          # 数量升序，便于看"只有1台"到"全部"
+        ds = sorted(buckets[n], reverse=True)  # 组内日期倒序（最新在前）
+        g_obj: dict = {
+            "date_count": n,
+            "date_total": len(ds),
+            "dates": ds,
+        }
+        if g == "both":
+            # 该组每个日期对应的实体明细（组内实体集合并集，便于一眼看清涉及哪些设备）
+            per_date = []
+            union: dict = {}
+            for d in ds:
+                ents = [{"entity_id": e, "name": date_ents[d][e]}
+                        for e in sorted(date_ents[d])]
+                per_date.append({"date": d, "entity_count": len(ents), "entities": ents})
+                for e, nm in date_ents[d].items():
+                    union.setdefault(e, {"entity_id": e, "name": nm, "date_count": 0})
+                    union[e]["date_count"] += 1
+            g_obj["details"] = per_date
+            ue = sorted(union.values(), key=lambda x: (-x["date_count"], x["entity_id"]))
+            g_obj["entities"] = ue
+            g_obj["entity_count"] = len(ue)
+        count_groups.append(g_obj)
+
+    out["date_counts"] = date_counts
+    out["count_groups"] = count_groups
+    if g == "both":
+        out["entities"] = entities           # 同时保留按实体的汇总，便于交叉查看
+    return out
 
 
 def compute_entities_hours_sync(db_path, entity_ids=None,
@@ -3318,7 +4314,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, whole_house_usage, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_entities, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, whole_house_usage, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail, power_energy_joined, power_energy_multi, device_usage_multi, device_usage_detail, device_usage_total, device_usage_history, device_usage_avg"},
                 status_code=400,
             )
 
@@ -3330,6 +4326,22 @@ class QueryView(_BaseDBView):
         try:
             if query_type == "device_history":
                 result = await self._exec_in_executor(hass, self._query_device_history, db_path, request)
+            elif query_type == "device_entities":
+                result = await self._exec_in_executor(hass, self._query_device_entities, db_path, request)
+            elif query_type == "power_energy_joined":
+                result = await self._exec_in_executor(hass, self._query_power_energy_joined, db_path, request)
+            elif query_type == "power_energy_multi":
+                result = await self._exec_in_executor(hass, self._query_power_energy_multi, db_path, request)
+            elif query_type == "device_usage_multi":
+                result = await self._exec_in_executor(hass, self._query_device_usage_multi, db_path, request)
+            elif query_type == "device_usage_detail":
+                result = await self._exec_in_executor(hass, self._query_device_usage_detail, db_path, request)
+            elif query_type == "device_usage_total":
+                result = await self._exec_in_executor(hass, self._query_device_usage_total, db_path, request)
+            elif query_type == "device_usage_history":
+                result = await self._exec_in_executor(hass, self._query_device_usage_history, db_path, request)
+            elif query_type == "device_usage_avg":
+                result = await self._exec_in_executor(hass, self._query_device_usage_avg, db_path, request)
             elif query_type == "device_summary":
                 result = await self._exec_in_executor(hass, self._query_device_summary, db_path, request)
             elif query_type == "device_users_list":
@@ -3638,6 +4650,344 @@ class QueryView(_BaseDBView):
 
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  device_entities：device_history 表实体去重清单                        #
+    # ------------------------------------------------------------------ #
+    def _query_device_entities(self, db_path: str, request: web.Request) -> dict:
+        """查询 device_history 表中实体去重后的 entity_id / name / room。
+
+        另按 device_history.entity_id = entity_configs.entity_id 左连接，
+        附带该实体的用电配置：power_entity（电量/功率传感器）、power_rating（固定功率 W）。
+        无配置时两者为空（power_rating 返回 null）。
+
+        可选参数：
+          entity_id → 按实体模糊过滤（LIKE %值%）
+          room      → 按房间精确过滤
+          name      → 按名称模糊过滤（LIKE %值%）
+          has_power → 1=只看配置了 power_entity 的；0=只看未配置的（power_entity 为空）
+          order_by  → entity_id|name|room（默认 entity_id）
+          order     → asc|desc（默认 asc）
+        返回 {count, rows:[{entity_id, name, room, power_entity, power_rating}]}
+        """
+        entity_id = (request.query.get("entity_id", "") or "").strip()
+        room = (request.query.get("room", "") or "").strip()
+        name = (request.query.get("name", "") or "").strip()
+        has_power = (request.query.get("has_power", "") or "").strip()
+        order_by = (request.query.get("order_by", "") or "").strip()
+        order = (request.query.get("order", "") or "").strip().lower() or "asc"
+        if order not in ("asc", "desc"):
+            order = "asc"
+        if order_by not in ("entity_id", "name", "room"):
+            order_by = "entity_id"
+
+        conds = []
+        params: list = []
+        if entity_id:
+            conds.append("dh.entity_id LIKE ?")
+            params.append(f"%{entity_id}%")
+        if room:
+            conds.append("dh.room = ?")
+            params.append(room)
+        if name:
+            conds.append("dh.name LIKE ?")
+            params.append(f"%{name}%")
+        where = (" WHERE " + " AND ".join(conds)) if conds else ""
+        # 聚合结果过滤必须用 HAVING（WHERE 中不能出现聚合函数）
+        having = ""
+        if has_power == "1":
+            having = " HAVING COALESCE(MAX(ec.power_entity), '') <> ''"
+        elif has_power == "0":
+            having = " HAVING COALESCE(MAX(ec.power_entity), '') = ''"
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"SELECT dh.entity_id AS entity_id, MAX(dh.name) AS name, "
+                f"  MAX(dh.room) AS room, "
+                f"  MAX(ec.power_entity) AS power_entity, "
+                f"  MAX(ec.power_rating) AS power_rating "
+                f"FROM {TABLE_DEVICE_HISTORY} dh "
+                f"LEFT JOIN {TABLE_ENTITY_CONFIGS} ec ON dh.entity_id = ec.entity_id "
+                f"{where} "
+                f"GROUP BY dh.entity_id{having} "
+                f"ORDER BY {order_by} {order.upper()}",
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        out = []
+        for r in rows:
+            try:
+                rating = float(r["power_rating"]) if r["power_rating"] not in (None, "") else None
+            except (TypeError, ValueError):
+                rating = None
+            out.append({
+                "entity_id": r["entity_id"] or "",
+                "name": r["name"] or "",
+                "room": r["room"] or "",
+                "power_entity": r["power_entity"] or "",
+                "power_rating": rating,
+            })
+        return {"count": len(out), "rows": out}
+
+    # ------------------------------------------------------------------ #
+    #  device_usage_detail / total / history / avg：设备类多实体扩展接口      #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _dev_multi_params(request):
+        """统一解析设备类多实体接口的公共参数。(entity_ids, kwargs)"""
+        q = request.query
+        raw = (q.get("entities", "") or "").strip() or (q.get("entity_id", "") or "").strip()
+        entity_ids = [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+        kw = {
+            "start": (q.get("start", "") or "").strip(),
+            "end": (q.get("end", "") or "").strip(),
+            "date": (q.get("date", "") or "").strip(),
+            "month": (q.get("month", "") or "").strip(),
+            "year": (q.get("year", "") or "").strip(),
+        }
+        return entity_ids, kw
+
+    @staticmethod
+    def _to_int(v, default=0) -> int:
+        try:
+            return int(str(v or "").strip())
+        except (TypeError, ValueError):
+            return default
+
+    def _query_device_usage_detail(self, db_path: str, request: web.Request) -> dict:
+        """【设备类·1】多实体明细（不聚合）。
+
+        参数：entities（逗号分隔，空=全部）、start/end/date/month/year、
+              limit/offset（分页，limit=0 不限）、full=1（返回全部字段）、
+              summary=0（不返回 summary 合计节点，默认返回）
+        """
+        q = request.query
+        entity_ids, kw = self._dev_multi_params(request)
+
+        def _flag(name, default=True):
+            v = (q.get(name, "") or "").strip().lower()
+            if v == "":
+                return default
+            return v not in ("0", "false", "no")
+
+        return compute_device_usage_detail_sync(
+            db_path, entity_ids, **kw,
+            limit=self._to_int(q.get("limit"), 0),
+            offset=self._to_int(q.get("offset"), 0),
+            full=_flag("full", False),
+            include_summary=_flag("summary", True),
+        )
+
+    def _query_device_usage_total(self, db_path: str, request: web.Request) -> dict:
+        """【设备类·2】多实体合计（年/月/日/全部）。
+
+        参数：entities、scope=all|year|month|date（配合 year/month/date）
+        """
+        q = request.query
+        entity_ids, kw = self._dev_multi_params(request)
+        return compute_device_usage_total_sync(
+            db_path, entity_ids,
+            scope=(q.get("scope", "all") or "all").strip(),
+            year=kw["year"], month=kw["month"], date=kw["date"],
+        )
+
+    def _query_device_usage_history(self, db_path: str, request: web.Request) -> dict:
+        """【设备类·3】多实体历史同期合计（历史今日 / 历史本月）。
+
+        参数：entities、scope=today|month
+        """
+        q = request.query
+        entity_ids, _kw = self._dev_multi_params(request)
+        return compute_device_usage_history_sync(
+            db_path, entity_ids,
+            scope=(q.get("scope", "today") or "today").strip(),
+        )
+
+    def _query_device_usage_avg(self, db_path: str, request: web.Request) -> dict:
+        """【设备类·4】多实体平均指标（平均每日次数/时长、平均每次时长）。
+
+        参数：entities、start/end/date/month/year（默认全部时间）
+        """
+        entity_ids, kw = self._dev_multi_params(request)
+        return compute_device_usage_avg_sync(db_path, entity_ids, **kw)
+
+    # ------------------------------------------------------------------ #
+    #  device_usage_multi：设备用时/用电 多实体 × 多维度（年/月/日）聚合      #
+    # ------------------------------------------------------------------ #
+    def _query_device_usage_multi(self, db_path: str, request: web.Request) -> dict:
+        """多实体设备用时/用电按 日/月/年 聚合，支持全部/指定时间/时间段，两种返回结构。
+
+        参数：
+          entities → 多个实体，逗号分隔（空 = 全部实体）
+          bucket   → day(默认) | month | year
+          view     → entity(默认，实体→时间桶) | date(时间桶→实体)
+          start/end/date/month/year → 时间范围（start/end > date > month > year；
+                                      全不传 = 全部时间）
+          devices  → date 视图下是否返回 devices 明细，0 可关闭（默认 1）
+        指标：count 开启次数 / duration_hour 时长 / energy_kwh 用电量（无来源为 null）。
+        """
+        q = request.query
+        raw = (q.get("entities", "") or "").strip() or (q.get("entity_id", "") or "").strip()
+        entity_ids = [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+        devices = (q.get("devices", "1") or "1").strip() not in ("0", "false", "no")
+        return compute_device_usage_multi_sync(
+            db_path, entity_ids,
+            bucket=(q.get("bucket", "day") or "").strip(),
+            view=(q.get("view", "entity") or "").strip(),
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            date=(q.get("date", "") or "").strip(),
+            month=(q.get("month", "") or "").strip(),
+            year=(q.get("year", "") or "").strip(),
+            include_devices=devices,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  power_energy_multi：用电量多实体 × 多维度（年/月/日）聚合             #
+    # ------------------------------------------------------------------ #
+    def _query_power_energy_multi(self, db_path: str, request: web.Request) -> dict:
+        """多实体用电量按 日/月/年 聚合，支持全部/指定时间/时间段，两种返回结构。
+
+        参数：
+          entities → 多个实体，逗号分隔（空 = 全部实体）
+          bucket   → day(默认) | month | year
+          view     → entity(默认，实体→时间桶) | date(时间桶→实体)
+          start/end/date/month/year → 时间范围（start/end > date > month > year；
+                                      全不传 = 全部时间）
+          devices  → date 视图下是否返回 devices 明细，0 可关闭（默认 1）
+        返回见 compute_power_energy_multi_sync。
+        """
+        q = request.query
+        raw = (q.get("entities", "") or "").strip() or (q.get("entity_id", "") or "").strip()
+        entity_ids = [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+        devices = (q.get("devices", "1") or "1").strip() not in ("0", "false", "no")
+        return compute_power_energy_multi_sync(
+            db_path, entity_ids,
+            bucket=(q.get("bucket", "day") or "").strip(),
+            view=(q.get("view", "entity") or "").strip(),
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            date=(q.get("date", "") or "").strip(),
+            month=(q.get("month", "") or "").strip(),
+            year=(q.get("year", "") or "").strip(),
+            include_devices=devices,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  power_energy_joined：用电计量 ↔ 电表配置 关联查询                     #
+    # ------------------------------------------------------------------ #
+    def _query_power_energy_joined(self, db_path: str, request: web.Request) -> dict:
+        """power_energy_daily 与 power_meter_configs 按 entity_id 关联。
+
+        返回每条日用电记录：entity_id / device_name / room / date / kwh / id_slug / daily_entity_id
+        （device_name/room 取电表配置表中的值，缺失时回退日表自带值；
+          id_slug、daily_entity_id 均来自 power_meter_configs）
+
+        可选参数：
+          entity_id → 单个或多个（逗号分隔），按实体精确过滤
+          start/end → 日期区间（date >= start 且 <= end，可单边）
+          date      → 指定某天（YYYY-MM-DD）
+          month     → 指定某月（YYYY-MM）
+          year      → 指定某年（YYYY）
+          id_slug   → 按 slug 精确过滤
+          limit/offset → 分页（默认全部）
+          order     → asc|desc（按 date + entity_id，默认 asc）
+        返回 {count, rows:[{entity_id, device_name, room, date, kwh, id_slug}]}
+        """
+        entity_ids = [x.strip() for x in
+                      (request.query.get("entity_id", "") or "").replace("，", ",").split(",")
+                      if x.strip()]
+        date = (request.query.get("date", "") or "").strip()
+        month = (request.query.get("month", "") or "").strip()
+        year = (request.query.get("year", "") or "").strip()
+        start = (request.query.get("start", "") or "").strip()
+        end = (request.query.get("end", "") or "").strip()
+        id_slug = (request.query.get("id_slug", "") or "").strip()
+        order = (request.query.get("order", "") or "").strip().lower() or "asc"
+        if order not in ("asc", "desc"):
+            order = "asc"
+        try:
+            limit = int(request.query.get("limit", "") or 0)
+            offset = int(request.query.get("offset", "") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("limit/offset 需为整数")
+        if limit < 0 or offset < 0:
+            raise ValueError("limit/offset 不能为负")
+
+        conds = []
+        params: list = []
+        if entity_ids:
+            conds.append(f"de.entity_id IN ({','.join(['?'] * len(entity_ids))})")
+            params.extend(entity_ids)
+        # 日期过滤优先级：start/end > date > month > year
+        if start:
+            conds.append("de.date >= ?")
+            params.append(start)
+        if end:
+            conds.append("de.date <= ?")
+            params.append(end)
+        if not start and not end:
+            if date:
+                conds.append("de.date = ?")
+                params.append(date)
+            elif month:
+                conds.append("de.date LIKE ?")
+                params.append(f"{month}-%")
+            elif year:
+                conds.append("de.date LIKE ?")
+                params.append(f"{year}-%")
+        if id_slug:
+            conds.append("mc.id_slug = ?")
+            params.append(id_slug)
+        where = (" WHERE " + " AND ".join(conds)) if conds else ""
+
+        base_sql = (
+            f"FROM {TABLE_POWER_ENERGY_DAILY} de "
+            f"INNER JOIN {TABLE_POWER_METER_CONFIGS} mc ON de.entity_id = mc.entity_id "
+            f"{where}"
+        )
+        order_sql = f"de.date {order.upper()}, de.entity_id ASC"
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            total = conn.execute(f"SELECT COUNT(*) {base_sql}", params).fetchone()[0]
+            sql = (
+                f"SELECT de.entity_id AS entity_id, "
+                f"  COALESCE(NULLIF(mc.device_name, ''), de.device_name, '') AS device_name, "
+                f"  COALESCE(NULLIF(mc.room, ''), de.room, '') AS room, "
+                f"  de.date AS date, de.kwh AS kwh, mc.id_slug AS id_slug, "
+                f"  COALESCE(NULLIF(de.daily_entity_id, ''), mc.daily_entity_id, '') AS daily_entity_id "
+                f"{base_sql} ORDER BY {order_sql}"
+            )
+            binds = list(params)
+            if limit > 0:
+                sql += " LIMIT ? OFFSET ?"
+                binds += [limit, offset]
+            rows = conn.execute(sql, binds).fetchall()
+        finally:
+            conn.close()
+
+        out = []
+        for r in rows:
+            try:
+                kwh = round(float(r["kwh"] or 0), 4)
+            except (TypeError, ValueError):
+                kwh = None
+            out.append({
+                "entity_id": r["entity_id"] or "",
+                "device_name": r["device_name"] or "",
+                "room": r["room"] or "",
+                "date": r["date"] or "",
+                "kwh": kwh,
+                "id_slug": r["id_slug"] or "",
+                "daily_entity_id": r["daily_entity_id"] or "",
+            })
+        return {"count": total, "rows": out}
 
     # ------------------------------------------------------------------ #
     #  device_summary：纯汇总（不返回记录）                                  #
@@ -4971,7 +6321,15 @@ class QueryView(_BaseDBView):
         )
 
     def _query_entities_dates(self, db_path, request) -> dict:
-        """多实体：返回哪些日期有数据（group=1 按实体分组；否则合并日期列表）。"""
+        """多实体：返回哪些日期有数据。
+
+        分组方式 group：
+          all(默认,兼容0) 合并日期列表 + 每实体 dates
+          entity(兼容1)   按实体分组
+          count           按"当天有数据的实体数"分组（count_groups + date_counts）
+          both            按日期数量 + 实体（count_groups 内每组含 details/entities）
+          simple          极简 [{date, count}] 扁平数组（date 倒序）
+        """
         data = compute_entities_dates_sync(
             db_path, self._parse_multi_entities(request),
             start=(request.query.get("start", "") or "").strip(),
@@ -4979,11 +6337,20 @@ class QueryView(_BaseDBView):
             date=(request.query.get("date", "") or "").strip(),
             month=(request.query.get("month", "") or "").strip(),
             year=(request.query.get("year", "") or "").strip(),
+            group=(request.query.get("group", "") or "all").strip(),
         )
-        grouped = (request.query.get("group", "") or "").strip() == "1"
-        if grouped:
-            return {k: data[k] for k in ("entity_ids", "range", "entities")}
-        return {k: data[k] for k in ("entity_ids", "range", "all_count", "all_dates")}
+        g = data.get("group", "all")
+        if g == "simple":
+            return {k: data[k] for k in
+                    ("entity_ids", "range", "group", "date_count", "list") if k in data}
+        keys = ["entity_ids", "range", "group"]
+        if g in ("all", "entity"):
+            keys += ["all_count", "all_dates", "entities"]
+        else:
+            keys += ["date_counts", "count_groups"]
+            if g == "both":
+                keys += ["entities"]
+        return {k: data[k] for k in keys if k in data}
 
     def _query_entities_hours(self, db_path, request) -> dict:
         """多实体时段分布：group=1 按实体分组；否则只返回全部合并(merged)。"""
@@ -7637,11 +9004,23 @@ class DBViewerView(_BaseDBView):
                 inject += 'window.__HDS_FIRST_KEY__="' + first_key + '";\n'
             html = html.replace("<script>\n// ==============================",
                                 "<script>\n" + inject + "// ==============================")
-            return web.Response(text=html, content_type="text/html", charset="utf-8")
+            # 关键：禁止浏览器缓存本页面。
+            # 页面是整份内联 HTML（含全部 JS/CSS），若被浏览器缓存，
+            # 服务端虽已热重载新内容，浏览器仍会用旧副本 → 出现"界面/逻辑不更新"
+            # 的假象（例如新加的 JS 函数从未被调用）。这里每次都要求重新校验。
+            return web.Response(
+                text=html, content_type="text/html", charset="utf-8",
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                         "Pragma": "no-cache", "Expires": "0"},
+            )
         # 未登录 → 返回登录页
         error = request.query.get("error", "")
         login_html = _LOGIN_HTML.replace("{error}", error)
-        return web.Response(text=login_html, content_type="text/html", charset="utf-8")
+        return web.Response(
+            text=login_html, content_type="text/html", charset="utf-8",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                     "Pragma": "no-cache", "Expires": "0"},
+        )
 
 
 # ========================================================================== #
@@ -10758,8 +12137,20 @@ class PowerEnergyView(_BaseDBView):
          ?type=query&kind=range&start=YYYY-MM-DD&end=YYYY-MM-DD[&entity_id=][&room=] → 区间逐日
          ?type=query&kind=latest[&entity_id=][&room=]                  → 最新一条日记录
     POST body:
-         { action: "create", entity_id, device_name, room, id_slug, unit }   → 新增登记
-         { action: "delete", entity_id }                                     → 删除登记
+         { action: "create", entity_id, device_name, room, id_slug, unit }   → 新增/重新登记
+         { action: "delete", entity_id }                                     → 取消登记（软删除 → 回收站）
+         { action: "restore", entity_id }                                    → 从回收站恢复登记
+         { action: "restore_all" }                                           → 一键还原回收站全部登记
+         { action: "purge", entity_id }                                      → 彻底删除登记（配置行）
+         { action: "purge_all" }                                             → 清空回收站
+         { action: "backfill_deid" }                                         → 按 id_slug 派生并纠正 daily_entity_id
+
+    说明：取消登记为**软删除归档**（enabled=0），配置行保留；重新登记同一
+    entity_id 时自动沿用原 id_slug/设备名/房间并接续日表历史。
+    power_energy_daily 在任何情况下都不会被删除。
+
+    daily_entity_id（日用电量实体）是**登记产物**，由 id_slug 派生为
+    sensor.ha_data_store_{id_slug}_daily_ele，不接受前端传入。
     """
 
     url = "/api/ha_data_store/power_energy"
@@ -10775,11 +12166,36 @@ class PowerEnergyView(_BaseDBView):
         qtype = (q.get("type") or "configs").strip()
 
         try:
-            if qtype == "configs":
+            if qtype in ("configs", "archived"):
                 from .power_energy import PowerEnergyManager
                 mgr = PowerEnergyManager(hass, hass.data.get(DOMAIN, {}).get("entry_id", ""))
+                if qtype == "archived":
+                    # 用 load_archived_configs（宽容判定 enabled），兼容历史脏值
+                    archived = await self._exec_in_executor(hass, mgr.load_archived_configs)
+                    # 附诊断：便于排查"回收站为空"（能看出库里 enabled 的实际值与类型）
+                    diag = await self._exec_in_executor(hass, self._power_archive_diag)
+                    archives = await self._exec_in_executor(hass, mgr.list_orphan_meters)
+                    diag["orphan_count"] = len(archives)
+                    return self.json({"success": True, "data": archived, "_diag": diag})
                 configs = await self._exec_in_executor(hass, mgr.load_configs)
                 return self.json({"success": True, "data": configs})
+
+            if qtype == "orphans":
+                # 日表有数据但配置表无登记的实体（旧版本 delete 物理删配置所致）
+                from .power_energy import PowerEnergyManager
+                mgr = PowerEnergyManager(hass, hass.data.get(DOMAIN, {}).get("entry_id", ""))
+                rows = await self._exec_in_executor(hass, mgr.list_orphan_meters)
+                return self.json({"success": True, "data": rows})
+
+            if qtype == "lookup":
+                # 查单个登记（含已归档）→ 供前端"重新登记自动带出原配置"
+                entity_id = (q.get("entity_id") or "").strip()
+                if not entity_id:
+                    return self.json({"success": False, "error": "缺少 entity_id"}, status_code=400)
+                from .power_energy import PowerEnergyManager
+                mgr = PowerEnergyManager(hass, hass.data.get(DOMAIN, {}).get("entry_id", ""))
+                row = await self._exec_in_executor(hass, mgr.find_config, entity_id)
+                return self.json({"success": True, "data": row})
 
             if qtype == "query":
                 # 兜底建表（防止数据库尚未初始化时查询报 no such table）
@@ -10873,25 +12289,28 @@ class PowerEnergyView(_BaseDBView):
 
         if action == "create":
             entity_id = (body.get("entity_id") or "").strip()
-            id_slug = (body.get("id_slug") or "").strip()
             if not entity_id:
                 return self.json({"success": False, "error": "缺少 entity_id（功率实体）"}, status_code=400)
+            # 沿用历史配置：已归档（取消登记）的同一 entity_id 自动带出原
+            # id_slug/设备名/房间/日用电量实体，保证实体 ID 与日表数据不分叉
+            old = await self._exec_in_executor(hass, mgr.find_config, entity_id) or {}
+            id_slug = (body.get("id_slug") or "").strip() or (old.get("id_slug") or "")
             if not id_slug:
                 return self.json({"success": False, "error": "缺少 id_slug（英文 ID 段）"}, status_code=400)
+            # 注意：不接收 daily_entity_id —— 它由 id_slug 派生
+            # （sensor.ha_data_store_{id_slug}_daily_ele），即登记后自动生成的
+            # 那个日用电实体，由 manager 内部写入，避免与前端输入不一致。
             cfg = {
                 "entity_id": entity_id,
-                "device_name": (body.get("device_name") or "").strip(),
-                "room": (body.get("room") or "").strip(),
+                "device_name": (body.get("device_name") or "").strip() or (old.get("device_name") or ""),
+                "room": (body.get("room") or "").strip() or (old.get("room") or ""),
                 "id_slug": id_slug,
-                "unit": (body.get("unit") or "W").strip() or "W",
+                "unit": (body.get("unit") or "").strip() or (old.get("unit") or "W"),
                 "enabled": True,
             }
-            # 若功率实体已登记过，先删除旧配置与旧实体（含日表），再重新登记
-            existing = await self._exec_in_executor(hass, mgr.load_configs)
-            exists = any((c.get("entity_id") == entity_id) for c in existing)
-            if exists:
+            # 若功率实体当前仍在生效，先注销旧实体（保留配置行，不删日表）
+            if old.get("enabled"):
                 mgr.unregister_entities({"entity_id": entity_id})
-                await self._exec_in_executor(hass, mgr.remove_config, entity_id)
 
             await self._exec_in_executor(hass, mgr.save_config, cfg)
             # 注意 register_entities 涉及平台 add_cb，必须在事件循环中调用
@@ -10899,7 +12318,10 @@ class PowerEnergyView(_BaseDBView):
             _lg = _log_local()
             if _lg:
                 _lg.info("[power] 登记功率计量 entity_id=%s slug=%s", entity_id, id_slug)
-            return self.json({"success": True, "message": f"已登记功率计量 {entity_id}",
+            msg = f"已登记功率计量 {entity_id}"
+            if old and not old.get("enabled"):
+                msg += "（沿用原有配置与历史用电数据）"
+            return self.json({"success": True, "message": msg,
                               "data": {"entity_id": entity_id, "id_slug": id_slug}})
 
         if action == "delete":
@@ -10907,15 +12329,126 @@ class PowerEnergyView(_BaseDBView):
             if not entity_id:
                 return self.json({"success": False, "error": "缺少 entity_id"}, status_code=400)
             mgr.unregister_entities({"entity_id": entity_id})
-            await self._exec_in_executor(hass, mgr.remove_config, entity_id)
+            await self._exec_in_executor(hass, mgr.archive_config, entity_id)
             _lg = _log_local()
             if _lg:
-                _lg.info("[power] 删除功率计量 entity_id=%s", entity_id)
-            return self.json({"success": True, "message": f"已删除功率计量 {entity_id}"})
+                _lg.info("[power] 取消登记（归档）entity_id=%s", entity_id)
+            return self.json({
+                "success": True,
+                "message": f"已取消登记 {entity_id}（配置已归档，可在回收站恢复；历史用电数据已保留）",
+            })
+
+        if action == "restore":
+            entity_id = (body.get("entity_id") or "").strip()
+            if not entity_id:
+                return self.json({"success": False, "error": "缺少 entity_id"}, status_code=400)
+            ok = await self._exec_in_executor(hass, mgr.restore_config, entity_id)
+            if not ok:
+                return self.json({"success": False, "error": "未找到已归档的登记"}, status_code=404)
+            cfg = await self._exec_in_executor(hass, mgr.find_config, entity_id)
+            if cfg:
+                try:
+                    mgr.register_entities(cfg)
+                except Exception:
+                    _LOGGER.exception("[power] 恢复登记时注册实体失败 %s", entity_id)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[power] 恢复登记 entity_id=%s", entity_id)
+            return self.json({"success": True, "message": f"已恢复登记 {entity_id}，历史用电数据已接续"})
+
+        if action == "purge":
+            entity_id = (body.get("entity_id") or "").strip()
+            if not entity_id:
+                return self.json({"success": False, "error": "缺少 entity_id"}, status_code=400)
+            mgr.unregister_entities({"entity_id": entity_id})
+            ok = await self._exec_in_executor(hass, mgr.purge_config, entity_id)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[power] 彻底删除登记 entity_id=%s ok=%s", entity_id, ok)
+            if not ok:
+                return self.json({"success": False, "error": "未找到该登记"}, status_code=404)
+            return self.json({
+                "success": True,
+                "message": f"已彻底删除登记 {entity_id}（历史用电数据仍保留在日表中）",
+            })
+
+        if action == "purge_all":
+            n = await self._exec_in_executor(hass, mgr.purge_all_archived)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[power] 清空回收站，删除 %s 条归档登记", n)
+            return self.json({"success": True, "message": f"已清空回收站（{n} 条登记）"})
+
+        if action == "backfill_deid":
+            # 按 id_slug 派生值统一纠正配置表与日表的 daily_entity_id
+            n = await self._exec_in_executor(hass, mgr.repair_daily_entity_ids)
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[power] 纠正 daily_entity_id 完成 rows=%s", n)
+            return self.json({
+                "success": True,
+                "message": f"已按 ID 段重新生成日用电实体并纠正 {n} 处记录",
+                "data": {"rows": n},
+            })
+
+        if action == "restore_all":
+            # 一键还原回收站全部登记：DB 翻转在 executor，实体注册回事件循环
+            restored = await self._exec_in_executor(hass, mgr.restore_all_archived)
+            ok = 0
+            for cfg in restored:
+                try:
+                    mgr.register_entities(cfg)
+                    ok += 1
+                except Exception:
+                    _LOGGER.exception("[power] 批量恢复时注册实体失败 %s", cfg.get("entity_id"))
+            _lg = _log_local()
+            if _lg:
+                _lg.info("[power] 一键还原回收站：恢复 %s/%s 条", ok, len(restored))
+            return self.json({
+                "success": True,
+                "message": f"已还原 {ok} 条登记"
+                           + (f"（{len(restored) - ok} 条注册失败，请查看日志）" if len(restored) != ok else ""),
+                "data": {"restored": ok, "total": len(restored)},
+            })
 
         return self.json({"success": False, "error": f"未知 action: {action}"}, status_code=400)
 
     # ---------- 查询辅助（executor 内执行） ---------- #
+    def _power_archive_diag(self) -> dict:
+        """回收站诊断：返回配置表 enabled 的实际值与存储类型。
+
+        用于排查"取消登记后回收站仍为空"——可直观看出：
+          · 是否有 enabled=0 的行（archive 是否真的写进去了）
+          · enabled 列的类型（TEXT 类型会导致历史 Python 真值判定失效）
+        """
+        import sqlite3
+        out: dict = {"db_path": self._db_path, "rows": []}
+        if not self._db_path:
+            return out
+        try:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                cur = conn.execute(f"PRAGMA table_info({TABLE_POWER_METER_CONFIGS})")
+                out["columns"] = {r[1]: (r[2] or "") for r in cur.fetchall()}
+                cur = conn.execute(
+                    f"SELECT entity_id, enabled, typeof(enabled), id_slug, daily_entity_id "
+                    f"FROM {TABLE_POWER_METER_CONFIGS} ORDER BY id"
+                )
+                for eid, en, tp, slug, deid in cur.fetchall():
+                    out["rows"].append({
+                        "entity_id": eid, "enabled": en, "enabled_type": tp,
+                        "id_slug": slug, "daily_entity_id": deid,
+                    })
+                out["total"] = len(out["rows"])
+                out["archived_count"] = sum(
+                    1 for r in out["rows"]
+                    if str(r["enabled"]).strip().lower() in ("0", "false", "no", ""))
+            finally:
+                conn.close()
+        except Exception as exc:
+            out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
     @staticmethod
     def _query_rows(db_path: str, date: str, filters: str, args: list) -> list:
         import sqlite3
@@ -11005,7 +12538,10 @@ class DeviceCleanView(_BaseDBView):
         drg = dr.async_get(hass)
         erg = er.async_get(hass)
 
-        # 统计每个 device_id 关联的实体数（entity.device_id 是 entity_id 所属 device）
+        # 统计每个 device_id 关联的实体数（entity.device_id 是 entity_id 所属 device）。
+        # 先建计数表再查，避免对每个设备都扫一遍实体表（O(n·m) → O(n+m)）。
+        # 注：entity_registry.entities 的映射用法（.values()/.items()）**未弃用**，
+        # 是 HA 源码里的标准写法；弃用仅针对 device_registry.devices（见下）。
         device_entity_count: dict[str, int] = {}
         for ent in erg.entities.values():
             did = getattr(ent, "device_id", None)
@@ -11016,7 +12552,10 @@ class DeviceCleanView(_BaseDBView):
         entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
 
         result = []
-        for device in list(drg.devices.values()):
+        # 直接迭代 registry.devices（Collection[DeviceEntry]）。
+        # 不要用 .values()/.get()/[id] 等映射用法：HA 已弃用把 devices 当 dict 使用，
+        # 将于 2027.9 移除（见 helpers/frame.py 的弃用告警）。
+        for device in drg.devices:
             ids = set(device.identifiers or set())
             if not any(ident and ident[0] == DOMAIN for ident in ids):
                 continue

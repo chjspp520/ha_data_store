@@ -60,6 +60,7 @@ def ensure_tables(db_path: str) -> None:
                 device_name       TEXT NOT NULL DEFAULT '',
                 room              TEXT NOT NULL DEFAULT '',
                 id_slug           TEXT NOT NULL DEFAULT '',
+                daily_entity_id   TEXT NOT NULL DEFAULT '',
                 unit              TEXT NOT NULL DEFAULT 'W',
                 enabled           INTEGER NOT NULL DEFAULT 1,
                 created_at        TEXT NOT NULL DEFAULT '',
@@ -67,6 +68,16 @@ def ensure_tables(db_path: str) -> None:
             )
             """,
         )
+        # 迁移：补充「显示日用电量实体」字段（旧表自动补列）
+        try:
+            _cols = [r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_POWER_METER_CONFIGS})")]
+            if "daily_entity_id" not in _cols:
+                conn.execute(
+                    f"ALTER TABLE {TABLE_POWER_METER_CONFIGS} "
+                    f"ADD COLUMN daily_entity_id TEXT NOT NULL DEFAULT ''"
+                )
+        except Exception:
+            pass
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_POWER_ENERGY_DAILY} (
@@ -76,11 +87,113 @@ def ensure_tables(db_path: str) -> None:
                 room              TEXT NOT NULL DEFAULT '',
                 date              TEXT NOT NULL,
                 kwh               REAL NOT NULL DEFAULT 0,
+                daily_entity_id   TEXT NOT NULL DEFAULT '',
                 updated_at        TEXT NOT NULL DEFAULT '',
                 UNIQUE(entity_id, date)
             )
             """,
         )
+        # 迁移：日表补充「日用电量实体」字段（旧表自动补列，便于前端按实体查询）
+        try:
+            _cols2 = [r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_POWER_ENERGY_DAILY})")]
+            if "daily_entity_id" not in _cols2:
+                conn.execute(
+                    f"ALTER TABLE {TABLE_POWER_ENERGY_DAILY} "
+                    f"ADD COLUMN daily_entity_id TEXT NOT NULL DEFAULT ''"
+                )
+        except Exception:
+            pass
+        # 纠正 daily_entity_id：该字段是「登记产物」而非用户输入，
+        # 权威值 = sensor.ha_data_store_{id_slug}_daily_ele（由 id_slug 派生）。
+        # 历史库里可能有空值 / 手工填错的值，这里统一按 id_slug 重算并回写
+        # 配置表与日表（幂等，可重复执行）。
+        #
+        # 注意：不用「同表自引用子查询」（SQLite 对 UPDATE 目标表的子查询求值
+        # 时机不稳定，实测会得到 0 行）；改为先取映射在 Python 侧配对再 UPDATE。
+        try:
+            _pairs = conn.execute(
+                f"SELECT entity_id, id_slug, COALESCE(daily_entity_id, '') "
+                f"FROM {TABLE_POWER_METER_CONFIGS}"
+            ).fetchall()
+            for _eid, _slug, _cur in _pairs:
+                _want = daily_entity_id_of(_slug)
+                if _cur == _want:
+                    continue
+                conn.execute(
+                    f"UPDATE {TABLE_POWER_METER_CONFIGS} SET daily_entity_id = ? "
+                    f"WHERE entity_id = ?",
+                    (_want, _eid),
+                )
+                conn.execute(
+                    f"UPDATE {TABLE_POWER_ENERGY_DAILY} SET daily_entity_id = ? "
+                    f"WHERE entity_id = ?",
+                    (_want, _eid),
+                )
+        except Exception:
+            pass
+        # 归一化 enabled：修复历史脏值（NULL / 字符串 '0'·'1' / TEXT 列类型）
+        #
+        # 注意：SQLite 是动态类型，若建表时该列被声明为 TEXT（历史版本），
+        # 直接 UPDATE SET enabled = 0 写进去仍是 TEXT '0'；Python 侧
+        # bool('0') 为 True，会导致归档项被误判为"生效"而在回收站消失。
+        # 这里用 CAST 强制转 INTEGER 落库（SQLite 会按值改列亲和性语义）。
+        try:
+            _einfo = conn.execute(
+                f"PRAGMA table_info({TABLE_POWER_METER_CONFIGS})"
+            ).fetchall()
+            _etype = ""
+            for _c in _einfo:
+                if _c[1] == "enabled":
+                    _etype = (_c[2] or "").upper()
+                    break
+            if _etype != "INTEGER":
+                # 该列不是 INTEGER 亲和性 → 重建列以彻底修正存储类型
+                conn.execute(
+                    f"UPDATE {TABLE_POWER_METER_CONFIGS} SET enabled = "
+                    f"CASE WHEN COALESCE(CAST(enabled AS TEXT), '1') IN ('0', 'false', 'no', '') "
+                    f"THEN 0 ELSE 1 END"
+                )
+                try:
+                    conn.execute(
+                        f"ALTER TABLE {TABLE_POWER_METER_CONFIGS} RENAME TO "
+                        f"{TABLE_POWER_METER_CONFIGS}__old"
+                    )
+                    conn.execute(
+                        f"""CREATE TABLE {TABLE_POWER_METER_CONFIGS} (
+                            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                            entity_id         TEXT NOT NULL UNIQUE,
+                            device_name       TEXT NOT NULL DEFAULT '',
+                            room              TEXT NOT NULL DEFAULT '',
+                            id_slug           TEXT NOT NULL DEFAULT '',
+                            daily_entity_id   TEXT NOT NULL DEFAULT '',
+                            unit              TEXT NOT NULL DEFAULT 'W',
+                            enabled           INTEGER NOT NULL DEFAULT 1,
+                            created_at        TEXT NOT NULL DEFAULT '',
+                            updated_at        TEXT NOT NULL DEFAULT ''
+                        )"""
+                    )
+                    _cols = ["id", "entity_id", "device_name", "room", "id_slug",
+                             "daily_entity_id", "unit", "enabled", "created_at", "updated_at"]
+                    _has = {r[1] for r in conn.execute(
+                        f"PRAGMA table_info({TABLE_POWER_METER_CONFIGS}__old)")}
+                    _cols = [c for c in _cols if c in _has]
+                    _cl = ", ".join(_cols)
+                    conn.execute(
+                        f"INSERT INTO {TABLE_POWER_METER_CONFIGS} ({_cl}) "
+                        f"SELECT {_cl} FROM {TABLE_POWER_METER_CONFIGS}__old"
+                    )
+                    conn.execute(f"DROP TABLE {TABLE_POWER_METER_CONFIGS}__old")
+                except Exception:
+                    # 重建失败则退回原地 UPDATE（至少让值语义正确）
+                    pass
+            else:
+                conn.execute(
+                    f"UPDATE {TABLE_POWER_METER_CONFIGS} SET enabled = "
+                    f"CASE WHEN COALESCE(CAST(enabled AS TEXT), '1') IN ('0', 'false', 'no', '') "
+                    f"THEN 0 ELSE 1 END"
+                )
+        except Exception:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -92,12 +205,43 @@ def _open_db(db_path: str):
     return sqlite3.connect(db_path)
 
 
+def _is_enabled(row: dict) -> bool:
+    """宽容判定配置是否生效中。
+
+    兼容历史脏值：True/1/'1'/'true'/'yes' → 生效；False/0/'0'/'false'/'no'/None → 归档。
+    避免直接 bool(row["enabled"]) 时字符串 '0' 被误判为"生效"（'0' 非空即真）。
+    """
+    v = row.get("enabled")
+    if v is None:
+        return True
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return int(v) != 0
+    return str(v).strip().lower() not in ("0", "false", "no", "", "none")
+
+
 def _power_to_kw(value: float, unit: str | None) -> float:
     """按单位把功率数值换算为 kW。登记单位缺省按 W。"""
     u = (unit or "W").strip().lower()
     if "kw" in u or "kwh" in u:
         return value
     return value / 1000.0
+
+
+def daily_entity_id_of(id_slug: str | None) -> str:
+    """由 id_slug 派生「日用电量实体」ID。
+
+    该实体是登记后由本模块**自动注册**的固定 ID 传感器
+    （见 PowerDailySensor.entity_id），因此 daily_entity_id 不是用户输入项，
+    而是登记的直接产物：sensor.ha_data_store_{id_slug}_daily_ele。
+
+    落库到 power_meter_configs / power_energy_daily 仅用于前端关联跳转查询。
+    """
+    slug = (id_slug or "").strip()
+    if not slug:
+        return ""
+    return f"sensor.ha_data_store_{slug}_daily_ele"
 
 
 def _meter_display_name(cfg: dict, suffix: str) -> str:
@@ -277,46 +421,245 @@ class PowerEnergyManager:
         )
 
     # ---------- 配置 CRUD（DB 同步，供 executor 调用） ---------- #
-    def load_configs(self) -> list[dict]:
+    def load_configs(self, include_archived: bool = False) -> list[dict]:
+        """读取登记配置。
+
+        默认只返回**生效中**的登记（enabled=1），归档（enabled=0，即已取消登记）
+        的行不参与采样与实体注册，仅供回收站展示/恢复。
+        """
+        if not self._db_path:
+            return []
+        conn = _open_db(self._db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            sql = f"SELECT * FROM {TABLE_POWER_METER_CONFIGS}"
+            if not include_archived:
+                sql += (" WHERE COALESCE(CAST(enabled AS TEXT), '1') "
+                        "NOT IN ('0', 'false', 'no', '')")
+            sql += " ORDER BY id"
+            rows = conn.execute(sql).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def find_config(self, entity_id: str) -> dict | None:
+        """查单个登记（含已归档），不存在返回 None。"""
+        if not self._db_path or not entity_id:
+            return None
+        conn = _open_db(self._db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                f"SELECT * FROM {TABLE_POWER_METER_CONFIGS} WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def save_config(self, cfg: dict) -> None:
+        """新增/更新登记（UPSERT by entity_id）。
+
+        已归档（enabled=0）的同一 entity_id 重新登记时会**沿用原行**：
+        保留原 id、created_at，并补齐未显式传入的 id_slug / device_name / room
+        （即"沿用历史配置与日表数据"），避免实体 ID 分叉。
+
+        `daily_entity_id` **不接受外部传入**：它由 id_slug 派生
+        （sensor.ha_data_store_{id_slug}_daily_ele），即登记后自动生成的那个
+        日用电实体，保证与 PowerDailySensor 实际注册的实体 ID 永远一致。
+        """
+        entity_id = cfg["entity_id"]
+        old = self.find_config(entity_id) or {}
+        id_slug = cfg.get("id_slug") or old.get("id_slug", "")
+        conn = _open_db(self._db_path)
+        now = _now_str()
+        created_at = old.get("created_at") or now
+        try:
+            conn.execute(
+                f"""INSERT OR REPLACE INTO {TABLE_POWER_METER_CONFIGS}
+                    (id, entity_id, device_name, room, id_slug, daily_entity_id,
+                     unit, enabled, created_at, updated_at)
+                    VALUES (
+                      COALESCE((SELECT id FROM {TABLE_POWER_METER_CONFIGS} WHERE entity_id=?), NULL),
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (entity_id, entity_id,
+                 cfg.get("device_name") or old.get("device_name", ""),
+                 cfg.get("room") or old.get("room", ""),
+                 id_slug,
+                 daily_entity_id_of(id_slug),
+                 cfg.get("unit") or old.get("unit", "W"),
+                 1 if cfg.get("enabled", True) else 0, created_at, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def archive_config(self, entity_id: str) -> bool:
+        """取消登记 = 软删除归档（enabled=0）。
+
+        与真删除的区别：配置行保留，重新登记同一 entity_id 时自动沿用原
+        id_slug/设备名/房间/日用电量实体，并天然接续 power_energy_daily 的
+        历史日用电数据（不重新分叉实体 ID）；power_energy_daily 始终不删。
+        """
+        conn = _open_db(self._db_path)
+        try:
+            cur = conn.execute(
+                f"UPDATE {TABLE_POWER_METER_CONFIGS} SET enabled = 0, updated_at = ? "
+                f"WHERE entity_id = ? AND COALESCE(CAST(enabled AS TEXT), '1') NOT IN "
+                f"('0', 'false', 'no', '')",
+                (_now_str(), entity_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def restore_config(self, entity_id: str) -> bool:
+        """恢复已归档的登记（归档 → 生效）。"""
+        conn = _open_db(self._db_path)
+        try:
+            cur = conn.execute(
+                f"UPDATE {TABLE_POWER_METER_CONFIGS} SET enabled = 1, updated_at = ? "
+                f"WHERE entity_id = ? AND COALESCE(CAST(enabled AS TEXT), '1') IN "
+                f"('0', 'false', 'no', '')",
+                (_now_str(), entity_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def purge_config(self, entity_id: str) -> bool:
+        """彻底删除登记（物理删除配置行，日表历史数据仍保留）。"""
+        conn = _open_db(self._db_path)
+        try:
+            cur = conn.execute(
+                f"DELETE FROM {TABLE_POWER_METER_CONFIGS} WHERE entity_id = ?",
+                (entity_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def purge_all_archived(self) -> int:
+        """清空回收站（物理删除全部已归档登记），返回删除条数。"""
+        conn = _open_db(self._db_path)
+        try:
+            cur = conn.execute(
+                f"DELETE FROM {TABLE_POWER_METER_CONFIGS} "
+                f"WHERE COALESCE(CAST(enabled AS TEXT), '1') IN ('0', 'false', 'no', '')"
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
+    def repair_daily_entity_ids(self) -> int:
+        """按 id_slug 重新派生并纠正 daily_entity_id（配置表 + 日表）。
+
+        因为 daily_entity_id 是登记产物而非用户输入，历史数据里可能出现：
+          · 空值（旧版本未写）
+          · 手工填错的值（旧前端提供过输入框）
+          · 遗留的 `sensor.xxx_daily_ele` 等自定义实体名
+        本方法一律按 id_slug 重新派生为权威值，并同步刷写日表历史行，
+        返回被纠正的行数（配置表 + 日表合计）。
+        """
+        if not self._db_path:
+            return 0
+        conn = _open_db(self._db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT entity_id, id_slug, daily_entity_id FROM {TABLE_POWER_METER_CONFIGS}"
+            ).fetchall()
+            total = 0
+            for eid, slug, cur_val in rows:
+                want = daily_entity_id_of(slug)
+                if (cur_val or "") == want:
+                    continue
+                conn.execute(
+                    f"UPDATE {TABLE_POWER_METER_CONFIGS} SET daily_entity_id = ?, updated_at = ? "
+                    f"WHERE entity_id = ?",
+                    (want, _now_str(), eid),
+                )
+                total += 1
+                cur2 = conn.execute(
+                    f"UPDATE {TABLE_POWER_ENERGY_DAILY} SET daily_entity_id = ? "
+                    f"WHERE entity_id = ? AND COALESCE(daily_entity_id, '') <> ?",
+                    (want, eid, want),
+                )
+                total += cur2.rowcount
+            conn.commit()
+            return total
+        finally:
+            conn.close()
+
+    def backfill_daily_entity_ids(self) -> int:
+        """按 id_slug 派生值回填日表缺失/错误的 daily_entity_id，返回改动行数。
+
+        等价于 repair_daily_entity_ids（统一按权威派生值纠正），
+        保留本方法名以兼容既有调用方。
+        """
+        return self.repair_daily_entity_ids()
+
+    def list_orphan_meters(self) -> list[dict]:
+        """列出"日表有数据但配置表无登记"的实体（孤儿电表）。
+
+        用于配置行被物理删除后（旧版本「取消登记」是真 DELETE）从历史日表
+        反向识别出曾经登记过哪些功率实体，给出 device_name/room 与
+        时间跨度，便于重新登记时填回正确的 id_slug，接续历史数据。
+        """
         if not self._db_path:
             return []
         conn = _open_db(self._db_path)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
-                f"SELECT * FROM {TABLE_POWER_METER_CONFIGS} ORDER BY id"
+                f"SELECT de.entity_id, "
+                f"       MAX(de.device_name) AS device_name, "
+                f"       MAX(de.room) AS room, "
+                f"       MIN(de.date) AS first_date, "
+                f"       MAX(de.date) AS last_date, "
+                f"       COUNT(*) AS day_count, "
+                f"       ROUND(SUM(de.kwh), 3) AS total_kwh "
+                f"FROM {TABLE_POWER_ENERGY_DAILY} de "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {TABLE_POWER_METER_CONFIGS} mc "
+                f"  WHERE mc.entity_id = de.entity_id) "
+                f"GROUP BY de.entity_id ORDER BY de.entity_id"
             ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
 
-    def save_config(self, cfg: dict) -> None:
-        """新增/更新登记（UPSERT by entity_id）。"""
+    def load_archived_configs(self) -> list[dict]:
+        """回收站列表：已取消登记（归档）的配置。
+
+        用 _is_enabled 宽容判定，避免历史脏值（'0' 字符串 / NULL）导致
+        归档项被误判为"生效"而从回收站消失。
+        """
+        return [c for c in self.load_configs(include_archived=True) if not _is_enabled(c)]
+
+    def restore_all_archived(self) -> list[dict]:
+        """一键还原回收站中的**全部**登记，返回已恢复的配置列表。
+
+        仅做 DB 层状态翻转；实体注册由调用方在事件循环中完成
+        （register_entities 涉及平台 add_cb，不能放 executor）。
+        """
+        archived = self.load_archived_configs()
+        if not archived:
+            return []
         conn = _open_db(self._db_path)
-        now = _now_str()
         try:
             conn.execute(
-                f"""INSERT OR REPLACE INTO {TABLE_POWER_METER_CONFIGS}
-                    (id, entity_id, device_name, room, id_slug, unit, enabled, created_at, updated_at)
-                    VALUES (
-                      COALESCE((SELECT id FROM {TABLE_POWER_METER_CONFIGS} WHERE entity_id=?), NULL),
-                      ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cfg["entity_id"], cfg["entity_id"], cfg.get("device_name", ""),
-                 cfg.get("room", ""), cfg.get("id_slug", ""), cfg.get("unit", "W"),
-                 1 if cfg.get("enabled", True) else 0, now, now),
+                f"UPDATE {TABLE_POWER_METER_CONFIGS} SET enabled = 1, updated_at = ? "
+                f"WHERE COALESCE(CAST(enabled AS TEXT), '1') IN ('0', 'false', 'no', '')",
+                (_now_str(),),
             )
             conn.commit()
         finally:
             conn.close()
-
-    def remove_config(self, entity_id: str) -> None:
-        conn = _open_db(self._db_path)
-        try:
-            conn.execute(f"DELETE FROM {TABLE_POWER_METER_CONFIGS} WHERE entity_id = ?", (entity_id,))
-            conn.execute(f"DELETE FROM {TABLE_POWER_ENERGY_DAILY} WHERE entity_id = ?", (entity_id,))
-            conn.commit()
-        finally:
-            conn.close()
+        # 重新读取以带上最新字段，便于调用方注册实体
+        return [self.find_config(c["entity_id"]) or c for c in archived]
 
     # ---------- 日表读写（DB 同步） ---------- #
     def _get_day_row(self, entity_id: str, date: str) -> float:
@@ -333,18 +676,29 @@ class PowerEnergyManager:
             conn.close()
 
     def _persist_day(self, cfg: dict, date: str, kwh: float) -> None:
-        """把某日累计写入日表（UPSERT）。kwh 保留 3 位小数。"""
+        """把某日累计写入日表（UPSERT）。kwh 保留 3 位小数。
+
+        daily_entity_id（日用电量实体）随行落库，便于前端按实体查询；
+        若传入的 cfg 未带该键（旧调用方/内存缓存），则以配置表当前值为准，
+        避免写空覆盖已登记的值。
+        """
+        entity_id = cfg.get("entity_id") or ""
+        daily_entity_id = cfg.get("daily_entity_id")
+        if daily_entity_id is None:
+            cur = self._config_of(entity_id) or {}
+            daily_entity_id = cur.get("daily_entity_id", "")
         conn = _open_db(self._db_path)
         try:
             conn.execute(
                 f"""INSERT INTO {TABLE_POWER_ENERGY_DAILY}
-                    (entity_id, device_name, room, date, kwh, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (entity_id, device_name, room, date, kwh, daily_entity_id, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(entity_id, date) DO UPDATE SET
                       kwh = excluded.kwh,
+                      daily_entity_id = excluded.daily_entity_id,
                       updated_at = excluded.updated_at""",
-                (cfg["entity_id"], cfg.get("device_name", ""), cfg.get("room", ""),
-                 date, round(kwh, 3), _now_str()),
+                (entity_id, cfg.get("device_name", ""), cfg.get("room", ""),
+                 date, round(kwh, 3), daily_entity_id or "", _now_str()),
             )
             conn.commit()
         finally:
@@ -487,7 +841,11 @@ class PowerEnergyManager:
 
     # ---------- 启动恢复 ---------- #
     def restore_all(self) -> None:
-        """启动/重载时恢复全部已登记功率实体。"""
+        """启动/重载时恢复全部已登记（生效中）功率实体。
+
+        已归档（enabled=0）的登记不注册实体，但仍保留在配置表中，
+        随时可从数据浏览器「回收站」恢复。
+        """
         configs = self.load_configs()
         for cfg in configs:
             if not cfg.get("enabled"):

@@ -971,7 +971,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
   <div id="sub-power" class="sub-panel">
     <div class="section">
       <h3>⚡ 登记功率实体</h3>
-      <div class="hint">登记一个持续上报功率的实体（state 数值为当前功率）。系统每 30 秒采样积分，自动生成三个累计实体（kWh）：<code>sensor.ha_data_store_{id}_daily_ele</code>、<code>..._monthly_ele</code>、<code>..._yearly_ele</code>，并按天存储到数据库。</div>
+      <div class="hint">登记一个持续上报功率的实体（state 数值为当前功率）。系统每 30 秒采样积分，按 <b>ID 段</b>自动生成三个累计实体（kWh）：<code>sensor.ha_data_store_{ID段}_daily_ele</code>、<code>..._monthly_ele</code>、<code>..._yearly_ele</code>，并按天存储到数据库。<br>日用电量实体是<b>登记的产物</b>，由 ID 段自动派生，无需也无法手填；ID 段留空时会自动沿用该实体的历史登记（含已取消登记的），保证实体 ID 与历史用电数据不分叉。</div>
       <div class="form-grid">
         <div>
           <label>功率实体 ID</label>
@@ -987,7 +987,13 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </div>
         <div>
           <label>ID 段（英文小写，用于实体名）</label>
-          <input type="text" id="pmIdSlug" placeholder="ke_ting_ac" style="width:100%">
+          <input type="text" id="pmIdSlug" placeholder="ke_ting_ac" style="width:100%"
+                 oninput="syncPmDailyEntityId()">
+        </div>
+        <div>
+          <label>日用电量实体（登记后自动生成）</label>
+          <input type="text" id="pmDailyEntityId" placeholder="由 ID 段自动生成" style="width:100%" readonly
+                 title="该实体由 ID 段自动生成，无需填写">
         </div>
         <div>
           <label>单位</label>
@@ -1005,6 +1011,12 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div class="section">
       <h3>📋 已登记的功率计量</h3>
       <div id="powerMeterList"><div class="hint">加载中...</div></div>
+    </div>
+
+    <div class="section">
+      <h3>♻️ 回收站（已取消登记）</h3>
+      <div class="hint">取消登记为<b>软删除</b>：配置移入此处，历史用电数据（<code>power_energy_daily</code>）始终保留。恢复后实体 ID 与历史数据自动接续；重新登记同一实体也会自动沿用原 ID 段，不会产生新实体。</div>
+      <div id="powerArchivedList"><div class="hint">加载中...（若长时间不变，请 Ctrl+Shift+R 强制刷新）</div></div>
     </div>
 
     <div class="section">
@@ -1215,6 +1227,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <select id="apiQueryType" onchange="onApiTypeChange()">
         <optgroup label="设备类">
           <option value="device_history">设备开关记录</option>
+          <option value="device_entities">🗂 设备实体清单（entity_id/name/room）</option>
           <option value="entity_daily_by_year">📈 实体按日用电（指定年）</option>
           <option value="entity_daily_all">📈 实体按日用电（全部）</option>
           <option value="entities_daily_flat">📈 全部实体按月按日（平铺）</option>
@@ -1235,6 +1248,11 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="device_user_by_month">🗓 指定实体指定月份用户操作记录</option>
           <option value="device_user_month_dates">📅 指定实体指定月份有用户操作的日期</option>
           <option value="whole_house_usage">🏠 全屋用电/用时（年/月/日）</option>
+          <option value="device_usage_multi">📊 多实体×多维度聚合（用时/用电，年/月/日，按实体或按时间）</option>
+          <option value="device_usage_detail">📋 多实体明细（不聚合，全部/时间段/指定日/指定月/指定年，支持分页）</option>
+          <option value="device_usage_total">Σ 多实体合计（年/月/日/全部）</option>
+          <option value="device_usage_history">🕰 多实体历史同期（历史今日/历史本月）</option>
+          <option value="device_usage_avg">📈 多实体平均指标（平均每日次数/时长、平均每次时长）</option>
         </optgroup>
         <optgroup label="传感器类">
           <option value="env_history">环境历史</option>
@@ -1316,6 +1334,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="power_monthly">某月用电量</option>
           <option value="power_yearly">某年用电量</option>
           <option value="power_range">日期段用电量</option>
+          <option value="power_energy_joined">🔗 用电量=电表配置关联（含 id_slug）</option>
+          <option value="power_energy_multi">📊 多实体×多维度聚合（年/月/日，按实体或按时间）</option>
         </optgroup>
         <optgroup label="🤖 自动化">
           <option value="auto_list">自动化列表</option>
@@ -1463,7 +1483,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       </div>
     </div>
     <div id="apiEntitiesAggRow" style="display:none" class="full">
-      <label>多实体接口（entities 逗号分隔，留空 = 全部；时间段可选）</label>
+      <label id="apiEntitiesAggLabel">多实体接口（entities 逗号分隔，留空 = 全部；时间段可选）</label>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;width:100%">
         <div style="flex:1 1 220px">
           <label>实体ID(逗号分隔)</label>
@@ -1497,15 +1517,91 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <select id="apiMultiGroup" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
             <option value="0">① 合并返回</option>
             <option value="1">② 按实体分组</option>
+            <option value="count" data-for="entities_dates" style="display:none">③ 按日期数量返回</option>
+            <option value="both" data-for="entities_dates" style="display:none">④ 按日期数量 + 实体返回</option>
+            <option value="simple" data-for="entities_dates" style="display:none">⑤ 极简：[{date, count}]</option>
           </select>
         </div>
-        <div>
+        <div id="apiAggRangeWrap">
           <label>开始日期(可选)</label>
           <input type="date" id="apiAggStart" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
         </div>
-        <div>
+        <div id="apiAggRangeWrap2">
           <label>结束日期(可选)</label>
           <input type="date" id="apiAggEnd" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+        </div>
+
+        <!-- 多维度聚合（用时/用电/电量）：时间模式 全部/时间段/指定日/指定月/指定年 -->
+        <div id="apiMultiTimeModeWrap" style="display:none">
+          <label>时间模式</label>
+          <select id="apiMultiTimeMode" onchange="onMultiTimeModeChange()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="all">全部时间</option>
+            <option value="range">时间段</option>
+            <option value="date">指定日</option>
+            <option value="month">指定月</option>
+            <option value="year">指定年</option>
+          </select>
+        </div>
+        <div id="apiMultiTimeValueWrap" style="display:none;gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <div id="apiMultiTimeDateWrap" style="display:none">
+            <label>指定日</label>
+            <input type="date" id="apiMultiTimeDate" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div id="apiMultiTimeYearWrap" style="display:none">
+            <label>年</label>
+            <input type="text" id="apiMultiTimeYear" placeholder="2026" onchange="generateApiUrl()" style="width:80px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div id="apiMultiTimeMonthWrap" style="display:none">
+            <label>月</label>
+            <input type="text" id="apiMultiTimeMonth" placeholder="9" onchange="generateApiUrl()" style="width:60px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+        </div>
+
+        <!-- 设备类：合计 / 历史同期 的 scope -->
+        <div id="apiDevScopeWrap" style="display:none">
+          <label id="apiDevScopeLabel">统计范围</label>
+          <select id="apiDevScope" onchange="onDevScopeChange()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </select>
+        </div>
+        <!-- 设备类：合计 scope=year/month/date 时的配套输入 -->
+        <div id="apiDevScopeTimeWrap" style="display:none;gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <div id="apiDevScopeYearWrap" style="display:none">
+            <label>年</label>
+            <input type="text" id="apiDevScopeYear" placeholder="2026" onchange="generateApiUrl()" style="width:80px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div id="apiDevScopeMonthWrap" style="display:none">
+            <label>月</label>
+            <input type="text" id="apiDevScopeMonth" placeholder="9" onchange="generateApiUrl()" style="width:60px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div id="apiDevScopeDateWrap" style="display:none">
+            <label>日</label>
+            <input type="date" id="apiDevScopeDate" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+        </div>
+        <!-- 设备类：明细分页 -->
+        <div id="apiDevLimitWrap" style="display:none;gap:8px;align-items:flex-end">
+          <div>
+            <label>条数上限(0=不限)</label>
+            <input type="text" id="apiDevLimit" placeholder="0" onchange="generateApiUrl()" style="width:80px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div>
+            <label>偏移(offset)</label>
+            <input type="text" id="apiDevOffset" placeholder="0" onchange="generateApiUrl()" style="width:80px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+                   title="勾选后返回 device_history 全部字段（含 on_power/off_power/cross_day/state_attr/on_user/off_user/快照 等）">
+              <input type="checkbox" id="apiDevFull" onchange="generateApiUrl()" checked>
+              返回详细数据（全部字段）
+            </label>
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+                   title="返回 summary 合计节点：全局总计 + 每个实体的合计（次数/时长/用电），不受分页影响。取消勾选可减小响应体积">
+              <input type="checkbox" id="apiDevSummary" onchange="generateApiUrl()" checked>
+              返回合计节点（summary）
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -1681,7 +1777,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">entity_hour_dist</td><td>实体时段分布（几点使用/分时用电）· entity_id + 可选范围(全部/年/月/date/start+end) · hours[{hour,count,duration_hour,energy_kwh}]+totals</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entity_hour_dates</td><td>设备小时开启日期（几点开过）· entity_id + hour(0-23) + 可选范围(全部/年/月/date/start+end) · {count, dates:[...]}</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entities_period_agg</td><td>多实体按日/月/年汇聚 · entities(逗号)+bucket+view(entity实体→日期/date日期→实体,实体含running)+start/end · 顶层 totals</td></tr>
-        <tr><td style="color:var(--green);padding-right:16px">entities_dates</td><td>多实体有数据日期 · entities+start/end+group(0合并日期/1按实体) · {all_dates 或 entities[].dates}</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">entities_dates</td><td>多实体有数据日期 · entities+start/end/date/month/year+group · group=<b>all</b>(0,默认:all_dates+entities[].dates) / <b>entity</b>(1:按实体) / <b>count</b>(按日期数量:date_counts+count_groups) / <b>both</b>(日期数量+实体:details+entities) / <b>simple</b>(极简:{date_count,list:[{date,count}]},日期倒序)</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entities_hours_agg</td><td>多实体时段分布 · entities+start/end+group(0全部合并/1按实体) · hours[{hour,count,duration_hour,energy_kwh}]+totals</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entities_weekday_hours</td><td>多实体时段分布（周几/月/几号 × 小时）· entities+start/end+dim(week|month|day)+group(0合并/1每格含devices) · dim=week→weekdays[兼容]；month/day→cells[{index,label,totals,hours[24],devices?}]</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">device_summary</td><td>设备汇总 · entity_id/date/month/year/room</td></tr>
@@ -4218,6 +4314,7 @@ function switchSubTab(name) {
   if (name === 'xiaoai') { loadXiaoaiConfigs(); }
   if (name === 'media') { loadMediaPlaylists(); }
   if (name === 'printer') { loadPrinterConfigs(); }
+  if (name === 'power') { loadPowerMeters(); }
 }
 
 // API 工具子选项卡：gen=API 地址生成器，routes=自定义路由管理
@@ -6131,6 +6228,10 @@ async function importHelpers(input) {
 // ==============================
 const POWER_API = '/api/ha_data_store/power_energy';
 
+// 注意：本页面已在顶部安装全局 fetch 拦截器，会自动为所有 /api/ 请求追加
+// key 参数（见 window.fetch 覆写）。因此这里**不要**再手动拼 key，
+// 否则会出现 key 重复（?key=x&key=x）。
+
 async function loadPowerMeters() {
   var div = document.getElementById('powerMeterList');
   try {
@@ -6139,18 +6240,21 @@ async function loadPowerMeters() {
     var items = json.data || [];
     setSubTabBadge('power', items.length);
     if (!items.length) {
-      div.innerHTML = '<div class="hint">暂无登记，请在上方添加功率实体。</div>';
-      return;
-    }
-    var html = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+      // 注意：这里不可 return —— 否则会跳过下方 loadPowerArchived()，
+      // 导致"全部已取消登记"时回收站永远停在"加载中..."。
+      div.innerHTML = '<div class="hint">暂无生效中的登记（已取消登记的会在下方回收站中显示）。</div>';
+    } else {
+    var html = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' +
       '<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="checkbox" class="tab-all" onchange="toggleTabAll(this,\'powerMeterTable\')"> 全选</label>' +
-      '<button class="btn-del" onclick="batchDeletePowerMeters()">🗑 删除选中</button>' +
+      '<button class="btn-del" onclick="batchDeletePowerMeters()">♻ 取消登记选中</button>' +
+      '<button class="btn-blue" onclick="backfillPowerDeid()">🔧 按 ID 段纠正日用电实体</button>' +
       '<span class="hint" id="batchCnt-powerMeterTable">共 ' + items.length + ' 条</span></div>' +
       '<div class="table-wrap"><table id="powerMeterTable"><thead><tr>' +
       '<th style="width:30px"></th><th>功率实体</th><th>设备名称</th><th>房间</th><th>ID 段</th><th>单位</th>' +
-      '<th>生成实体</th><th style="width:60px">操作</th></tr></thead><tbody>';
+      '<th>日用电量实体（自动生成）</th><th>月/年用电实体</th><th style="width:120px">操作</th></tr></thead><tbody>';
     items.forEach(function(d) {
       var s = d.id_slug || '';
+      var deid = d.daily_entity_id || '';
       html += '<tr>' +
         '<td><input type="checkbox" class="row-check" value="' + escAttr(d.entity_id) + '" onchange="updateBatchCnt(\'powerMeterTable\')"></td>' +
         '<td>' + escHtml(d.entity_id) + '</td>' +
@@ -6158,23 +6262,231 @@ async function loadPowerMeters() {
         '<td>' + escHtml(d.room || '') + '</td>' +
         '<td>' + escHtml(s) + '</td>' +
         '<td>' + escHtml(d.unit || 'W') + '</td>' +
-        '<td style="font-size:11px;color:var(--text2)">' + escHtml('sensor.ha_data_store_' + s + '_daily_ele') + '</td>' +
-        '<td><button class="btn-del" onclick="deletePowerMeter(&quot;' + d.entity_id + '&quot;)">删除</button></td>' +
+        '<td><input type="text" value="' + escAttr(deid) + '" readonly ' +
+        'title="由 ID 段自动生成，不可编辑" ' +
+        'style="width:150px;font-size:11px;background:transparent;border:none;color:var(--text2)"></td>' +
+        '<td style="font-size:11px;color:var(--text2)">' + escHtml('sensor.ha_data_store_' + s + '_monthly_ele') + '<br>' +
+        escHtml('sensor.ha_data_store_' + s + '_yearly_ele') + '</td>' +
+        '<td style="white-space:nowrap"><button class="btn-blue" onclick="editPowerMeter(&quot;' + escAttr(d.entity_id) + '&quot;)">编辑</button> ' +
+        '<button class="btn-del" onclick="deletePowerMeter(&quot;' + escAttr(d.entity_id) + '&quot;)">取消登记</button></td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
     div.innerHTML = html;
+    }
   } catch(e) {
     div.innerHTML = '<div class="hint" style="color:var(--accent)">加载失败</div>';
   }
+  // 无论上面是否为空都必须执行（放在最后，不在任何 return 之后）
+  loadPowerArchived();
+}
+
+// 按 ID 段重新派生并纠正 daily_entity_id（配置表 + 日表历史行）
+async function backfillPowerDeid() {
+  if (!confirm('按「ID 段」重新生成日用电实体并纠正历史记录？\n\n日用电实体 = sensor.ha_data_store_{ID段}_daily_ele\n将统一刷写配置表与日表（含曾被手填错误的值），历史用电数据不受影响。')) return;
+  try {
+    var resp = await fetch(POWER_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'backfill_deid' }),
+    });
+    var json = await resp.json();
+    showToast(json.success ? (json.message || '已纠正') : ('纠正失败: ' + json.error), json.success);
+    if (json.success) loadPowerMeters();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// 把某条登记的配置回填到表单（沿用历史配置重新登记，实体 ID 与日表数据不分叉）
+async function editPowerMeter(entityId) {
+  try {
+    var resp = await fetch(POWER_API + '?type=lookup&entity_id=' + encodeURIComponent(entityId));
+    var json = await resp.json();
+    var d = json.data;
+    if (!json.success || !d) { showToast('未找到该登记', false); return; }
+    document.getElementById('pmEntityId').value = d.entity_id || '';
+    document.getElementById('pmDeviceName').value = d.device_name || '';
+    document.getElementById('pmRoom').value = d.room || '';
+    document.getElementById('pmIdSlug').value = d.id_slug || '';
+    syncPmDailyEntityId();
+    var unitSel = document.getElementById('pmUnit');
+    if (unitSel) unitSel.value = (d.unit || 'W');
+    showToast('已带出原配置，修改后点「登记并生成实体」即可沿用历史数据', true);
+    document.getElementById('pmEntityId').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// 回收站：已取消登记（enabled=0）的配置，可恢复或彻底删除
+async function loadPowerArchived() {
+  var div = document.getElementById('powerArchivedList');
+  if (!div) return;
+  div.innerHTML = '<div class="hint">加载中...</div>';
+  var items = [];
+  var orphans = [];
+  try {
+    var resp = await fetch(POWER_API + '?type=archived');
+    var json = await resp.json();
+    if (!json.success) {
+      div.innerHTML = '<div class="hint" style="color:var(--accent)">回收站查询失败：' +
+        escHtml(json.error || '未知错误') + '</div>';
+      return;
+    }
+    items = json.data || [];
+  } catch(e) {
+    div.innerHTML = '<div class="hint" style="color:var(--accent)">加载回收站失败：' + escHtml(String(e)) + '</div>';
+    return;
+  }
+  // 同时查"日表有数据但配置表无登记"的孤儿电表（旧版本真删配置的遗留）
+  try {
+    var r2 = await fetch(POWER_API + '?type=orphans');
+    var j2 = await r2.json();
+    if (j2.success) orphans = j2.data || [];
+  } catch(e) { /* 孤儿查询失败不影响回收站展示 */ }
+
+  var html = '<div style="margin-bottom:8px"><button class="btn-blue" onclick="loadPowerArchived()">🔄 刷新回收站</button></div>';
+  if (!items.length) {
+    html += '<div class="hint">回收站为空（取消登记后的配置会出现在这里）。</div>';
+  } else {
+    html += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' +
+      '<button class="btn-green" onclick="restoreAllPowerMeters()">♻️ 一键还原全部（' + items.length + '）</button>' +
+      '<button class="btn-del" onclick="purgeAllPowerMeters()">🗑 清空回收站</button>' +
+      '<span class="hint">共 ' + items.length + ' 条已取消登记的配置（历史用电数据仍保留在日表中）</span></div>' +
+      '<div class="table-wrap"><table><thead><tr>' +
+      '<th style="width:30px"></th><th>功率实体</th><th>设备名称</th><th>房间</th><th>ID 段</th>' +
+      '<th>日用电量实体</th><th>取消时间</th><th style="width:150px">操作</th>' +
+      '</tr></thead><tbody>';
+    items.forEach(function(d) {
+      html += '<tr>' +
+        '<td><input type="checkbox" class="row-check" value="' + escAttr(d.entity_id) + '"></td>' +
+        '<td>' + escHtml(d.entity_id) + '</td>' +
+        '<td>' + escHtml(d.device_name || '') + '</td>' +
+        '<td>' + escHtml(d.room || '') + '</td>' +
+        '<td>' + escHtml(d.id_slug || '') + '</td>' +
+        '<td style="font-size:11px;color:var(--text2)">' + escHtml(d.daily_entity_id || '') + '</td>' +
+        '<td style="font-size:11px;color:var(--text2)">' + escHtml(d.updated_at || '') + '</td>' +
+        '<td style="white-space:nowrap"><button class="btn-green" onclick="restorePowerMeter(&quot;' + escAttr(d.entity_id) + '&quot;)">♻ 恢复</button> ' +
+        '<button class="btn-del" onclick="purgePowerMeter(&quot;' + escAttr(d.entity_id) + '&quot;)">彻底删除</button></td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  // 孤儿电表：日表有历史数据，但配置行已不在（旧版本「取消登记」是物理删除所致）
+  if (orphans.length) {
+    html += '<div class="hint" style="margin-top:14px;color:var(--accent)">' +
+      '⚠️ 以下 ' + orphans.length + ' 个实体在日表中仍有历史用电数据，但已无登记配置' +
+      '（旧版本「取消登记」会物理删除配置）。可点「重新登记」找回，填对 ID 段即可接续历史数据。</div>' +
+      '<div class="table-wrap"><table><thead><tr>' +
+      '<th>功率实体</th><th>设备名称</th><th>房间</th><th>数据区间</th><th>天数</th><th>累计(kWh)</th>' +
+      '<th style="width:110px">操作</th></tr></thead><tbody>';
+    orphans.forEach(function(d) {
+      html += '<tr>' +
+        '<td>' + escHtml(d.entity_id) + '</td>' +
+        '<td>' + escHtml(d.device_name || '') + '</td>' +
+        '<td>' + escHtml(d.room || '') + '</td>' +
+        '<td style="font-size:11px;color:var(--text2)">' + escHtml((d.first_date || '') + ' ~ ' + (d.last_date || '')) + '</td>' +
+        '<td style="font-size:11px;color:var(--text2)">' + (d.day_count || 0) + '</td>' +
+        '<td style="font-size:11px;color:var(--text2)">' + (d.total_kwh != null ? d.total_kwh : '') + '</td>' +
+        '<td><button class="btn-green" onclick="readdPowerMeter(&quot;' + escAttr(d.entity_id) + '&quot;,&quot;' + escAttr(d.device_name || '') + '&quot;,&quot;' + escAttr(d.room || '') + '&quot;)">重新登记</button></td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  div.innerHTML = html;
+}
+
+// 把孤儿电表的信息回填到登记表单，提示用户补 ID 段后登记
+function readdPowerMeter(entityId, deviceName, room) {
+  document.getElementById('pmEntityId').value = entityId;
+  document.getElementById('pmDeviceName').value = deviceName || '';
+  document.getElementById('pmRoom').value = room || '';
+  document.getElementById('pmIdSlug').value = '';
+  syncPmDailyEntityId();
+  showToast('已带出功率实体/设备名/房间，请填写原 ID 段后点「登记并生成实体」以接续历史数据', true);
+  document.getElementById('pmEntityId').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  document.getElementById('pmIdSlug').focus();
+}
+
+// 一键还原回收站全部登记
+async function restoreAllPowerMeters() {
+  if (!confirm('一键还原回收站中的全部登记？\n将重新注册对应的日/月/年用电实体，并接续历史用电数据。')) return;
+  try {
+    var resp = await fetch(POWER_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'restore_all' }),
+    });
+    var json = await resp.json();
+    showToast(json.success ? (json.message || '已还原') : ('还原失败: ' + json.error), json.success);
+    if (json.success) { loadPowerMeters(); loadMonitorPower(); }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function restorePowerMeter(entityId) {
+  try {
+    var resp = await fetch(POWER_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'restore', entity_id: entityId }),
+    });
+    var json = await resp.json();
+    showToast(json.success ? (json.message || '已恢复') : ('恢复失败: ' + json.error), json.success);
+    if (json.success) { loadPowerMeters(); loadMonitorPower(); }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function purgePowerMeter(entityId) {
+  if (!confirm('彻底删除登记 ' + entityId + ' ？\n配置行将被物理删除（历史用电数据仍保留）。')) return;
+  try {
+    var resp = await fetch(POWER_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'purge', entity_id: entityId }),
+    });
+    var json = await resp.json();
+    showToast(json.success ? (json.message || '已彻底删除') : ('删除失败: ' + json.error), json.success);
+    if (json.success) loadPowerArchived();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+async function purgeAllPowerMeters() {
+  if (!confirm('确定清空回收站？\n将物理删除全部已取消登记的配置行（历史用电数据仍保留）。')) return;
+  try {
+    var resp = await fetch(POWER_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'purge_all' }),
+    });
+    var json = await resp.json();
+    showToast(json.success ? (json.message || '已清空') : ('清空失败: ' + json.error), json.success);
+    if (json.success) loadPowerArchived();
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// 由 ID 段实时派生"日用电量实体"预览（只读，不可手填）
+function syncPmDailyEntityId() {
+  var slug = (document.getElementById('pmIdSlug').value || '').trim();
+  document.getElementById('pmDailyEntityId').value =
+    slug ? ('sensor.ha_data_store_' + slug + '_daily_ele') : '';
 }
 
 async function createPowerMeter() {
   var entityId = (document.getElementById('pmEntityId').value || '').trim();
   var idSlug = (document.getElementById('pmIdSlug').value || '').trim();
   if (!entityId) { showToast('请填写功率实体 ID', false); return; }
+  // 未填 ID 段时，优先沿用该实体的历史登记（避免实体 ID 分叉）
+  if (!idSlug) {
+    try {
+      var lr = await fetch(POWER_API + '?type=lookup&entity_id=' + encodeURIComponent(entityId));
+      var lj = await lr.json();
+      if (lj.success && lj.data && lj.data.id_slug) {
+        idSlug = lj.data.id_slug;
+        document.getElementById('pmIdSlug').value = idSlug;
+        if (!(document.getElementById('pmDeviceName').value || '').trim() && lj.data.device_name)
+          document.getElementById('pmDeviceName').value = lj.data.device_name;
+        if (!(document.getElementById('pmRoom').value || '').trim() && lj.data.room)
+          document.getElementById('pmRoom').value = lj.data.room;
+      }
+    } catch(e) { /* 沿用失败则走原有校验 */ }
+  }
   if (!idSlug) { showToast('请填写 ID 段（英文小写）', false); return; }
   if (!/^[a-z0-9_]+$/.test(idSlug)) { showToast('ID 段只能含小写字母/数字/下划线', false); return; }
+  syncPmDailyEntityId();
   var body = {
     action: 'create',
     entity_id: entityId,
@@ -6194,7 +6506,9 @@ async function createPowerMeter() {
       document.getElementById('pmDeviceName').value = '';
       document.getElementById('pmRoom').value = '';
       document.getElementById('pmIdSlug').value = '';
+      syncPmDailyEntityId();
       loadPowerMeters();
+      loadMonitorPower();
     } else {
       showToast('登记失败: ' + (json.error || '未知错误'), false);
     }
@@ -6202,22 +6516,22 @@ async function createPowerMeter() {
 }
 
 async function deletePowerMeter(entityId) {
-  if (!confirm('确定删除功率计量 ' + entityId + ' ？\n将同时删除其日用电量表数据。')) return;
+  if (!confirm('取消登记 ' + entityId + ' ？\n\n配置将移入回收站（可随时恢复），历史用电数据保留。\n重新登记同一实体时会自动沿用原有 ID 段与历史数据。')) return;
   try {
     var resp = await fetch(POWER_API, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'delete', entity_id: entityId }),
     });
     var json = await resp.json();
-    showToast(json.success ? (json.message || '已删除') : ('删除失败: ' + json.error), json.success);
-    if (json.success) loadPowerMeters();
+    showToast(json.success ? (json.message || '已取消登记') : ('取消失败: ' + json.error), json.success);
+    if (json.success) { loadPowerMeters(); loadMonitorPower(); }
   } catch(e) { showToast('请求失败', false); }
 }
 
 async function batchDeletePowerMeters() {
   const ids = getSelectedEntities('powerMeterTable');
-  if (!ids.length) { showToast('请先勾选要删除的功率计量', false); return; }
-  if (!confirm('确定删除选中的 ' + ids.length + ' 个功率计量？\n将同时删除其日用电量表数据。')) return;
+  if (!ids.length) { showToast('请先勾选要取消登记的功率计量', false); return; }
+  if (!confirm('确定取消登记选中的 ' + ids.length + ' 个功率计量？\n\n配置将移入回收站（可随时恢复），历史用电数据保留。')) return;
   let ok = 0, fail = 0;
   for (const eid of ids) {
     try {
@@ -6229,8 +6543,9 @@ async function batchDeletePowerMeters() {
       if (json.success) ok++; else fail++;
     } catch(e) { fail++; }
   }
-  showToast('批量删除完成：成功 ' + ok + '，失败 ' + fail, fail === 0);
+  showToast('批量取消登记完成：成功 ' + ok + '，失败 ' + fail, fail === 0);
   loadPowerMeters();
+  loadMonitorPower();
 }
 
 function onPmQKindChange() {
@@ -6839,6 +7154,139 @@ function _showAutoApiRows(qt) {
   if (qt === 'auto_run') document.getElementById('apiAutoForceRow').style.display = '';
 }
 
+// 多维度聚合族（供 generateApiUrl 等其它函数复用）：
+// ⚠️ 不要把这类判断写成 onApiTypeChange() 内的局部变量再跨函数引用 ——
+//    它们只属于该函数作用域，在 generateApiUrl 里会抛 ReferenceError，
+//    表现为"生成的 API URL"输入框为空。统一用下面的模块级函数判断。
+const MULTI_BUCKET_API_TYPES = ['entities_period_agg', 'power_energy_multi', 'device_usage_multi'];
+function isMultiBucketApiType(qt) {
+  return MULTI_BUCKET_API_TYPES.indexOf(qt) !== -1;
+}
+// 多实体接口（复用"多实体 + 粒度 + 返回结构 + 时间段"表单区）
+const MULTI_ENTITIES_API_TYPES = [
+  'entities_period_agg', 'entities_dates', 'entities_hours_agg',
+  'entities_weekday_hours', 'power_energy_multi', 'device_usage_multi',
+  'device_usage_detail', 'device_usage_total', 'device_usage_history',
+  'device_usage_avg',
+];
+function isMultiEntitiesApiType(qt) {
+  return MULTI_ENTITIES_API_TYPES.indexOf(qt) !== -1;
+}
+
+// 「按日期数量」两种分组方式只对 entities_dates（多实体有数据日期）有意义，
+// 其它接口的 group 语义是"合并/按实体"，故按当前接口显示/隐藏对应 <option>。
+// 注意：option 不支持可靠地隐藏，这里同时设置 display 与 disabled。
+function syncMultiGroupOptions(qt) {
+  const sel = document.getElementById('apiMultiGroup');
+  if (!sel) return;
+  const showCount = (qt === 'entities_dates');
+  let needReset = false;
+  for (const opt of sel.options) {
+    const only = opt.getAttribute('data-for');
+    if (only === 'entities_dates') {
+      opt.hidden = !showCount;
+      opt.disabled = !showCount;
+      opt.style.display = showCount ? '' : 'none';
+      // 切到不支持该选项的接口时，若当前选中它则回落到"合并返回"
+      if (!showCount && sel.value === opt.value) needReset = true;
+    }
+  }
+  if (needReset) {
+    sel.value = '0';
+    generateApiUrl();
+  }
+}
+// 设备类扩展接口：合计(scope) / 历史同期(scope) 需要额外的 scope 下拉
+const DEV_SCOPE_API_TYPES = ['device_usage_total', 'device_usage_history'];
+function isDevScopeApiType(qt) {
+  return DEV_SCOPE_API_TYPES.indexOf(qt) !== -1;
+}
+// 明细接口：需要 limit/offset 分页
+const DEV_DETAIL_API_TYPES = ['device_usage_detail'];
+function isDevDetailApiType(qt) {
+  return DEV_DETAIL_API_TYPES.indexOf(qt) !== -1;
+}
+
+// 多维度聚合（用时/用电、用电量）的时间模式联动：
+// 全部时间 / 时间段 / 指定日 / 指定月 / 指定年
+function onMultiTimeModeChange() {
+  const sel = document.getElementById('apiMultiTimeMode');
+  if (!sel) return;
+  const mode = sel.value;
+  const rangeWrap = document.getElementById('apiAggRangeWrap');
+  const rangeWrap2 = document.getElementById('apiAggRangeWrap2');
+  const valWrap = document.getElementById('apiMultiTimeValueWrap');
+  const dW = document.getElementById('apiMultiTimeDateWrap');
+  const yW = document.getElementById('apiMultiTimeYearWrap');
+  const mW = document.getElementById('apiMultiTimeMonthWrap');
+  const showRange = (mode === 'range');
+  if (rangeWrap) rangeWrap.style.display = showRange ? '' : 'none';
+  if (rangeWrap2) rangeWrap2.style.display = showRange ? '' : 'none';
+  if (valWrap) valWrap.style.display = (mode === 'all' || mode === 'range') ? 'none' : 'flex';
+  if (dW) dW.style.display = (mode === 'date') ? '' : 'none';
+  if (yW) yW.style.display = (mode === 'year' || mode === 'month') ? '' : 'none';
+  if (mW) mW.style.display = (mode === 'month') ? '' : 'none';
+  generateApiUrl();
+}
+
+// 把「时间模式」拼成 URL 查询参数（return 追加片段；全部时间返回空串）
+function multiTimeQuery() {
+  const sel = document.getElementById('apiMultiTimeMode');
+  const mode = sel ? sel.value : 'range';   // 缺省保持"时间段"以兼容原行为
+  if (mode === 'all') return '';
+  if (mode === 'range') {
+    let s = '';
+    const sD = document.getElementById('apiAggStart').value;
+    const eD = document.getElementById('apiAggEnd').value;
+    if (sD) s += '&start=' + encodeURIComponent(sD);
+    if (eD) s += '&end=' + encodeURIComponent(eD);
+    return s;
+  }
+  if (mode === 'date') {
+    const v = document.getElementById('apiMultiTimeDate').value;
+    return v ? ('&date=' + encodeURIComponent(v)) : '';
+  }
+  if (mode === 'year') {
+    const v = document.getElementById('apiMultiTimeYear').value.trim();
+    return v ? ('&year=' + encodeURIComponent(v)) : '';
+  }
+  if (mode === 'month') {
+    // 支持只填月（配年则拼 YYYY-MM，否则拼 MM 由后端按 MM-% 匹配）
+    const y = document.getElementById('apiMultiTimeYear').value.trim();
+    const m = document.getElementById('apiMultiTimeMonth').value.trim();
+    if (y && m) return '&month=' + encodeURIComponent(y + '-' + String(m).padStart(2, '0'));
+    if (m) return '&month=' + encodeURIComponent(m);
+    return y ? ('&year=' + encodeURIComponent(y)) : '';
+  }
+  return '';
+}
+
+// 设备类「统计范围」联动：按 scope 显示年/月/日输入（合计接口用）
+function onDevScopeChange() {
+  const sel = document.getElementById('apiDevScope');
+  if (!sel) return;
+  const qt = document.getElementById('apiQueryType').value;
+  const scope = sel.value;
+  const isTotal = qt === 'device_usage_total';
+  const wrap = document.getElementById('apiDevScopeTimeWrap');
+  const y = document.getElementById('apiDevScopeYearWrap');
+  const m = document.getElementById('apiDevScopeMonthWrap');
+  const d = document.getElementById('apiDevScopeDateWrap');
+  if (!wrap || !y || !m || !d) return;
+  // 历史同期接口无额外时间输入
+  if (!isTotal) {
+    wrap.style.display = 'none';
+    y.style.display = m.style.display = d.style.display = 'none';
+    generateApiUrl();
+    return;
+  }
+  wrap.style.display = (scope === 'all') ? 'none' : 'flex';
+  y.style.display = (scope === 'year' || scope === 'month') ? '' : 'none';
+  m.style.display = (scope === 'month') ? '' : 'none';
+  d.style.display = (scope === 'date') ? '' : 'none';
+  generateApiUrl();
+}
+
 function onApiTypeChange() {
   const qt = document.getElementById('apiQueryType').value;
   // 自定义路由：value 格式 "custom:{route_path}"
@@ -6907,14 +7355,29 @@ function onApiTypeChange() {
   const isReportAutoEntities = qt === 'report_auto_entities';
   // 实体上报复合查询 RESTful API（独立路径 /report/search）
   const isReportSearch = qt === 'report_search';
-  // 多实体接口：汇聚(period_agg)/日期(dates)/时段(hours_agg)
+  // 多实体接口：汇聚(period_agg)/日期(dates)/时段(hours_agg)/星期网格 + 用电量聚合
   const isEntitiesAgg = qt === 'entities_period_agg';
   const isEntitiesDates = qt === 'entities_dates';
   const isEntitiesHours = qt === 'entities_hours_agg';
   const isEntitiesWeekly = qt === 'entities_weekday_hours';
-  const isMultiEntitiesApi = isEntitiesAgg || isEntitiesDates || isEntitiesHours || isEntitiesWeekly;
-  // 用电计量 RESTful API（独立路径 /power_energy）
-  const isPowerApi = qt.startsWith('power_');
+  // 用电量多实体×多维度聚合（power_energy_daily）
+  const isPowerMulti = qt === 'power_energy_multi';
+  // 设备用时/用电 多实体×多维度聚合（device_history）
+  const isDeviceMulti = qt === 'device_usage_multi';
+  // 统一取模块级清单，避免与 generateApiUrl 的判断不一致
+  const isMultiEntitiesApi = isMultiEntitiesApiType(qt);
+  // 需要显示"粒度/返回结构"下拉的：汇聚接口 + 两类多维度聚合
+  const isAggBucketVisible = isMultiBucketApiType(qt);
+  // 多维度聚合族（返回结构文案为 实体→时间桶 / 时间桶→实体）
+  const isMultiBucketApi = isMultiBucketApiType(qt);
+  // 用电计量 RESTful API（独立路径 /power_energy）；
+  // power_energy_joined 与 power_energy_multi 均走 /query 体系，不在此处理
+  const isPowerApi = qt.startsWith('power_') && qt !== 'power_energy_joined'
+    && qt !== 'power_energy_multi';
+  // 用电量↔电表配置关联查询（走 /query?type=power_energy_joined）
+  const isPowerEnergyJoined = qt === 'power_energy_joined';
+  // 设备实体清单（走 /query?type=device_entities）
+  const isDeviceEntities = qt === 'device_entities';
   // 用户动作查询组
   const isUserActionDaily = qt === 'user_actions_daily';
   const isUserActionRange = qt === 'user_actions_range';
@@ -7337,6 +7800,19 @@ function onApiTypeChange() {
     document.getElementById('apiDateMode').value = isAutoDate ? 'single' : 'none';
     onDateModeChange();
     _showAutoApiRows(qt);
+  } else if (isDeviceEntities) {
+    // 设备实体清单：显示 实体ID / 房间（均可选，模糊/精确过滤）
+    _hideAllApiFormRows();
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = '';
+  } else if (isPowerEnergyJoined) {
+    // 用电量↔电表配置关联：显示 实体ID(可多值逗号) / 单日期或区间 / limit
+    _hideAllApiFormRows();
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiLimit').parentNode.style.display = '';
+    document.getElementById('apiDateMode').parentNode.style.display = '';
+    document.getElementById('apiDateMode').value = 'none';
+    onDateModeChange();
   } else if (isPowerApi) {
     // 用电计量：显示 实体ID / 房间 / 单日期（daily 填日期、monthly 填 YYYY-MM、yearly 填 YYYY、range 填起始日）
     _hideAllApiFormRows();
@@ -7430,10 +7906,104 @@ function onApiTypeChange() {
     document.getElementById('apiDateSingle').style.display = 'none';
     document.getElementById('apiDateRange').style.display = 'none';
     document.getElementById('apiEntitiesAggRow').style.display = 'block';
-    document.getElementById('apiAggBucketWrap').style.display = isEntitiesAgg ? '' : 'none';
-    document.getElementById('apiAggViewWrap').style.display = isEntitiesAgg ? '' : 'none';
+    document.getElementById('apiAggBucketWrap').style.display = isAggBucketVisible ? '' : 'none';
+    document.getElementById('apiAggViewWrap').style.display = isAggBucketVisible ? '' : 'none';
+    // 用电量聚合：返回结构文案与 entities_period_agg 不同（无 running，单位为 kWh）
+    // ---- 时间模式选择：多维度聚合（用时/用电、用电量）+ 设备类明细 ----
+    // 注意：这里必须调用模块级判定函数，
+    // 不能引用 generateApiUrl() 里的局部变量（会 ReferenceError，
+    // 导致本函数从此处起整体中断，UI 不更新）
+    const isBucketMode = isMultiBucketApiType(qt);
+    // 支持"全部/时间段/指定日/指定月/指定年"的接口：
+    //   多维度聚合族 + 设备类明细 + entities_dates(多实体有数据日期) 等
+    //   —— 后端 _fetch_usage_rows / _usage_range_params 均支持 date/month/year
+    const isTimeModeApi = isBucketMode || isDevDetailApiType(qt)
+      || qt === 'entities_dates';
+    const elTimeModeWrap = document.getElementById('apiMultiTimeModeWrap');
+    if (elTimeModeWrap) {
+      if (isTimeModeApi) {
+        elTimeModeWrap.style.display = '';
+        const sel = document.getElementById('apiMultiTimeMode');
+        // 首次进入该模式时默认"时间段"，保持与原有交互一致
+        if (sel && !sel.value) sel.value = 'range';
+        onMultiTimeModeChange();
+      } else {
+        elTimeModeWrap.style.display = 'none';
+        const vw = document.getElementById('apiMultiTimeValueWrap');
+        if (vw) vw.style.display = 'none';
+        const r1 = document.getElementById('apiAggRangeWrap');
+        const r2 = document.getElementById('apiAggRangeWrap2');
+        if (r1) r1.style.display = '';
+        if (r2) r2.style.display = '';
+      }
+    }
+
+    // ---- 设备类扩展接口：scope（合计/历史同期）/ 分页（明细） ----
+    const isDevScope = isDevScopeApiType(qt);
+    const isDevDetail = isDevDetailApiType(qt);
+    const elDevScopeWrap = document.getElementById('apiDevScopeWrap');
+    const elDevScopeSel = document.getElementById('apiDevScope');
+    if (elDevScopeWrap && elDevScopeSel) {
+      if (isDevScope) {
+        // 合计：all|year|month|date；历史同期：today|month
+        const opts = (qt === 'device_usage_history')
+          ? [['today', '历史今日（历年同月同日）'], ['month', '历史本月（历年同月）']]
+          : [['all', '全部时间'], ['year', '指定年'], ['month', '指定月'], ['date', '指定日']];
+        const cur = elDevScopeSel.value;
+        elDevScopeSel.innerHTML = opts.map(function (o) {
+          return '<option value="' + o[0] + '">' + o[1] + '</option>';
+        }).join('');
+        elDevScopeSel.value = opts.some(function (o) { return o[0] === cur; }) ? cur : opts[0][0];
+        elDevScopeWrap.style.display = '';
+        const elDevScopeLabel = document.getElementById('apiDevScopeLabel');
+        if (elDevScopeLabel) {
+          elDevScopeLabel.textContent = (qt === 'device_usage_history') ? '同期范围' : '统计范围';
+        }
+        onDevScopeChange();
+      } else {
+        elDevScopeWrap.style.display = 'none';
+        const st = document.getElementById('apiDevScopeTimeWrap');
+        if (st) st.style.display = 'none';
+      }
+    }
+    const elDevLimitWrap = document.getElementById('apiDevLimitWrap');
+    if (elDevLimitWrap) elDevLimitWrap.style.display = isDevDetail ? 'flex' : 'none';
+
+    const elAggLabel = document.getElementById('apiEntitiesAggLabel');
+    if (elAggLabel) {
+      if (isPowerMulti) {
+        elAggLabel.textContent = '用电量多实体聚合（entities 逗号分隔，留空 = 全部；power_energy_daily，单位 kWh）';
+      } else if (isDeviceMulti) {
+        elAggLabel.textContent = '设备用时/用电多实体聚合（entities 逗号分隔，留空 = 全部；device_history，含时长与用电）';
+      } else if (qt === 'device_usage_detail') {
+        elAggLabel.textContent = '多实体明细（entities 逗号分隔，留空 = 全部；不聚合，返回每条开关记录，时间模式见下方）';
+      } else if (qt === 'device_usage_total') {
+        elAggLabel.textContent = '多实体合计（entities 逗号分隔，留空 = 全部；按 年/月/日/全部 汇总）';
+      } else if (qt === 'device_usage_history') {
+        elAggLabel.textContent = '多实体历史同期（entities 逗号分隔，留空 = 全部；历史今日 / 历史本月）';
+      } else if (qt === 'device_usage_avg') {
+        elAggLabel.textContent = '多实体平均指标（entities 逗号分隔，留空 = 全部；平均每日次数/时长、平均每次时长）';
+      } else {
+        elAggLabel.textContent = '多实体接口（entities 逗号分隔，留空 = 全部；时间段可选）';
+      }
+    }
+    const elAggView = document.getElementById('apiAggView');
+    if (elAggView) {
+      if (isPowerMulti) {
+        elAggView.options[0].text = '实体→时间桶（每实体含 kwh 系列）';
+        elAggView.options[1].text = '时间桶→实体（每桶含各实体 kwh）';
+      } else if (isDeviceMulti) {
+        elAggView.options[0].text = '实体→时间桶（每实体含 次数/时长/用电 系列）';
+        elAggView.options[1].text = '时间桶→实体（每桶含各设备 次数/时长/用电）';
+      } else {
+        elAggView.options[0].text = '实体→日期（每实体含系列）';
+        elAggView.options[1].text = '日期→实体（日期唯一，实体含 running）';
+      }
+    }
     document.getElementById('apiGridDimWrap').style.display = isEntitiesWeekly ? '' : 'none';
     document.getElementById('apiMultiGroupWrap').style.display = (isEntitiesDates || isEntitiesHours || isEntitiesWeekly) ? '' : 'none';
+    // 「按日期数量」相关的两个分组方式仅对 entities_dates 有效（其余接口无此语义）
+    syncMultiGroupOptions(qt);
   } else if (isEntityHourDates) {
     // 设备小时开启日期：实体ID + 小时(必填) + 可选时间范围（全部历史/年/月/指定日期/起止范围）
     document.getElementById('apiEntityId').parentNode.style.display = '';
@@ -7760,6 +8330,35 @@ function generateApiUrl() {
   let url = BASE_PATH + BASE_URL + '?type=' + qt;
   if (selectedApiKey) url += '&key=' + encodeURIComponent(selectedApiKey);
 
+  // 设备实体清单（device_entities）：entity_id/room 可选
+  if (qt === 'device_entities') {
+    let deUrl = BASE_PATH + '/api/ha_data_store/query?type=device_entities';
+    if (selectedApiKey) deUrl += '&key=' + encodeURIComponent(selectedApiKey);
+    if (entityId) deUrl += '&entity_id=' + encodeURIComponent(entityId);
+    if (room) deUrl += '&room=' + encodeURIComponent(room);
+    document.getElementById('apiUrlOutput').value = deUrl;
+    return;
+  }
+
+  // 用电量↔电表配置关联（power_energy_joined）
+  if (qt === 'power_energy_joined') {
+    let peUrl = BASE_PATH + '/api/ha_data_store/query?type=power_energy_joined';
+    if (selectedApiKey) peUrl += '&key=' + encodeURIComponent(selectedApiKey);
+    if (entityId) peUrl += '&entity_id=' + encodeURIComponent(entityId);
+    if (dateMode === 'single') {
+      const d = document.getElementById('apiDate').value;
+      if (d) peUrl += '&date=' + encodeURIComponent(d);
+    } else if (dateMode === 'range') {
+      const s = document.getElementById('apiDateStart').value;
+      const e = document.getElementById('apiDateEnd').value;
+      if (s) peUrl += '&start=' + encodeURIComponent(s);
+      if (e) peUrl += '&end=' + encodeURIComponent(e);
+    }
+    if (limit) peUrl += '&limit=' + encodeURIComponent(limit);
+    document.getElementById('apiUrlOutput').value = peUrl;
+    return;
+  }
+
   // 新接口（ext）：独立 RESTful 路径 /ext/{name}，参数从 apiCustomParamsBox 读取
   if (qt.startsWith('ext:')) {
     const extName = qt.slice('ext:'.length);
@@ -7970,7 +8569,10 @@ function generateApiUrl() {
 
 
   // 用电计量 API（独立 RESTful 路径 /api/ha_data_store/power_energy）
-  if (qt.startsWith('power_')) {
+  // 注：power_energy_joined / power_energy_multi 走通用 /query?type= 体系，
+  //     分别见下方 power_energy_joined 分支与 isMultiEntitiesApi 分支
+  if (qt.startsWith('power_') && qt !== 'power_energy_joined'
+      && qt !== 'power_energy_multi') {
     const pBase = BASE_PATH + '/api/ha_data_store/power_energy';
     const room = (document.getElementById('apiRoom') ? document.getElementById('apiRoom').value : '').trim();
     const srcEntity = (document.getElementById('apiEntityId') ? document.getElementById('apiEntityId').value : '').trim();
@@ -8202,19 +8804,78 @@ function generateApiUrl() {
     return;
   }
 
-  // 多实体接口：汇聚 / 日期 / 时段（entities 逗号分隔，留空=全部；可选时间段）
-  if (qt === 'entities_period_agg' || qt === 'entities_dates'
-      || qt === 'entities_hours_agg' || qt === 'entities_weekday_hours') {
+  // 多实体接口：汇聚 / 日期 / 时段 / 星期网格 / 用电量与设备用时聚合
+  // （entities 逗号分隔，留空=全部；可选时间段）
+  //
+  // 注意：必须用模块级 isMultiBucketApiType()/isMultiEntitiesApiType() 判断，
+  // 不能引用 onApiTypeChange() 里的局部变量（isMultiBucketApi 等只属于那个作用域，
+  // 在此引用会抛 ReferenceError，表现为"生成的 API URL"为空）
+  const isBucketApiMode = isMultiBucketApiType(qt);
+  if (isMultiEntitiesApiType(qt)) {
     const ents = document.getElementById('apiMultiEntities').value.trim();
     if (ents) url += '&entities=' + encodeURIComponent(ents);
     const sD = document.getElementById('apiAggStart').value;
     const eD = document.getElementById('apiAggEnd').value;
-    if (sD) url += '&start=' + encodeURIComponent(sD);
-    if (eD) url += '&end=' + encodeURIComponent(eD);
-    if (qt === 'entities_period_agg') {
+
+    // ---- 设备类·历史同期：只带 scope（无时间参数）----
+    if (qt === 'device_usage_history') {
+      url += '&scope=' + encodeURIComponent(
+        document.getElementById('apiDevScope').value || 'today');
+      document.getElementById('apiUrlOutput').value = url;
+      return;
+    }
+    // ---- 设备类·合计：scope + 年/月/日 ----
+    if (qt === 'device_usage_total') {
+      const scope = document.getElementById('apiDevScope').value || 'all';
+      url += '&scope=' + encodeURIComponent(scope);
+      const vy = document.getElementById('apiDevScopeYear').value.trim();
+      const vm = document.getElementById('apiDevScopeMonth').value.trim();
+      const vd = document.getElementById('apiDevScopeDate').value;
+      if (scope === 'year' && vy) url += '&year=' + encodeURIComponent(vy);
+      if (scope === 'month') {
+        if (vy) url += '&year=' + encodeURIComponent(vy);
+        if (vm) url += '&month=' + encodeURIComponent(vm);
+      }
+      if (scope === 'date' && vd) url += '&date=' + encodeURIComponent(vd);
+      document.getElementById('apiUrlOutput').value = url;
+      return;
+    }
+    // ---- 设备类·明细：时间模式（全部/时间段/指定日/指定月/指定年）+ 分页 ----
+    if (isDevDetailApiType(qt)) {
+      url += multiTimeQuery();
+      const lim = document.getElementById('apiDevLimit').value.trim();
+      const off = document.getElementById('apiDevOffset').value.trim();
+      if (lim) url += '&limit=' + encodeURIComponent(lim);
+      if (off) url += '&offset=' + encodeURIComponent(off);
+      const elFull = document.getElementById('apiDevFull');
+      if (elFull && elFull.checked) url += '&full=1';
+      // 合计节点默认返回；取消勾选时显式传 summary=0
+      const elSum = document.getElementById('apiDevSummary');
+      if (elSum && !elSum.checked) url += '&summary=0';
+      document.getElementById('apiUrlOutput').value = url;
+      return;
+    }
+
+    // ---- entities_dates（多实体有数据日期）：时间模式 + 分组方式 ----
+    if (qt === 'entities_dates') {
+      url += multiTimeQuery();
+      url += '&group=' + encodeURIComponent(document.getElementById('apiMultiGroup').value);
+      document.getElementById('apiUrlOutput').value = url;
+      return;
+    }
+
+    if (isBucketApiMode) {
+      // 时间模式：全部 / 时间段(start,end) / 指定日(date) / 指定月(month) / 指定年(year)
+      url += multiTimeQuery();
+      // bucket=day|month|year；view=entity(实体→时间桶) | date(时间桶→实体)
       url += '&bucket=' + encodeURIComponent(document.getElementById('apiAggBucket').value)
            + '&view=' + encodeURIComponent(document.getElementById('apiAggView').value);
-    } else if (qt === 'entities_weekday_hours') {
+      document.getElementById('apiUrlOutput').value = url;
+      return;
+    }
+    if (sD) url += '&start=' + encodeURIComponent(sD);
+    if (eD) url += '&end=' + encodeURIComponent(eD);
+    if (qt === 'entities_weekday_hours') {
       url += '&dim=' + encodeURIComponent(document.getElementById('apiGridDim').value)
            + '&group=' + encodeURIComponent(document.getElementById('apiMultiGroup').value);
     } else {

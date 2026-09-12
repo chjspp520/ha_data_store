@@ -1087,6 +1087,7 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 device_name       TEXT NOT NULL DEFAULT '',
                 room              TEXT NOT NULL DEFAULT '',
                 id_slug           TEXT NOT NULL DEFAULT '',
+                daily_entity_id   TEXT NOT NULL DEFAULT '',
                 unit              TEXT NOT NULL DEFAULT 'W',
                 enabled           INTEGER NOT NULL DEFAULT 1,
                 created_at        TEXT NOT NULL DEFAULT '',
@@ -1094,6 +1095,14 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
             )
             """,
         )
+        # 迁移：补充「显示日用电量实体」字段（旧表自动补列）
+        for _col, _def in (("daily_entity_id", "TEXT NOT NULL DEFAULT ''"),):
+            try:
+                _cols = [r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_POWER_METER_CONFIGS})")]
+                if _col not in _cols:
+                    conn.execute(f"ALTER TABLE {TABLE_POWER_METER_CONFIGS} ADD COLUMN {_col} {_def}")
+            except Exception as e:
+                _LOGGER.warning("[HDS] power_meter_configs 补充列 %s 失败（可忽略）: %s", _col, e)
         # 16) 功率→用电计量：每日用电量表（每实体每天一行）
         conn.execute(
             f"""
@@ -1104,11 +1113,33 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 room              TEXT NOT NULL DEFAULT '',
                 date              TEXT NOT NULL,
                 kwh               REAL NOT NULL DEFAULT 0,
+                daily_entity_id   TEXT NOT NULL DEFAULT '',
                 updated_at        TEXT NOT NULL DEFAULT '',
                 UNIQUE(entity_id, date)
             )
             """,
         )
+        # 迁移：日表补充「日用电量实体」字段（旧表自动补列，便于前端按实体查询）
+        for _col, _def in (("daily_entity_id", "TEXT NOT NULL DEFAULT ''"),):
+            try:
+                _cols2 = [r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_POWER_ENERGY_DAILY})")]
+                if _col not in _cols2:
+                    conn.execute(f"ALTER TABLE {TABLE_POWER_ENERGY_DAILY} ADD COLUMN {_col} {_def}")
+            except Exception as e:
+                _LOGGER.warning("[HDS] power_energy_daily 补充列 %s 失败（可忽略）: %s", _col, e)
+        # 回填：日表历史行的 daily_entity_id 为空时，从配置表补齐（一次性，可重复执行）
+        try:
+            conn.execute(
+                f"UPDATE {TABLE_POWER_ENERGY_DAILY} SET daily_entity_id = ("
+                f"  SELECT mc.daily_entity_id FROM {TABLE_POWER_METER_CONFIGS} mc "
+                f"  WHERE mc.entity_id = {TABLE_POWER_ENERGY_DAILY}.entity_id"
+                f") WHERE (daily_entity_id IS NULL OR daily_entity_id = '') "
+                f"AND EXISTS (SELECT 1 FROM {TABLE_POWER_METER_CONFIGS} mc2 "
+                f"  WHERE mc2.entity_id = {TABLE_POWER_ENERGY_DAILY}.entity_id "
+                f"  AND COALESCE(mc2.daily_entity_id, '') <> '')"
+            )
+        except Exception as e:
+            _LOGGER.warning("[HDS] power_energy_daily 回填 daily_entity_id 失败（可忽略）: %s", e)
         # 迁移旧表：补缺失列、补 token、修复 url 约束
         try:
             pt_columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_PUSH_TARGETS})")]

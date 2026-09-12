@@ -615,13 +615,26 @@ db_viewer「系统配置 → ⚡ 用电计量」登记**功率实体**（填功�
 - `sensor.ha_data_store_{id}_monthly_ele`（月，由日数据实时聚合）
 - `sensor.ha_data_store_{id}_yearly_ele`（年，由日数据实时聚合）
 
+> 这三个实体由 **ID 段自动派生**，是登记的产物，**不需要也不允许手填**。库中 `daily_entity_id` 字段即等于 `sensor.ha_data_store_{ID段}_daily_ele`，仅用于前端关联跳转查询，永远与实际注册的实体 ID 保持一致。
+
 特性：
 - 每天一条落库 `power_energy_daily`（60s 落盘 + 跨日自动分账，kwh 保留 3 位小数）；月/年不建表，实时聚合；
 - 单位 W/kW 自动识别（登记优先，其次读实体 `unit_of_measurement`）；`unavailable/unknown` 不累计；采样空窗 >5 分钟丢弃（防停机误算）；
 - 全部实体归入统一设备「用电计量」；重启自动恢复，卸载前自动落盘；
 - **历史列表状态属性**：三个累计实体状态属性自动附带全量历史列表 —— 日用电 `daylist`（每日用电）、月用电 `monthlist`（每月用电）、年用电 `yearlist`（每年用电），元素形如 `{day|month|year, usage}`（usage 单位 kWh，保留 3 位小数）；全量不设上限、**无数据日期不占位**，**今天/本月/当年并入实时值**（与实体 state 一致），由 Manager 缓存并在 60s 落盘/跨日时重建，重启自动恢复；
 - **汇总实体** `sensor.ha_data_store_all_power`：状态 = 用电实体个数，attributes 顶层 `total`（**不受 `ele_list` 条数限制**）= 合计节点 `{count, power, today, month, year, room[]}`：`power` 当前全屋功率(W，仅 ≥0 有效读数计入)，`today/month/year` 今日/本月/本年用电合计(kWh，直接对全部启用 meter 求和)，`room[]` 按房间汇总 `{room,count,power,today,month,year}`（room 为空归入「未分配」）；`entities[]` = 每个用电实体的明细（entity_id/name/icon/room/device/power_entity + `period` + 对应列表 daily→`daylist`、monthly→`monthlist`、yearly→`yearlist`，升序保留最近 N 条），30s 刷新；明细列表条数由设置实体 **`text.ha_data_store_ele_list`**（状态“日,月,年”，默认 `3,3,3`）控制，该 text 变化时立即刷新 all_power；三个用电实体自身的列表保持全量不受影响；
-- **接口**：`GET /api/ha_data_store/power_energy`（`type=configs` / `type=query&kind=daily|monthly|yearly|range|latest`，支持 entity_id/room/date/month/year/start/end），`POST`（登记/删除）；API 工具含「⚡ 用电计量」查询分组；
+- **取消登记 = 软删除（回收站）**：点「取消登记」不会物理删除配置，而是把 `power_meter_configs` 行置为 `enabled=0` 归档并移入「♻️ 回收站」；历史日表 `power_energy_daily` **任何情况下都不删除**；
+- **重新登记自动沿用历史数据**：对同一功率实体重新登记时，会自动沿用原有的 `id_slug` / 设备名 / 房间（表单里 ID 段留空即自动带出，或点行内「编辑」一键回填），因此实体 ID 不会分叉，历史日用电数据**无缝接续**；
+- **日用电量实体自动派生**：登记时按 ID 段自动生成 `sensor.ha_data_store_{ID段}_daily_ele` 并写入 `daily_entity_id`（配置表 + 日表），表单中该项为**只读预览**、随 ID 段实时变化；启动时若发现历史值缺失或曾被手填错误，会自动按 ID 段纠正（也可点 **🔧 按 ID 段纠正日用电实体** 手动触发）；
+- 回收站中可 **♻️ 一键还原全部**、单条 **♻ 恢复**（重新注册三个用电实体，历史接续）、**彻底删除**（物理删配置行，日表仍保留）、**清空回收站**；
+- **接口**：`GET /api/ha_data_store/power_energy`（`type=configs` 生效中 / `type=archived` 回收站 / `type=lookup&entity_id=` 查单个含归档 / `type=query&kind=daily|monthly|yearly|range|latest`，支持 entity_id/room/date/month/year/start/end），`POST`（`action=create|delete|restore|purge|purge_all`）；API 工具含「⚡ 用电计量」查询分组；
+- **多实体 × 多维度聚合**：`GET /api/ha_data_store/query?type=power_energy_multi`，参数
+  `entities`（逗号分隔，空=全部）、`bucket=day|month|year`、`view=entity|date`、
+  `start`/`end`/`date`/`month`/`year`（优先级 start/end > date > month > year，全不传 = 全部时间）；
+  API 工具中对应「**时间模式**」下拉：全部时间 / 时间段 / 指定日 / 指定月 / 指定年
+  （`device_usage_multi` 同样支持）。
+  `view=entity` 返回 `entities[].series[]`（按实体），`view=date` 返回 `dates[].devices[]`（按时间）；
+  两者均含 `totals.kwh` / `day_count`。API 工具「⚡ 用电计量」分组有对应可视化配置项；
 - 数据浏览器中 `power_energy_daily` 为用户表（默认可见）。
 
 ## 14. 设备清理
@@ -736,7 +749,7 @@ GET /api/ha_data_store/query?type=xxx&key=你的APIKey
 | `entity_hour_dist` | 实体时段分布（几点使用/分时用电，运行中设备处理） | entity_id + 可选范围 |
 | `entity_hour_dates` | 设备小时开启日期（某小时开过哪些天） | entity_id, hour + 可选范围 |
 | `entities_period_agg` | 多实体按日/月/年汇聚（每实体 series + totals；view=entity\|date） | entities(可选), bucket |
-| `entities_dates` | 多实体有数据日期（group=0 合并 / 1 按实体） | entities(可选) |
+| `entities_dates` | 多实体有数据日期（`group=all`(0) 合并 / `entity`(1) 按实体 / **`count`** 按日期数量 / **`both`** 日期数量+实体 / **`simple`** 极简 `list:[{date,count}]` 日期倒序） | entities(可选), start/end/date/month/year |
 | `entities_hours_agg` | 多实体时段分布（group=0 合并 / 1 按实体） | entities(可选) |
 | `entities_weekday_hours` | 多实体时段分布网格（dim=week\|month\|day × 小时，7/12/31×24） | entities(可选), dim |
 | `device_summary` | 纯汇总（只返回统计数字，不返回记录） | entity_id, date/month/year(可选) |
@@ -899,8 +912,14 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
 | `/api/ha_data_store/helper/scan` | GET | 扫描原生 HA helper（可 `?include_binary_sensor=1`）生成可导出 item |
 | `/api/ha_data_store/helper/export` | GET | 导出已导入的辅助元素（配置 + 状态） |
 | `/api/ha_data_store/helper/import` | POST | 导入辅助元素并转为本集成实体（body `{mode: skip\|overwrite, items:[...]}`） |
-| `/api/ha_data_store/power_energy` | GET | 用电量查询：`type=configs` 或 `type=query&kind=daily\|monthly\|yearly\|range\|latest`（支持 entity_id/room/date/month/year/start/end 过滤） |
-| `/api/ha_data_store/power_energy` | POST | 登记/删除功率计量（body `{action: create\|delete, entity_id, ...}`） |
+| `/api/ha_data_store/power_energy` | GET | 用电量查询：`type=configs`（生效中）/ `type=archived`（回收站）/ `type=lookup&entity_id=`（单个含归档）/ `type=query&kind=daily\|monthly\|yearly\|range\|latest`（支持 entity_id/room/date/month/year/start/end 过滤） |
+| `/api/ha_data_store/power_energy` | POST | 登记管理（body `{action: create\|delete\|restore\|restore_all\|purge\|purge_all\|backfill_deid, entity_id, ...}`；delete 为软删除归档，日表数据保留；`daily_entity_id` 不接受传入，由 `id_slug` 派生） |
+| `/api/ha_data_store/query?type=power_energy_multi` | GET | **用电量多实体×多维度聚合**：`entities`（逗号分隔，空=全部）、`bucket=day\|month\|year`、`view=entity\|date`、`start/end/date/month/year`、`devices=0` 可省明细。`view=entity` → `entities[].series[]`；`view=date` → `dates[].devices[]`；均含 `totals.kwh`/`day_count` |
+| `/api/ha_data_store/query?type=device_usage_multi` | GET | **设备用时/用电多实体×多维度聚合**（`device_history`）：参数同上。指标为 `count` 开启次数 / `duration_hour` 时长 / `energy_kwh` 用电量（无来源为 `null`）/ `running`。运行中记录按「当前时间 − on_time」计时。额外带 `room` |
+| `/api/ha_data_store/query?type=device_usage_detail` | GET | **多实体明细（不聚合）**：`entities`、时间参数（`start`/`end` 时间段、`date` 指定日、`month` 指定月、`year` 指定年，优先级 start/end > date > month > year，全不传 = 全部）、`limit`/`offset`、`full=1`、`summary=0`。按 `on_time` 倒序，返回 `total`/`returned`/`records[]` 与 **`summary` 合计节点**（全局 `totals` + 每实体合计，含 `running_count`；**基于分页前全量记录计算，不受 `limit`/`offset` 影响**）。**API 工具中同样使用「时间模式」下拉**。**`full=1` 返回 `device_history` 全部字段**（`id`/`on_power`/`off_power`/`energy_consumed`/`duration`/`cross_day`/`state_attr`(JSON)/`now_kwh`/`on_user`/`off_user`/`on_snapshot`/`off_snapshot`/`power_entity`/`power_rating` 等）；不传 `full` 为精简字段 |
+| `/api/ha_data_store/query?type=device_usage_total` | GET | **多实体合计（年/月/日/全部）**：`entities`、`scope=all\|year\|month\|date`（配 `year`/`month`/`date`，`month` 支持 `9`/`09`/`2026-09`）。返回每实体合计 + 全局 `totals` |
+| `/api/ha_data_store/query?type=device_usage_history` | GET | **多实体历史同期**：`entities`、`scope=today`（历年同月同日）/ `scope=month`（历年同月），**排除今年**。返回 `history`（含 `by_year` 逐年）+ `current`（今年同期） |
+| `/api/ha_data_store/query?type=device_usage_avg` | GET | **多实体平均指标**：`entities`、`start`/`end`/`date`/`month`/`year`（默认全部）。返回 `avg_daily_count` 平均每日次数 / `avg_daily_duration_hour` 平均每日时长 / `avg_per_count_hour` 平均每次时长（全局按加权计算） |
 | `/api/ha_data_store/devices/cleanup` | GET/POST | 扫描空设备 / 清理空设备（POST body `{confirm:true}`） |
 | `/api/ha_data_store/health_add` | POST | 添加健康记录（body 可选 `remark` 备注 / `description` 说明） |
 | `/api/ha_data_store/health_types` | GET/POST/DELETE | 健康数据类型管理 |
@@ -1056,7 +1075,7 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `automations` | 自动化配置（触发/条件/动作，30 秒调度执行） |
 | `automation_logs` | 自动化执行记录（时间、条件明细、动作结果、耗时、状态，保留 30 天） |
 | `helper_entities` | 辅助元素持久化（原生 helper 导入为本集成自管实体，含 source_type/source_entity_id/extra_config） |
-| `power_meter_configs` | 功率→用电计量登记表（功率实体/设备名/房间/id_slug/单位/启用） |
+| `power_meter_configs` | 功率→用电计量登记表（功率实体/设备名/房间/id_slug/日用电量实体/单位/启用；`enabled=0` 表示已取消登记并归档到回收站，行保留以便恢复与沿用） |
 | `power_energy_daily` | 用电计量日表（每功率实体每天一条 kwh，月/年由日表实时聚合） |
 
 ---

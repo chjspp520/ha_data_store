@@ -1,5 +1,452 @@
 # 更新日志
 
+## 2026-09-11 — v3.6.6 用电计量「取消登记」改为软删除（回收站），重新登记自动沿用历史数据
+
+### ✨ `entities_dates`（多实体有数据日期）支持指定 年/月/日
+
+「多实体有数据日期」接口的后端 `compute_entities_dates_sync` **本就透传** `date`/`month`/`year`
+（经由 `_fetch_usage_rows` → `_usage_range_params`），但前端**没有对应输入控件**，无法使用。
+
+**前端**（db_viewer）：
+- 将 `entities_dates` 纳入「时间模式」作用范围：
+  `isTimeModeApi = isMultiBucketApiType(qt) || isDevDetailApiType(qt) || qt === 'entities_dates'`
+- 其 URL 分支改用 `multiTimeQuery()` 生成时间参数，并保留 `group` 分组方式
+
+现在该接口可使用：**全部时间 / 时间段 / 指定日 / 指定月 / 指定年**。
+
+**验证**：6 项可见性用例 + 5 种时间模式 URL 生成全部通过，例如：
+```
+[all  ] ?type=entities_dates&key=K&group=count
+[range] ?type=entities_dates&key=K&start=2026-09-01&end=2026-09-30&group=count
+[date ] ?type=entities_dates&key=K&date=2026-09-11&group=count
+[year ] ?type=entities_dates&key=K&year=2026&group=count
+[month] ?type=entities_dates&key=K&month=2026-09&group=count
+```
+`node --check` + 3 项接线检查 + 跨作用域扫描（321 函数 0 问题）通过。
+
+
+### ✨ `entities_dates`（多实体有数据日期）新增 2 种分组方式
+
+「分组方式」由原来的 2 种扩展为 **4 种**（`group` 参数支持语义化取值，同时兼容旧的 `0`/`1`）：
+
+| group | 说明 | 新增字段 |
+|---|---|---|
+| `all`（默认，兼容 `0`） | 合并返回：去重日期总表 + 每实体日期 | `all_count`/`all_dates`/`entities[]` |
+| `entity`（兼容 `1`） | 按实体分组 | `entities[]` |
+| **`count`** ⭐ | **按日期数量返回**：把"当天有数据的实体数"相同的日期聚成一组 | `date_counts{date:实体数}`、`count_groups[{date_count, date_total, dates[]}]` |
+| **`both`** ⭐ | **按日期数量 + 实体返回**：在 `count` 基础上，每组再带出当天具体实体 | 每组 `details[{date, entity_count, entities[]}]` 与 `entities[{entity_id, name, date_count}]`（去重，按出现天数降序）；顶层同时保留 `entities[]` |
+| **`simple`** ⭐ | **极简返回**：直接给扁平数组，开箱即用 | `date_count`（有数据的天数）、`list:[{date, count}]`（`count` = 当天有数据的实体数，**日期倒序**） |
+
+`simple` 示例（最省事的形态，无需再遍历对象）：
+```json
+{ "group": "simple", "date_count": 4,
+  "list": [ { "date": "2026-09-05", "count": 2 },
+            { "date": "2026-09-03", "count": 1 },
+            { "date": "2026-09-02", "count": 2 },
+            { "date": "2026-09-01", "count": 3 } ] }
+```
+
+**前端**：「分组方式」下拉新增 **⑤ 极简：[{date, count}]**。
+
+**排序约定**：
+- `count_groups` 按 `date_count` **升序**（从"只有 1 台"到"全部设备"），便于快速定位低活跃/高活跃日
+- 组内 `dates` 按**日期倒序**（最新在前）
+- `both` 的模式内 `entities` 按 `date_count` 降序
+
+**实现**：`compute_entities_dates_sync(..., group="all")` 内部改为先建
+`date → {entity: name}` 与 `entity → {name, dates}` 双向索引，再按 `group` 组装；
+非法 `group` 值回落 `all`。视图 `_query_entities_dates` 按 group 裁剪返回字段。
+
+**前端**（db_viewer）：「分组方式」下拉新增 **③ 按日期数量返回** 与 **④ 按日期数量 + 实体返回**，
+通过 `data-for="entities_dates"` 标记，仅在该接口下显示（其它接口的 `group` 语义是"合并/按实体"，
+故切换接口时自动隐藏并禁用；若当前选中被隐藏项则自动回落到"合并返回"）。
+
+**验证**：10 项断言全通过 —— 4 种分组结构正确、`count_groups` 分组与排序正确
+（3 台→1 天 / 2 台→2 天 / 1 台→1 天）、`both` 的 `details` 与去重实体统计正确、
+旧写法 `0`/`1` 与非法值回落、时间段过滤 + `count` 组合、多实体过滤、空结果；
+`node --check` + 8 项前端接线 + 跨作用域扫描（321 函数 0 问题）全通过。
+
+
+### 🔧 精简：`device_usage_detail` 移除冗余的 `columns` 字段
+
+`full=1` 时响应里的 `columns` 数组（列出 20 个列名）属冗余信息 —— 记录本身已包含全部字段，
+调用方遍历首条记录即可得知可用键名。已**移除** `columns` 输出，同时删掉随之无用的
+`PRAGMA table_info(...)` 查询（少一次 DB 往返）与 `cols` 变量。
+
+**响应结构变化**（仅去掉一个键，其余不变）：
+```
+{ full, range, entity_count, total, returned, limit, offset, summary, records[] }
+```
+
+**验证**：顶层键集合精确匹配；`records[0]` 仍为**全 22 字段**（含 `state_attr`/`power_entity`/
+`power_rating` 等派生列）；`summary` 数值不变（`count=4 / 8.0h / 3.0kWh / running_count=1`）；
+精简模式与 `summary=0` 路径均正常。
+
+
+### ✨ `device_usage_detail` 新增 `summary` 合计节点
+
+多实体明细接口新增 `summary` 节点，含**全局总计**与**每实体合计**：
+
+```json
+"summary": {
+  "totals": { "count": 6, "duration_hour": 10.0, "energy_kwh": 3.4,
+              "entity_count": 2, "running_count": 1 },
+  "entities": [
+    { "entity_id": "switch.ac", "name": "空调", "room": "客厅",
+      "count": 4, "duration_hour": 8.0, "energy_kwh": 3.0, "running_count": 1 },
+    { "entity_id": "switch.light", "name": "灯", "room": "卧室",
+      "count": 2, "duration_hour": 2.0, "energy_kwh": 0.4, "running_count": 0 }
+  ]
+}
+```
+
+**关键设计**：
+- **`summary` 基于全量匹配记录（分页前）计算**，**不受 `limit`/`offset` 影响** ——
+  分页只用于翻看明细，合计应始终反映整个查询范围。
+- 新增 `running_count`（当前仍在运行的会话条数）：单条记录的 `running` 是布尔值，
+  **无法直接累加**，故改用计数表达。
+- `energy_kwh` 无用电来源时为 `null`（与 `device_history` 系列口径一致）；
+  实体按 `duration_hour` 降序，多实体统计口径与 `device_usage_total` 交叉验证一致。
+
+**新增参数** `summary=0`：不返回 `summary` 节点（纯明细场景可减小响应体积）；
+默认返回。修复 `entity_count` 在 `summary=0` 时被误算为 0 的问题。
+
+**前端**（db_viewer）：明细模式新增 **「返回合计节点（summary）」复选框（默认勾选）**，
+取消勾选时 URL 追加 `&summary=0`。
+
+**验证**：10 项断言全通过，含
+全量口径正确（count=6 / 10.0h / 3.4kWh / running_count=1）、每实体合计、
+`limit=1/2`+`offset=3/5` 各组合下 `summary` **恒定不变**、
+`summary=0` 时 `entity_count` 仍为 2、`summary`+`full` 组合、
+精简模式记录字段未变（向后兼容）、与 `device_usage_total` 同范围数值一致；
+`node --check` + 4 项前端接线 + 跨作用域扫描（320 函数 0 问题）全通过。
+
+
+### 🐛 修复：多维度聚合的「时间模式」UI 不显示（再次踩中跨作用域变量）
+
+**现象**：`device_usage_multi` / `power_energy_multi` 下看不到「时间模式」下拉与年/月输入。
+
+**根因**：`onApiTypeChange()` 中写成了 `if (isBucketApiMode)`，但该变量**只声明在 `generateApiUrl()` 内**。
+JS 运行到此行抛 `ReferenceError`，导致 `onApiTypeChange()` **从此处起整体中断**（后续的 label/文案/scope/分页等 UI 全部不再更新）。
+
+> 与上一轮「API URL 为空」是**同一类错误**（跨函数引用局部变量），只是这次发生方向相反：
+> 上次是 `generateApiUrl` 引用 `onApiTypeChange` 的变量，这次是反过来。
+
+**修复**：改用模块级 `isMultiBucketApiType(qt)`，并在代码内加注释标注该陷阱。
+
+**加强防护**：新增**全文件跨作用域扫描器**，逐一收集 320 个顶层函数的局部声明，
+检测「函数 A 引用了只在函数 B 中声明的 `is*`/`el*` 变量」→ 结果 **0 处**（修复前为 1 处）。
+
+**验证**：迷你 DOM 模拟实跑 `onApiTypeChange` 可见性逻辑：
+- 3 个聚合模式（含 `entities_period_agg`）→ 时间模式下拉显示 ✅
+- 2 个非聚合模式（`device_usage_detail`/`device_usage_avg`）→ 隐藏且恢复原日期输入 ✅
+- 五种模式切换 → 日期/年/月输入的显示组合全部正确（`all`/`range` 隐藏值区、`date` 只显日、`month` 显年+月、`year` 只显年）✅
+
+### ✨ 多实体明细同样支持「全部/时间段/指定日/指定月/指定年」时间模式
+
+**前端**（`db_viewer.html`）：
+- 明细接口 `device_usage_detail` 由原先仅「开始/结束日期」改为**复用同一套「时间模式」下拉**
+  （全部时间 / 时间段 / 指定日 / 指定月 / 指定年），与两个多维度聚合接口交互一致
+- `onApiTypeChange` 的可见性条件由 `isMultiBucketApiType(qt)` 扩展为
+  `isMultiBucketApiType(qt) || isDevDetailApiType(qt)`
+- `generateApiUrl` 的明细分支改用 `multiTimeQuery()` 生成时间参数，分页（`limit`/`offset`）
+  与 `full=1` 逻辑保持不变
+- 下拉选项文案更新为「📋 多实体明细（不聚合，全部/时间段/指定日/指定月/指定年，支持分页）」
+
+**验证**：
+- 可见性：`device_usage_detail` / `device_usage_multi` / `entities_period_agg` → 显示；`device_usage_avg` → 隐藏
+- 明细 URL 实测 5 种模式均正确且无 `undefined`：
+  `all → &full=1`、`range → &start=..&end=..&full=1`、`date → &date=..&full=1`、
+  `year → &year=..&full=1`、`month → &month=2026-09&full=1`
+- 全文件跨作用域扫描：320 个顶层函数，**0 处**引用异常；`node --check` 通过
+
+### ✨ 多维度聚合（用时/用电、用电量）新增「指定日/指定月/指定年」时间模式
+
+**背景**：`device_usage_multi` 与 `power_energy_multi` 的**后端早已支持** `date`/`month`/`year`
+（见 `_usage_range_params` 与视图透传），但 API 工具中**只有开始/结束日期**两个输入，无法传这三个参数。
+
+**前端新增**（`db_viewer.html`）：
+- 多维度聚合模式下新增 **「时间模式」下拉**：`全部时间` / `时间段` / `指定日` / `指定月` / `指定年`
+- 按模式联动显示输入：
+  - 时间段 → 开始/结束日期
+  - 指定日 → 日期选择器
+  - 指定月 → 年 + 月（月支持只填 `9`、或配年自动补零为 `2026-09`）
+  - 指定年 → 年
+  - 全部时间 → 不传任何时间参数
+- `multiTimeQuery()` 统一生成时间参数片段；`onMultiTimeModeChange()` 负责 UI 联动
+- 兼容：非聚合模式仍显示原有的开始/结束日期，行为不变
+
+**参数优先级**（沿用 `_usage_range_params`）：`start`/`end` > `date` > `month` > `year`；全不传 = 全部时间。
+
+**验证**：
+- **后端过滤实测**：全部=4、`date=2026-09-01`=1、`month=2026-09`=2、`month=2025-09`=1、
+  `year=2026`=3、`start~end`=2，优先级（range 覆盖 date）正确；`year=2026` + `bucket=month`
+  组合返回 `2026-09:2 / 2026-08:1`
+- **URL 生成实测 9 组**（Node）：全部→无参数、时间段（含单边）、指定日、指定年、
+  指定月（补零 `2026-09` / 仅月 `9` / 缺月退化为年），均无 `undefined`
+- `node --check` + 16 项接线检查（含跨作用域变量检测）全通过
+
+
+### ✨ `device_usage_detail` 新增 `full=1`：返回全部字段
+
+多实体明细接口增加 `full` 参数（API 工具中为**「返回详细数据（全部字段）」复选框，默认勾选**）。
+
+| `full` | 返回 |
+|---|---|
+| 不传 / `0` | 精简字段（原行为，结构未变）：`entity_id/name/room/on_time/off_time/duration_hour/energy_kwh/running` |
+| `1` | **`device_history` 全部列 + 计算字段**：`id`、`entity_id`、`name`、`on_time`、`off_time`、`on_power`、`off_power`、`energy_consumed`、`duration`(秒)、`cross_day`、`room`、`state_attr`(**已解析为 JSON 数组**)、`now_kwh`、`on_user`、`off_user`、`on_snapshot`、`off_snapshot`、`power_entity`、`power_rating`、`duration_hour`、`energy_kwh`、`running`；并附 `columns` 字段列出可用列名 |
+
+**实现要点**：
+- `full=1` 时用 `SELECT dh.*` 逐行原样返回（不做 GROUP BY），`room` 用 `COALESCE(dh.room, ec.room)` 合并；
+  `power_entity`/`power_rating` **只存在于 `entity_configs`**，需以**原名**补出（`_row_running_usage` 依赖这两个键名，改用别名会导致取键报错）。
+- `state_attr` 复用既有 `_parse_records_state_attr` 口径，字符串解析为 JSON 数组。
+- 向后兼容：**`full` 缺省即原精简结构**，已有调用方无需改动。
+
+**验证**：断言全字段存在性、运行中记录（`duration_hour=2.0` / `energy_kwh=None` / `on_user` 保留）、
+`state_attr` 解析为数组、`power_entity`/`power_rating` 由配置表补齐、快照/`cross_day`/`id` 原始列保留、
+`full=0` 结构未变、`full` 与 `date`/`limit` 组合正常；`node --check` + 6 项前端接线检查全通过。
+
+
+### ✨ 新增 4 个设备类接口（`device_history` 多实体查询族）
+
+| 接口 | 用途 | 关键参数 |
+|---|---|---|
+| `/query?type=device_usage_detail` | **① 明细（不聚合）** | `entities`、`start`/`end`/`date`/`month`/`year`、`limit`/`offset` |
+| `/query?type=device_usage_total` | **② 合计（年/月/日/全部）** | `entities`、`scope=all\|year\|month\|date` + `year`/`month`/`date` |
+| `/query?type=device_usage_history` | **③ 历史同期（历史今日/历史本月）** | `entities`、`scope=today\|month` |
+| `/query?type=device_usage_avg` | **④ 平均指标** | `entities`、`start`/`end`/`date`/`month`/`year`（默认全部时间） |
+
+**① 明细**：每条记录一行，按 `on_time` 倒序；`energy_kwh` 无来源为 `null`；返回 `total`/`returned` 便于分页。
+**② 合计**：每实体一行 + 全局 `totals`；`scope` 宽容写法（`month` 支持 `9`（配 `year`）/`09`/`2026-09`）。
+**③ 历史同期**：`scope=today` 取往年**同月同日**、`scope=month` 取往年**同月**（均**排除今年**），另附 `current`（今年同期）与 `by_year` 逐年合计，便于同比。
+**④ 平均**：`avg_daily_count` 平均每日次数（次数/有数据天数）、`avg_daily_duration_hour` 平均每日时长、`avg_per_count_hour` 平均每次时长；全局按**加权**计算（总时长/总次数、总次数/天数并集），非各实体简单平均。
+
+**口径统一**：四个接口与既有 `device_history` 系列共用 `_usage_range_params` / `_row_running_usage`，
+运行中记录一律按「当前时间 − on_time」计时、无用电来源则 `energy_kwh = null`，避免同一设备在不同接口数值打架。
+
+**API 工具（db_viewer）**：设备类分组新增上述 4 项；
+新增「统计范围」下拉（自动切换 全部/年/月/日 或 历史今日/历史本月）与「条数上限/偏移」分页输入。
+
+**验证**：4 接口共 16 项断言全通过（明细的倒序/分页/时间段、合计的 all/year/month/date 与 `YYYY-MM` 写法、
+历史同期正确**排除今年**且 `by_year` 为 [2024, 2025]、平均值的逐实体与全局加权、运行中设备三接口口径一致、空结果不报错）；
+`node --check` + 10 项前端接线检查（含跨作用域变量检测 = none）全通过。
+
+
+### 🐛 修复：新增接口「生成的 API URL」为空（跨函数引用局部变量 → ReferenceError）
+
+**现象**：API 工具选中 `power_energy_multi` / `device_usage_multi` 后，「📋 生成的 API URL」输入框**为空**。
+
+**根因**：`isMultiBucketApi` / `isMultiEntitiesApi` / `isPowerMulti` 等判定变量被定义在 **`onApiTypeChange()` 内部**（局部作用域），却在另一个函数 **`generateApiUrl()`** 中被引用。JS 运行到该行抛 `ReferenceError: isMultiBucketApi is not defined`，函数中断 → URL 从未被赋值。
+
+**修复**：
+- 提升为**模块级常量 + 判定函数**，供所有函数安全复用：
+  ```js
+  const MULTI_BUCKET_API_TYPES = ['entities_period_agg','power_energy_multi','device_usage_multi'];
+  function isMultiBucketApiType(qt) { ... }
+  const MULTI_ENTITIES_API_TYPES = [...同族 6 项...];
+  function isMultiEntitiesApiType(qt) { ... }
+  ```
+- `generateApiUrl()` 改用 `isMultiBucketApiType(qt)` / `isMultiEntitiesApiType(qt)` 判断
+- `onApiTypeChange()` 也改为引用同一份清单（消除两处硬编码不一致的隐患）
+- 代码内加注释说明该陷阱，防止后续再犯
+
+**验证**：
+- 静态检测：`generateApiUrl` 内 `is[A-Z]*` 变量引用 `MISSING = none`（此前为 3 处）
+- Node 实跑 URL 拼接，5 组用例均**非空且参数正确**，例如：
+  `/query?type=device_usage_multi&key=K&entities=switch.ac%2Cswitch.light&start=2026-09-01&end=2026-09-30&bucket=month&view=entity`
+- `node --check` 通过
+
+
+### ✨ 新增接口：`/query?type=device_usage_multi`（设备用时/用电多实体 × 多维度聚合）
+
+**需求**：与 `power_energy_multi` 同款能力，但作用于**设备类**（`device_history`）。
+
+**实现**：新增 `compute_device_usage_multi_sync(db_path, entity_ids, bucket, view, start, end, date, month, year, include_devices, now_dt)` + `QueryView._query_device_usage_multi`。
+
+**参数**（与 `power_energy_multi` 完全对齐）：
+`entities`（逗号分隔，空=全部）、`bucket=day|month|year`、`view=entity|date`、
+`start`/`end`/`date`/`month`/`year`（优先级 start/end > date > month > year，全不传 = 全部时间）、`devices=0` 可省明细。
+
+**指标**（沿用 `device_history` 系列既有口径）：
+| 字段 | 说明 |
+|---|---|
+| `count` | 开启次数 |
+| `duration_hour` | 时长（小时）。运行中记录按「当前时间 − on_time」计入 |
+| `energy_kwh` | 用电量。已关闭取 `energy_consumed`；运行中 ① `now_kwh − on_power` ② 固定功率/1000×小时 ③ 无来源 → **null** |
+| `running` | 该时间桶内是否存在运行中的记录 |
+
+**返回结构**：与 `power_energy_multi` 同形（`view=entity` → `entities[].series[]`；`view=date` → `dates[].devices[]`），
+另带 `room`（来自 `entity_configs`）。排序：entity 视图按 `duration_hour` 降序，date 视图时间倒序 + 桶内按时长降序。
+
+**语义修正**：`view=date` 的 `totals.device_count` 表示**该时间桶内出现过的设备数**（`entity_count` 语义在桶维度下不成立，故改用 `device_count` 并保留 `entity_count` 于顶层 `totals`）。
+
+**API 工具（db_viewer）**：**设备类**分组新增 **📊 多实体×多维度聚合（用时/用电，年/月/日，按实体或按时间）**，
+复用同一套表单区（下拉文案随模式切换为「次数/时长/用电」）。
+
+**验证**：14 项断言全通过（全部/day 汇总与排序、月聚合含跨月、年聚合、时间段+多实体、单实体、
+指定日/月/年、两种 view 结构与排序、`devices=0`、**运行中设备**（时长=now−on_time / energy=null / running=true）、
+空结果不报错）；`node --check` + 10 项前端接线检查全通过。
+
+
+### ✨ 新增接口：`/query?type=power_energy_multi`（用电量多实体 × 多维度聚合）
+
+**需求**：`power_energy_daily` 表支持查询**多实体**、**多维度**（指定时间/时间段/全部）、**聚合数据**（年/月/日）、**多种返回类型**（按实体/按时间）。
+
+**实现**：新增模块级 `compute_power_energy_multi_sync(db_path, entity_ids, bucket, view, start, end, date, month, year, include_devices)` + `QueryView._query_power_energy_multi`。
+
+| 参数 | 说明 |
+|---|---|
+| `entities` | 多个实体，逗号分隔（`entity_id` 亦可，空 = 全部实体） |
+| `bucket` | 聚合维度：`day`（默认）/ `month` / `year` |
+| `view` | 返回结构：`entity`（默认，实体→时间桶）/ `date`（时间桶→实体） |
+| `start` / `end` | 日期区间，可单边 |
+| `date` / `month` / `year` | 指定某日 / 某月 / 某年 |
+| `devices` | `view=date` 时是否返回明细，`0` 关闭（默认 1） |
+
+**时间过滤优先级**：`start`/`end` > `date` > `month` > `year`；**全不传 = 全部时间**。
+
+**返回结构**：
+```
+view=entity（按实体）：
+{ view, bucket, range:{start,end,date,month,year,label},
+  entity_count, totals:{kwh, day_count, entity_count},
+  entities:[{ entity_id, device_name, room, id_slug, daily_entity_id,
+              totals:{kwh, day_count},
+              series:[{key, kwh, day_count}] }] }   ← 按 kwh 降序
+
+view=date（按时间）：
+{ view, bucket, range:{...}, entity_count,
+  totals:{kwh, day_count, bucket_count, entity_count},
+  dates:[{ key, totals:{kwh, day_count, entity_count}, device_count,
+           devices:[{entity_id, device_name, room, id_slug, daily_entity_id,
+                     kwh, day_count}] }] }          ← 时间倒序，实体按 kwh 降序
+```
+- 元信息（device_name / room / id_slug / daily_entity_id）LEFT JOIN `power_meter_configs`，
+  配置缺失时回退日表自带值；`device_name`/`room` 取该实体最新非空值
+- 无数据时返回空数组结构（不报错）
+
+**API 工具（db_viewer）**：「⚡ 用电计量」分组新增 **📊 多实体×多维度聚合（年/月/日，按实体或按时间）**，
+复用「多实体 + 粒度 + 返回结构 + 时间段」表单区（下拉文案随模式切换），URL 形如：
+```
+/query?type=power_energy_multi&entities=a,b&bucket=month&view=entity&start=2026-01-01&end=2026-09-30
+```
+
+**验证**：11 项断言全通过（全部/day、月/年聚合值、时间段+多实体、单实体、指定日/月/年、
+两种 view 的结构与排序、`devices=0`、空结果不报错）；`node --check` 通过，前端 9 项接线检查全通过。
+
+
+### ⚠️ 修复：`device_registry.devices` 映射用法弃用告警（HA 2027.9 移除）
+
+**告警**：`Detected that custom integration 'ha_data_store' uses device_registry.devices as a mapping... at http_api.py, line 11325: for device in list(drg.devices.values())`
+
+**根因**：HA 已将 `DeviceRegistry.devices` 从 `dict[str, DeviceEntry]` 改为 `Collection[DeviceEntry]`（内部用 `_DeprecatedDeviceRegistryItemsView` 包装）。**直接迭代是支持的**，但把它当映射用（`.values()` / `.get()` / `.items()` / `[device_id]`）会触发弃用告警，计划 **2027.9** 移除。
+
+**修复**（`DeviceCleanView._list_empty_devices`，设备清理功能）：
+- `for device in list(drg.devices.values())` → **`for device in drg.devices`**（直接迭代，官方推荐路径）
+- 全仓扫描确认无其它 `device_registry.devices` 映射用法
+- 顺带补充注释：`entity_registry.entities` 的 `.values()` / `.items()` **未弃用**（HA 源码标准写法），仅有 device registry 受影响，避免后续误改
+
+注：本次仅改 1 行逻辑 + 注释，功能行为完全不变（设备清理的判定规则与结果一致）。
+
+### 🐛 修复：回收站永远显示「加载中...」（两处前端缺陷）
+
+**缺陷 1 — 提前 `return` 跳过了回收站刷新**（核心原因）
+`loadPowerMeters()` 中「无生效中登记」分支直接 `return`，导致其后的 `loadPowerArchived()` 永不执行。
+当**所有登记都被取消**（`?type=configs` 返回 `[]`，唯一那条为 `enabled=0`）时必然命中该分支 —— 正是本场景（Network 里只看到 `?type=configs`，从未发出 `?type=archived` 请求）。
+
+**修复**：把空列表分支改为 `if/else` 赋值，不再 `return`；`loadPowerArchived()` 移到函数最末无条件执行。
+
+**缺陷 2 — 误加 key 导致参数重复（`key=x&key=x`）**
+页面顶部**已存在全局 `window.fetch` 拦截器**，会自动为所有 `/api/` 请求追加 `key`。修复缺陷 1 时曾误加 `powerApiUrl()` 再拼一次 key，导致 URL 出现两个 `key` 参数（引发"查询无数据"）。现已**移除 `powerApiUrl()`**，15 处调用统一回到裸 `fetch(POWER_API + '?type=...')`，由全局拦截器统一鉴权（并在代码中加注释说明，避免再次误加）。
+
+**验证**：`node --check` 通过；断言「power_energy 手动拼 key 的调用 = 无」；断言 `loadPowerArchived()` 位于 `loadPowerMeters()` 函数末尾（首个 `return` 已不存在）。
+
+### 🐛 修复：db_viewer 页面被浏览器缓存导致"前端改动不生效"
+
+**现象**：后端接口返回正确数据（如 `?type=archived` 返回归档项），但页面上该区块永远停在写死的「加载中...」——因为浏览器用的是**缓存的旧 HTML/JS**，新函数从未被调用。
+
+**根因**：`DBViewerView` 返回整份内联 HTML（含全部 JS/CSS）时**未下发任何缓存控制头**，浏览器会自行缓存。此前"HTML 热重载"只解决了**服务端**重读文件，没解决**浏览器**使用旧副本的问题。
+
+**修复**：`DBViewerView` 的页面与登录页响应统一加上
+`Cache-Control: no-store, no-cache, must-revalidate, max-age=0` + `Pragma: no-cache` + `Expires: 0`，
+确保每次都取最新页面，从根上杜绝此类"改了没生效"的假象。
+
+**前端兜底**：回收站区块新增 **🔄 刷新回收站** 按钮；占位文案补充「若长时间不变，请 Ctrl+Shift+R 强制刷新」提示。
+
+### ✨ 新增：孤儿电表识别（配置行已被旧版本物理删除的补救）
+
+**背景**：旧版本的「取消登记」是**物理 `DELETE`** 配置行。若在此之前点过取消登记，`power_meter_configs` 里已无该行，回收站自然为空，且无法恢复配置 —— 但 `power_energy_daily` 的历史用电数据仍在。
+
+**新增**：
+- `PowerEnergyManager.list_orphan_meters()`：反查「日表有数据但配置表无登记」的实体，返回 `entity_id / device_name / room / first_date / last_date / day_count / total_kwh`
+- API：`GET ?type=orphans` → 孤儿电表列表；`?type=archived` 的 `_diag` 附带 `orphan_count`
+- 前端回收站区块下方新增**孤儿电表表格**（含数据区间/天数/累计 kWh），每行 **「重新登记」** 按钮一键回填 `entity_id / 设备名 / 房间` 到登记表单，用户补填原 ID 段即可接续历史数据
+- `loadPowerArchived()` 增加「加载中」态与错误兜底，避免 fetch 异常时 UI 卡在"加载中..."
+
+
+**根因**：`power_meter_configs.enabled` 在部分历史库中被建为 **TEXT** 类型。`archive_config` 执行 `SET enabled = 0` 时写入的是字符串 `'0'`，而 Python 侧 `bool('0')` 为 **True**，导致归档项被误判为"生效"，`archived` 过滤后**列表为空**。
+
+**修复**：
+- `ensure_tables` 新增 **enabled 列类型归一化迁移**：检测列亲和性，若非 `INTEGER` 则**重建表**（RENAME→CREATE→INSERT SELECT→DROP）彻底修正存储类型；已是 INTEGER 的库走轻量 `UPDATE ... CASE` 归一化
+- 所有判定点（`load_configs` / `archive_config` / `restore_config` / `purge_all_archived`）统一改用 `COALESCE(CAST(enabled AS TEXT),'1') IN ('0','false','no','')` 判归档，兼容任何脏值
+- 新增 `_is_enabled(row)` 宽容判定工具（True/1/'1'/'true'/'yes' → 生效；False/0/'0'/'false'/'no'/None → 归档）
+- 新增 `load_archived_configs()` 供回收站列表使用
+
+### ✨ 新增：回收站「一键还原」
+
+- 后端 `restore_all_archived()` + `POST action=restore_all`：一次性还原回收站全部登记并重新注册日/月/年用电实体（DB 翻转在 executor，实体注册回事件循环）
+- 前端回收站顶部新增 **♻️ 一键还原全部（N）** 按钮，行内保留单条「♻ 恢复」
+
+### 🐛 修复：`daily_entity_id` 未写入 —— 语义纠正为「登记产物」
+
+**根因**：`daily_entity_id` 被设计成前端可填的"可选输入项"（表单里叫「显示日用电量实体（可选）」），但**该实体本来就是登记后由本模块自动注册的**（`PowerDailySensor.entity_id` = `sensor.ha_data_store_{id_slug}_daily_ele`）。用户实际填的往往是"期望生成的名字"，与实际注册的实体 ID 不一致，导致字段混乱/为空；同时回填逻辑用「同表自引用子查询」，SQLite 对 UPDATE 目标表求值不稳定，实测 0 行。
+
+**修复**：
+- 新增 `daily_entity_id_of(id_slug)`：**唯一权威来源** = `sensor.ha_data_store_{id_slug}_daily_ele`
+- `save_config` 改为**忽略外部传入**，一律按 `id_slug` 派生写入（保证与 `PowerDailySensor` 实际实体 ID 永远一致）
+- `ensure_tables` 启动时按 `id_slug` **自动纠正**配置表与日表的历史脏值（空值 / 手填错值 / 遗留自定义名），幂等
+- `set_daily_entity_id`（手填）→ 改为 `repair_daily_entity_ids()`：按派生值统一纠正两表；`backfill_daily_entity_ids()` 保留为别名
+- API：移除 `action=set_deid`（手填语义不成立）；`action=backfill_deid` 语义改为"按 ID 段重新生成并纠正"
+- 前端：**删除「显示日用电量实体」输入框**，改为只读预览（随 ID 段实时派生，`syncPmDailyEntityId()`），`daily_entity_id` 不再随创建请求提交；列表列改为只读，新增「月/年用电实体」列；按钮更名为 **🔧 按 ID 段纠正日用电实体**（带确认提示）
+
+### ♻️ 背景与问题
+
+旧实现中「取消登记」是**物理删除** `power_meter_configs` 行（日表 `power_energy_daily` 保留）。由此带来两个问题：
+
+1. 重新登记同一功率实体时必须手动重填 `id_slug`，一旦填得不一样就会生成**新的实体 ID**，历史日用电数据"看不见了"（实际还在表里，但实体口径分叉）；
+2. 误删后无法恢复配置，只能凭记忆重建。
+
+### ♻️ 新机制：软删除归档 + 回收站
+
+- `PowerEnergyManager.remove_config()` → **新增 `archive_config()`**：取消登记改为把配置行置为 `enabled=0`（归档），配置行保留在库中
+- `load_configs()` 默认只返回 `enabled=1`（生效中）的登记；采样、`restore_all()`、`all_power` 统计均自动跳过归档项
+- 新增 `find_config()` / `restore_config()` / `purge_config()` / `purge_all_archived()`
+- **`save_config()` 智能沿用**：同一 `entity_id` 重新登记时保留原 `id`、`created_at`，并补齐未显式传入的 `id_slug` / `device_name` / `room` / `daily_entity_id`
+- `power_energy_daily` 在任何路径下都不会被删除（含"彻底删除"）
+
+### 🔌 API 变更（`/api/ha_data_store/power_energy`）
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| GET | `?type=configs` | 生效中的登记列表（不含归档） |
+| GET | `?type=archived` | **新增**：回收站列表（已取消登记的配置） |
+| GET | `?type=lookup&entity_id=` | **新增**：查单个登记（含已归档），供前端"带出原配置" |
+| POST | `action=create` | 重新登记时自动沿用归档配置，返回消息提示「沿用原有配置与历史用电数据」；不再物理删除旧配置 |
+| POST | `action=delete` | 语义改为**取消登记（归档）**，日表数据保留 |
+| POST | `action=restore` | **新增**：从回收站恢复登记并重新注册三个用电实体 |
+| POST | `action=purge` | **新增**：彻底删除登记（物理删配置行，日表保留） |
+| POST | `action=purge_all` | **新增**：清空回收站 |
+
+### 🖥 db_viewer 前端（⚡ 用电计量）
+
+- 「已登记的功率计量」新增 **编辑** 按钮：一键把该登记的 `entity_id/设备名/房间/ID 段/日用电实体/单位` 回填到登记表单
+- 行内「删除」→ **「取消登记」**；批量「删除选中」→ **「取消登记选中」**；确认弹窗文案改为说明"移入回收站、历史数据保留"
+- 登记表单：**ID 段留空时自动沿用该实体的历史登记**（含已取消登记的），无需手填也能避免实体 ID 分叉
+- 新增 **♻️ 回收站** 区块：列出已取消登记的配置（功率实体/设备名/房间/ID 段/日用电实体/取消时间）+ 恢复 / 彻底删除 / 清空回收站
+- 切到「⚡ 用电计量」子页时自动刷新列表与回收站
+
+涉及 `power_energy.py`、`http_api.py`、`db_viewer.html`、`const.py`、`manifest.json`；版本 → v3.6.6
+
 ## 2026-09-10 — v3.6.5 新增「接口管理」模块：新增/修改接口无需重启 HA
 
 ### 🧩 新接口管理模块（声明式定义 + 免重启）
