@@ -1,5 +1,66 @@
 # 更新日志
 
+## 2026-09-18 — v3.6.7 家庭状态设备明细新增实时字段 + `device_history` 新增 `icon`
+
+### 🏠 `sections.devices` 逐台明细新增 5 个实时/最近字段
+
+「今日家庭状态」`sections.devices` 下的 **`devices[]`**（`energy_top` / `times_top` 共享同一份 dict，
+字段同步生效）在原有 `entity_id / name / room / times / duration / energy` 基础上新增：
+
+| 字段 | 口径 |
+|---|---|
+| `running` | 该实体**当日最新一条** `device_history`（`id` 最大）`on_time` 非空且 `off_time` 为空 → `true`（正在运行） |
+| `time` | 已关闭：该记录的 `off_time`（最近一次关闭时间）；运行中：`null` |
+| `on_user` | 运行中：该记录的 `on_user`（开机操作人）；已关闭：`""` |
+| `off_user` | 已关闭：该记录的 `off_user`（关机操作人）；运行中：`""` |
+| `state` | HA **实时状态值**（`hass.states.get(entity_id).state`）；实体不在状态机中为 `null` |
+
+**实现**：`_agg_devices(conn, day, hass)` 聚合时顺带记录每实体的「当日最新一条」（按 `id` 取最大），
+最后统一补充上述字段——因 `devices` / `energy_top` / `times_top` 三个列表**共享同一个 dict 引用**，
+补一次字段三处同时生效。`hass` 由 `TodayFamilyStatusSensor` 注入（缺省 `None` 时 `state` 恒为 `null`，
+不影响其余统计）。
+
+**注意**：`state` 是**实时值**，与 `running`（历史口径，来自 `device_history`）可能不一致
+（例如实体当前已 `off`，但记录的关机事件尚未落库），二者分别适用于"看现状"和"看记录"。
+
+### 🔄 家庭状态刷新频率：30 分钟 → 30 秒
+
+`TodayFamilyStatusSensor` 原来只「启动后 1 分钟 + 每 30 分钟（整 30 分钟）」刷新，
+设备 `running` / `state` / 操作用户等实时字段最长要等 30 分钟。
+
+现改为**启动后 1 分钟生成一次 + 之后每 30 秒更新**（`async_track_time_interval`），
+并保留**内容签名去重**：聚合结果的签名（`json.dumps`，排除 `generated_at`）与上次相同则**不写状态**，
+因此数据没变化时不会每 30 秒向 recorder 落一条大属性；手动触发（按钮/服务）始终强制写入。
+定时器句柄存于 `hass.data[DOMAIN]["cancel_daily_summary"]`。
+
+### ✨ `device_history` 新增 `icon` 字段（随记录同步 + 历史回填）
+
+`device_history` 表新增 `icon`（`TEXT NOT NULL DEFAULT ''`），用于记录该次开关操作所对应
+前端卡片的图标（来源 `user_actions.icon`）：
+
+1. **建表**：`_init_database` 中 `CREATE TABLE` 加入该列；
+2. **迁移**：旧库启动时 `PRAGMA table_info` 检测缺列 → `ALTER TABLE ... ADD COLUMN icon`；
+3. **新增记录**：`_insert_device_on_record`（开机写入）与 `_do_midnight_splits`（午夜跨天拆分出的
+   新记录）插入成功后，调用 `_lookup_user_action_icon(conn, entity_id)` 取该实体在 `user_actions`
+   中**最新一条非空** `icon` 并 `UPDATE` 到新记录（查询走既有 `idx_user_actions_eid` 索引）；
+   查不到则保持空串，整段包在 `try/except` 中，不影响主流程；
+4. **历史数据统一回填**：`_backfill_device_history_icon(conn)` —— 在 `user_actions` 建表之后执行，
+   按 `entity_id` 取该实体最新一条非空 `icon`，批量更新 `device_history` 中 `icon` 为空的行
+   （`WHERE icon IS NULL OR icon = ''`）。**幂等**：只填空值，不覆盖已有值，每次启动执行一次，
+   可自愈此前「写入时 `user_actions` 尚无 icon」的行。完成后输出
+   `[HDS] device_history.icon 回填完成：涉及实体 N 个，影响行数 M`。
+
+**验证**（SQLite 内存库，直接执行源码中的真实函数）：
+- 回填：同一实体多条历史行全部写入其最新 icon；`user_actions` 中无记录的实体保持空串；
+- 新增：新插入记录自动带上 icon，无来源实体为空串；
+- 幂等：重复回填不改动已有值、不报错。
+
+> ⚠️ 需**重启 HA** 触发 `ALTER TABLE` 建列与首次历史回填；`icon` 暂未输出到
+> 家庭状态实体的 `sections.devices` 与 db_viewer，需要时另行接入。
+
+**涉及文件**：`__init__.py`（建表/迁移/写入/回填）、`daily_summary.py`（设备明细字段）、
+`sensor.py`（30 秒刷新）、`const.py` + `manifest.json`（版本号）。
+
 ## 2026-09-11 — v3.6.6 用电计量「取消登记」改为软删除（回收站），重新登记自动沿用历史数据
 
 ### ✨ `entities_dates`（多实体有数据日期）支持指定 年/月/日

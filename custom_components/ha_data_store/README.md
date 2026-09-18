@@ -66,7 +66,7 @@ ha_data_store 是一款 Home Assistant 自定义集成，无需修改 `configura
 | 🧩 **查询构造器** | db_viewer 内可视化定义查询接口：选表 → 动态参数（字段/时间段/LIKE/多值 IN）→ 排序/上限 → 汇总(总条数/合计) → 试运行 → 发布；定义落库随库迁移 |
 | 🔗 **自定义路由** | 通过 GUI 或 API 定义自定义 HTTP 路由，绑定任意 SQL 查询；支持发布开关、来源/状态管理 |
 | 🗂️ **统一泛域名动态路由** | 万能路由 `/api/ha_data_store/custom/{tail}` 运行时查库执行任意自定义 SQL |
-| 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发 |
+| 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发；启动后 1 分钟生成、之后每 30 秒刷新（逐台设备含运行中/实时状态/操作用户） |
 | 🤖 **简单自动化引擎** | 定时/间隔触发 + 多条件判断 + 顺序执行服务动作，执行记录落库（30 秒调度，db_viewer 管理） |
 | 📊 **自动化状态传感器** | `sensor.ha_data_store_automation` 实时统计自动化总数/启停/执行结果，前端自动化管理卡片数据源 |
 | 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot + config_id），ts 采用实体状态时间与 device_history 精确关联，`sensor.近期使用设备` 近30天聚合，API工具支持多维度查询 |
@@ -151,14 +151,15 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 
 **自动刷新：**
 - HA 启动后 **1 分钟** 自动生成一次
-- 之后每 **30 分钟**（整 30 分钟，即 00 分/30 分）自动更新
-- 也可手动按钮 / 服务触发
+- 之后每 **30 秒** 自动更新（设备 `running` / `state` / 操作用户等实时字段需时效性）
+- **内容签名去重**：聚合结果与上次一致（忽略 `generated_at`）时**不写状态**，避免每 30 秒向 recorder 落一条大属性
+- 也可手动按钮 / 服务触发（手动触发始终强制写入）
 
 **聚合维度与提醒阈值：**
 | 节 | 数据源 | 内容 |
 |----|--------|------|
 | 环境 | env_temperature/humidity/pm25/co2 | 今日最高/最低/平均，房间温差≥2°C 时补充房间明细 |
-| 设备 | device_history | 共 N 台/总时长 + 运行最久亮点 + **用电 TOP3 + 开关频次 TOP3**（完整逐台明细在 sections） |
+| 设备 | device_history + 实时 states | 共 N 台/总时长 + 运行最久亮点 + **用电 TOP3 + 开关频次 TOP3**；完整逐台明细在 `sections.devices.devices[]`（含 `running`/`time`/`state`/`on_user`/`off_user`） |
 | 用电 | env_power | 当日自增读数（最后一条 = 今日总用电，kWh）+ 昨日用电 + 环比 |
 | 家庭事件 | vacuum_history / health_records / xiaoai_conversations | 扫地机次数、健康记录条数、小爱对话条数及时段 |
 | 人在/门 | device_history（name=人在/入户门） | on_time 非空且 off_time 空=该房间有人/门开；否则家中无人/门关 |
@@ -171,6 +172,17 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 - `alert_text` / `alerts`：异常提醒（高温/运行超时/用电环比）
 - `sections.lights`：开灯房间去重（`开着 6 盏灯（主卧、儿童房、客厅等 5 个房间）`）
 - `sections.devices.times_top`：开关频次 TOP（`卫生间浴霸灯44 次`）
+- `sections.devices.devices[]`：完整逐台明细；每台除 `entity_id/name/room/times/duration/energy` 外，另含实时/最近状态字段（`energy_top` / `times_top` 与 `devices` 共享同一份数据，字段同步生效）：
+
+| 字段 | 说明 |
+|------|------|
+| `running` | 当日最新一条 `device_history`（`id` 最大）已开未关 = `true`（正在运行，历史口径） |
+| `time` | 已关闭 = 该记录 `off_time`（最近一次关闭时间）；运行中 = `null` |
+| `on_user` | 运行中 = 该记录 `on_user`（开机操作用户）；已关闭 = `""` |
+| `off_user` | 已关闭 = 该记录 `off_user`（关机操作用户）；运行中 = `""` |
+| `state` | HA **实时状态值**（`hass.states.get(entity_id).state`）；实体不在状态机中 = `null` |
+
+> `state` 为实时值、`running` 为历史记录口径，两者可能短暂不一致（如实体已关但关机事件尚未落库），分别用于"看现状"与"看记录"。
 
 **异常提醒（阈值写死）：** 高温 ≥30°C、低温 ≤5°C、单台连续运行 >6 小时、用电环比波动 >20%；存在任一提醒时 `overall=warning`，提醒文字放 `alert_text` 字段（`alerts` 为列表）；`summary` 段落末尾单独显示"离线设备 x 台"（离线不进 alerts）。
 
@@ -203,13 +215,14 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 │  状态值=极简一句；attributes={summary, sections, overall,     │
 │          alerts, alert_text, status_value, offline,          │
 │          presence, lights, date, generated_at}               │
-│  自动刷新：启动后1分钟 + 每30分钟（整30分钟）                 │
+│  自动刷新：启动后1分钟 + 每30秒（签名去重，无变化不写状态）   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 **核心 SQL：**
 - 环境：`SELECT value, room, datetime FROM env_temperature WHERE datetime LIKE '2026-08-21%'`
-- 设备（今日，含单台用电）：`SELECT entity_id, name, duration, energy_consumed, on_power, now_kwh FROM device_history WHERE on_time LIKE '2026-08-21%'`
+- 设备（今日，含单台用电与实时状态字段）：`SELECT entity_id, name, room, duration, energy_consumed, on_power, now_kwh, on_time, off_time, on_user, off_user FROM device_history WHERE on_time LIKE '2026-08-21%'`
+  - 每实体取**当日最新一条**（`id` 最大）→ `running`（`off_time` 空）／`time`（`off_time`）／`on_user`／`off_user`；`state` 另取 HA 实时状态
   - 单台用电（kWh）：已关闭直接用 `energy_consumed`；正在运行（`energy_consumed` 空且 `now_kwh` 非空）用 `now_kwh - on_power`
 - 家庭总用电（今日，kWh）：`SELECT entity_id, datetime, value FROM env_power WHERE datetime LIKE '2026-08-21%'` —— `value` 为**当日自增**读数，按 `entity_id` 各取**最后一条**（当日累计 = 当日消耗）
 - 家庭总用电（昨日，环比基准）：同上取 `'2026-08-20%'` 最后一条
@@ -233,6 +246,9 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 - **energy_consumed**: 本次用电量（off_power - on_power）
 - **room**: 所属房间
 - **cross_day**: 是否跨天
+- **on_user**: 开机操作用户（由前端操作记录 `user_actions` 按 `entity_id` + 时间关联回填）
+- **off_user**: 关机操作用户（同上，关联回填）
+- **icon**: 该次开关操作所对应前端卡片的图标（新增记录时取 `user_actions` 中该实体**最新一条非空** `icon`；加列前的历史数据在启动时统一回填，只填空值、幂等）
 
 **支持的 domain 状态判定：**
 
@@ -1172,6 +1188,10 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v3.6.7 家庭状态设备明细新增实时字段 + device_history 新增 icon（2026-09-18）
+
+今日家庭状态 `sections.devices.devices[]`（`energy_top`/`times_top` 同源同字段）新增 5 个字段：**`running`**（当日最新记录已开未关，历史口径）、**`time`**（已关闭=最近一次 `off_time`，运行中=`null`）、**`on_user`**（运行中取该记录 `on_user`）、**`off_user`**（已关闭取该记录 `off_user`）、**`state`**（HA 实时状态值，实体不在状态机中为 `null`）。刷新频率由「启动后 1 分钟 + 每 30 分钟」改为「启动后 1 分钟 + **每 30 秒**」，并做**内容签名去重**（结果无变化不写状态，避免刷 recorder），手动触发始终写入。`device_history` 表新增 **`icon`** 列（卡片图标）：旧库自动 `ALTER TABLE` 补列；新增记录（开机写入、午夜拆分新记录）时按 `entity_id` 取 `user_actions` 最新一条非空 `icon` 写入；启动时对历史数据做**幂等回填**（只填空值，日志输出回填实体数与影响行数）。版本号 → `3.6.7`。
 
 ### v3.6.5 新增「接口管理」模块：新增/修改接口无需重启（2026-09-10）
 

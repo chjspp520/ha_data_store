@@ -58,7 +58,7 @@ class DailySummaryButton(ButtonEntity):
             if sensor is None:
                 _LOGGER.error("[HDS] 今日总结传感器未初始化，无法触发")
                 return
-            await sensor.async_trigger_refresh()
+            await sensor.async_trigger_refresh(force=True)
             _LOGGER.info("[HDS] 今日家庭状态总结已触发")
         except Exception as e:
             _LOGGER.exception("[HDS] 触发今日家庭状态总结失败: %s", e)

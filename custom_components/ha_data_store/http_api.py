@@ -12514,6 +12514,24 @@ class PowerEnergyView(_BaseDBView):
 # ===========================================================================
 #  设备清理 API — DeviceCleanView（清理本集成下无实体的空设备）                #
 # ===========================================================================
+def _device_belongs_to_entry(device_entry, entry_id: str) -> bool:
+    """判断设备是否归属指定 config entry（兼容新旧 device registry 属性）。
+
+    新版 HA：DeviceEntry.config_entry_id（单值）；
+    旧版 HA：DeviceEntry.config_entries（集合）。两者都取不到时视为归属本集成
+    （设备由本集成创建且无 entry 关联，允许清理）。
+    """
+    if not entry_id:
+        return True
+    single = getattr(device_entry, "config_entry_id", None)
+    if single:
+        return single == entry_id
+    multi = getattr(device_entry, "config_entries", None)
+    if multi:
+        return entry_id in multi
+    return True
+
+
 class DeviceCleanView(_BaseDBView):
     """清理本集成下没有任何实体的「空设备」。
 
@@ -12613,30 +12631,27 @@ class DeviceCleanView(_BaseDBView):
             entry_id = hass.data.get(DOMAIN, {}).get("entry_id", "")
             for d in empty:
                 try:
-                    # 先解除设备与本集成 config entry 的关联，否则 async_remove 会被拒。
-                    # 注意：解除关联后，若设备无任何实体/其它 config entry，
-                    # HA 会自动把它从 device registry 移除；此时 async_remove 会抛
-                    # “设备不存在”，但实际清理已成功 —— 因此以“最终不在 registry”为准。
-                    if d["id"] not in registry.devices:
+                    # 只处理本集成创建的设备（_list_empty_devices 已按 identifiers 过滤，
+                    # 这里再按所属 config entry 复核一次，避免误删他人设备）。
+                    # 注：device_registry.devices 的映射/in 判定已弃用（2027.9 移除），
+                    #     统一改用 async_get 查询；设备只归属单一 config entry，
+                    #     remove_config_entry_id 亦已弃用（2027.8 移除），直接移除设备即可。
+                    dev = registry.async_get(d["id"])
+                    if dev is None:
                         removed.append(d)   # 已被自动移除，视为成功
                         continue
-                    if entry_id:
-                        try:
-                            registry.async_update_device(
-                                device_id=d["id"],
-                                remove_config_entry_id=entry_id,
-                            )
-                        except Exception:
-                            pass
+                    if entry_id and not _device_belongs_to_entry(dev, entry_id):
+                        failed.append(d)
+                        continue
                     try:
-                        registry.async_remove(d["id"])
+                        registry.async_remove_device(d["id"])
                     except Exception:
                         pass
                     # 以最终状态判定成功/失败
-                    if d["id"] in registry.devices:
-                        failed.append(d)
-                    else:
+                    if registry.async_get(d["id"]) is None:
                         removed.append(d)
+                    else:
+                        failed.append(d)
                 except Exception:
                     _LOGGER.warning("[devices] 删除设备失败 %s", d.get("id"), exc_info=True)
                     failed.append(d)

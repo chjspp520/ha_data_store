@@ -12,7 +12,7 @@ from homeassistant.core import EVENT_STATE_CHANGED, HomeAssistant
 from homeassistant.helpers import entity_registry as er, network as hass_network
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval, async_track_utc_time_change
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
@@ -846,10 +846,15 @@ class TodayFamilyStatusSensor(SensorEntity):
       alerts       → 异常提醒列表
       overall      → normal | warning（存在提醒时为 warning）
       generated_at → 生成时间
+      sections.devices.devices[] 每台设备含实时字段：
+        time（最近一次关闭时间，运行中为空）/ state（实体实时状态值）/
+        running（是否正在运行）/ on_user / off_user
 
-    按需生成：由按钮 button.ha_data_store_daily_summary 或服务
-    ha_data_store.generate_daily_summary 触发 async_trigger_refresh。
-    不做 30s 轮询（保持轻量）。
+    刷新：每 30 秒定时聚合（设备 running / state / 操作用户实时性要求）；
+    另可由按钮 button.ha_data_store_daily_summary 或服务
+    ha_data_store.generate_daily_summary 手动触发 async_trigger_refresh。
+    定时刷新做内容签名去重（忽略 generated_at），内容未变不写状态，避免
+    每 30 秒向 recorder 落一条大属性；手动触发始终写入。
     """
 
     _attr_has_entity_name = True
@@ -864,6 +869,7 @@ class TodayFamilyStatusSensor(SensorEntity):
         self._attr_device_info = device_info
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
+        self._last_sig = None      # 上一次写入的数据签名（忽略 generated_at）
 
     def _load_data(self, date_str=None):
         db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
@@ -873,8 +879,21 @@ class TodayFamilyStatusSensor(SensorEntity):
                     "alerts": [], "error": "db_path 缺失"}
         return build_daily_summary_sync(db_path, self._hass, date_str)
 
-    async def async_trigger_refresh(self, date_str=None):
-        """按需生成今日总结（按钮/服务调用）。"""
+    @staticmethod
+    def _signature(data: dict) -> str:
+        """数据签名（忽略 generated_at）：用于判断聚合结果是否真发生变化。"""
+        try:
+            payload = {k: v for k, v in data.items() if k != "generated_at"}
+            return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            return ""
+
+    async def async_trigger_refresh(self, date_str=None, force: bool = False):
+        """生成今日总结。
+
+        force=True  → 强制写入状态（按钮/服务手动触发）
+        force=False → 内容与上次一致则跳过写入（30 秒定时刷新，避免刷 recorder）
+        """
         try:
             data = await self._hass.async_add_executor_job(self._load_data, date_str)
         except Exception as e:
@@ -882,6 +901,10 @@ class TodayFamilyStatusSensor(SensorEntity):
             data = {"date": date_str, "summary": f"今日家庭状态：生成失败（{e}）",
                     "status_value": "生成失败", "sections": {}, "overall": "warning",
                     "alerts": [], "error": str(e)}
+        sig = self._signature(data)
+        if not force and sig and sig == self._last_sig:
+            return   # 内容无变化：不写状态（generated_at 变化不算变化）
+        self._last_sig = sig
         self._attr_native_value = data.get("status_value", data.get("summary"))
         self._attr_extra_state_attributes = data
         self.async_write_ha_state()
@@ -1445,7 +1468,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_track_time_interval(hass, mem_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, disk_sensor._async_refresh, timedelta(seconds=30))
 
-    # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 分钟（整 30 分钟）更新 ──
+    # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 秒更新 ──
+    # 说明：设备 running / state / 操作用户需实时性，改为 30 秒轮询；
+    #       聚合结果内容未变化时由传感器内部跳过写入，不会刷 recorder。
     async def _delayed_first_refresh():
         """启动后延迟 1 分钟生成一次家庭状态。"""
         try:
@@ -1456,14 +1481,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
             _LOGGER.exception("[HDS] 启动后自动生成今日家庭状态失败: %s", e)
 
     async def _periodic_refresh(now=None):
-        """每 30 分钟（整 30 分钟）更新家庭状态。"""
+        """每 30 秒更新家庭状态（内容无变化则不写状态）。"""
         try:
             await summary_sensor.async_trigger_refresh()
         except Exception as e:
             _LOGGER.exception("[HDS] 定时更新今日家庭状态失败: %s", e)
 
     hass.async_create_task(_delayed_first_refresh())
-    # 对齐整 30 分钟（minute=0/30, second=0），HA 内部按本地时区计算
-    hass.data.setdefault(DOMAIN, {})["cancel_daily_summary"] = async_track_utc_time_change(
-        hass, _periodic_refresh, minute={0, 30}, second=0,
+    hass.data.setdefault(DOMAIN, {})["cancel_daily_summary"] = async_track_time_interval(
+        hass, _periodic_refresh, timedelta(seconds=30),
     )

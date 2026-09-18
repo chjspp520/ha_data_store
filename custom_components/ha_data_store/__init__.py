@@ -250,6 +250,55 @@ def _migrate_legacy_songs_column(conn: sqlite3.Connection) -> None:
         local_logger.info("[HDS] media_playlists.songs 已迁移到子表(rows=%d)，旧列保留(SQlite版本不支持DROP)", migrated)
 
 
+def _lookup_user_action_icon(conn: sqlite3.Connection, entity_id: str) -> str:
+    """从 user_actions 查询该实体最近一次的 icon（无则返回空串）。
+
+    device_history 新增记录时调用：取 user_actions 中 entity_id 相同、
+    icon 非空且 id 最大（最新）的一条。
+    """
+    try:
+        row = conn.execute(
+            f"SELECT icon FROM {TABLE_USER_ACTIONS} "
+            f"WHERE entity_id = ? AND icon != '' ORDER BY id DESC LIMIT 1",
+            (entity_id,),
+        ).fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
+def _backfill_device_history_icon(conn: sqlite3.Connection) -> None:
+    """回填 device_history.icon（历史数据统一更新）。
+
+    按 entity_id 从 user_actions 取最近一条非空 icon，写入 device_history 中
+    icon 为空的行；只更新空值，幂等，每次启动执行一次（用于补齐加列前的历史
+    数据，以及此前 user_actions 尚无 icon 的行）。
+    """
+    try:
+        rows = conn.execute(
+            f"SELECT entity_id, icon FROM {TABLE_USER_ACTIONS} WHERE icon != '' AND id IN ("
+            f"  SELECT MAX(id) FROM {TABLE_USER_ACTIONS} WHERE icon != '' GROUP BY entity_id"
+            f")"
+        ).fetchall()
+    except Exception as exc:
+        _LOGGER.warning("[HDS] device_history.icon 回填：查询 user_actions 失败: %s", exc)
+        return
+    pairs = [(icon, eid) for eid, icon in rows if eid and icon]
+    if not pairs:
+        return
+    try:
+        cur = conn.executemany(
+            f"UPDATE {TABLE_DEVICE_HISTORY} SET icon = ? "
+            f"WHERE entity_id = ? AND (icon IS NULL OR icon = '')",
+            pairs,
+        )
+        conn.commit()
+        _LOGGER.info("[HDS] device_history.icon 回填完成：涉及实体 %d 个，影响行数 %s",
+                     len(pairs), getattr(cur, "rowcount", -1))
+    except Exception as exc:
+        _LOGGER.warning("[HDS] device_history.icon 回填失败: %s", exc)
+
+
 def _init_database(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     local_logger = get_logger()
@@ -302,7 +351,8 @@ def _init_database(db_path: str) -> None:
                 on_user         TEXT NOT NULL DEFAULT '',
                 off_user        TEXT NOT NULL DEFAULT '',
                 on_snapshot     TEXT NOT NULL DEFAULT '',
-                off_snapshot    TEXT NOT NULL DEFAULT ''
+                off_snapshot    TEXT NOT NULL DEFAULT '',
+                icon            TEXT NOT NULL DEFAULT ''
             );
             """
         )
@@ -325,6 +375,9 @@ def _init_database(db_path: str) -> None:
             conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN on_snapshot TEXT NOT NULL DEFAULT ''")
         if "off_snapshot" not in existing_cols:
             conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN off_snapshot TEXT NOT NULL DEFAULT ''")
+        if "icon" not in existing_cols:
+            conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN icon TEXT NOT NULL DEFAULT ''")
+            _LOGGER.info("已为 %s 表补充 icon 列", TABLE_DEVICE_HISTORY)
 
         # 3) 传感器数据表：每种指标独立建表（统一结构 id, entity_id, name, datetime, value）
         #    sensor 类型 value 为 TEXT（支持非数值），其余为 REAL
@@ -639,6 +692,9 @@ def _init_database(db_path: str) -> None:
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_user_actions_ts ON {TABLE_USER_ACTIONS} (ts);"
         )
+        # 迁移：回填 device_history.icon（历史数据统一按 entity_id 取 user_actions 最近一条 icon）
+        # 注：user_actions 已有 idx_user_actions_eid（entity_id）索引，查询走索引
+        _backfill_device_history_icon(conn)
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_user_actions_eid ON {TABLE_USER_ACTIONS} (entity_id);"
         )
@@ -1332,6 +1388,17 @@ def _insert_device_on_record(
                 conn.execute(
                     f"UPDATE {TABLE_DEVICE_HISTORY} SET state_attr = ? WHERE id = ?",
                     (state_attr, record_id),
+                )
+            except Exception:
+                pass
+
+        # 新增记录时同步 icon：从 user_actions 取该实体最近一次操作的 icon
+        icon = _lookup_user_action_icon(conn, entity_id)
+        if icon:
+            try:
+                conn.execute(
+                    f"UPDATE {TABLE_DEVICE_HISTORY} SET icon = ? WHERE id = ?",
+                    (icon, record_id),
                 )
             except Exception:
                 pass
@@ -2217,6 +2284,17 @@ def _do_midnight_splits(db_path: str, items: list[dict], off_time_str: str,
                 (entity_id, name, on_time_str, current_power, room, init_sa),
             )
             new_record_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            # 拆分出的新记录同样同步 icon（从 user_actions 取该实体最近一次操作的 icon）
+            icon = _lookup_user_action_icon(conn, entity_id)
+            if icon:
+                try:
+                    conn.execute(
+                        f"UPDATE {TABLE_DEVICE_HISTORY} SET icon = ? WHERE id = ?",
+                        (icon, new_record_id),
+                    )
+                except Exception:
+                    pass
 
             if local_logger:
                 local_logger.info(
@@ -4407,7 +4485,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if sensor is None:
                 _LOGGER.warning("[HDS] 今日总结传感器未初始化，无法生成")
                 return
-            await sensor.async_trigger_refresh(date_str)
+            await sensor.async_trigger_refresh(date_str, force=True)
         except Exception as e:
             _LOGGER.exception("[HDS] 生成今日家庭状态总结失败: %s", e)
 

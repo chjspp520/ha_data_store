@@ -124,17 +124,24 @@ def _agg_env(conn, metric: str, day: str) -> dict:
 # =========================================================================== #
 #  设备聚合（device_history）                                                    #
 # =========================================================================== #
-def _agg_devices(conn, day: str) -> dict:
+def _agg_devices(conn, day: str, hass=None) -> dict:
     """聚合今日设备：总台数/总时长/逐台明细（含单台用电，kWh）。
 
     单台设备用电（energy_consumed 单位 kWh）：
       - 已关闭：直接用 energy_consumed
       - 正在运行（energy_consumed 为空且 now_kwh 非空）：用 now_kwh - on_power（当前消耗）
     注意：总用电（家庭总表）由 env_power 表提供，这里不做累加。
+
+    每台设备额外输出实时/最近状态字段（取自该实体当日最新一条 device_history 记录）：
+      time    → 已关闭：off_time（最近一次关闭时间）；运行中：None
+      state   → HA 实时状态值（hass.states.get(entity_id).state，实体不存在为 None）
+      running → 是否正在运行（最新记录 on_time 非空且 off_time 为空）
+      on_user / off_user → 运行中取该记录的 on_user，已关闭取该记录的 off_user；
+                           另一侧恒为空字符串（无值即空）
     """
     rows = conn.execute(
-        f"SELECT entity_id, name, room, duration, energy_consumed, "
-        f"       on_power, now_kwh, "
+        f"SELECT id, entity_id, name, room, duration, energy_consumed, "
+        f"       on_power, now_kwh, on_time, off_time, on_user, off_user, "
         f"       (off_time != '' AND off_time IS NOT NULL) AS closed "
         f"FROM {TABLE_DEVICE_HISTORY} WHERE on_time LIKE ?",
         (f"{day}%",),
@@ -144,12 +151,23 @@ def _agg_devices(conn, day: str) -> dict:
     _SPECIAL_NAMES = {NAME_PRESENCE, NAME_DOOR}
     total_duration = 0.0  # 秒
     per_device: dict[str, dict] = {}
+    latest_by_entity: dict[str, dict] = {}   # entity_id → 当日最新一条记录（按 id 最大）
     for r in rows:
         eid = r["entity_id"]
         if (r["name"] or "").strip() in _SPECIAL_NAMES:
             continue  # 跳过"人在/入户门"
         dur = r["duration"] or 0
         total_duration += dur
+        # 当日最新一条（id 最大）→ 用于 time / running / on_user / off_user
+        cur = latest_by_entity.get(eid)
+        if cur is None or (r["id"] or 0) > cur["id"]:
+            latest_by_entity[eid] = {
+                "id": r["id"] or 0,
+                "on_time": r["on_time"] or "",
+                "off_time": r["off_time"] or "",
+                "on_user": r["on_user"] or "",
+                "off_user": r["off_user"] or "",
+            }
         d = per_device.setdefault(
             eid,
             {"entity_id": eid, "name": r["name"] or eid, "room": r["room"] or "",
@@ -160,11 +178,33 @@ def _agg_devices(conn, day: str) -> dict:
         # 单台设备用电量（kWh）
         eng = r["energy_consumed"]
         if eng is None and r["now_kwh"] is not None and r["on_power"] is not None:
-            # 正在运行：now_kwh - on_power = 当前消耗
-            eng = round(r["now_kwh"] - r["on_power"], 2)
+            # 正在运行：now_kwh - on_power = 当前消耗（先按 3 位归一，最终再统一 round）
+            eng = round(r["now_kwh"] - r["on_power"], 3)
         elif eng is None:
             eng = 0.0
         d["energy"] += eng
+
+    # 补充每台设备的实时状态 / 最近一次开关时间 / 操作用户
+    # 说明：per_device 的 dict 会被 devices / energy_top / times_top 共享引用，
+    #       此处填充后三个列表都会带上这些字段。
+    for eid, d in per_device.items():
+        # 单台用电统一保留 3 位小数（消除浮点累加误差，如 0.44000000000000006）
+        d["energy"] = round(d["energy"], 3)
+        rec = latest_by_entity.get(eid) or {}
+        on_time = rec.get("on_time") or ""
+        off_time = rec.get("off_time") or ""
+        running = bool(on_time and not off_time)   # 最新记录：已开未关 = 正在运行
+        d["running"] = running
+        if running:
+            d["time"] = None                       # 运行中：无关闭时间
+            d["on_user"] = rec.get("on_user") or ""
+            d["off_user"] = ""
+        else:
+            d["time"] = off_time or None           # 已关闭：最近一次关闭时间
+            d["on_user"] = ""
+            d["off_user"] = rec.get("off_user") or ""
+        st = hass.states.get(eid) if hass is not None else None
+        d["state"] = st.state if st is not None else None
 
     device_list = sorted(
         per_device.values(),
@@ -481,8 +521,8 @@ def build_daily_summary_sync(db_path: str, hass=None, date_str: str | None = Non
             if agg:
                 env[m] = agg
 
-        # 设备（单台明细，不含总用电累加）
-        devices = _agg_devices(conn, day)
+        # 设备（单台明细，不含总用电累加；含实时 state / running / 最近开关时间 / 操作用户）
+        devices = _agg_devices(conn, day, hass)
 
         # 家庭总用电（env_power 当日自增读数）
         power = _agg_power(conn, day)
