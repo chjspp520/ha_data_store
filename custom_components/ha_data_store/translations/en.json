@@ -147,6 +147,9 @@
       },
       "automation_status_refresh": {
         "name": "Refresh Automation Status"
+      },
+      "fill_device_icon": {
+        "name": "Backfill Device Icons"
       }
     }
   }

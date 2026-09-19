@@ -26,6 +26,7 @@ ha_data_store 是一款 Home Assistant 自定义集成，无需修改 `configura
   - [用电计量](#13-用电计量)
   - [设备清理](#14-设备清理)
   - [可视化查询构造器 与 数据库新建表](#15-可视化查询构造器-与-数据库新建表)
+  - [家庭洞察（统一事件流 / 房间占用）](#16-家庭洞察统一事件流--房间占用)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -69,9 +70,11 @@ ha_data_store 是一款 Home Assistant 自定义集成，无需修改 `configura
 | 🏠 **今日家庭状态总结** | 聚合历史表生成今日家庭中文总结，`sensor.today_family_status` + 按钮/服务按需触发；启动后 1 分钟生成、之后每 30 秒刷新（逐台设备含运行中/实时状态/操作用户） |
 | 🤖 **简单自动化引擎** | 定时/间隔触发 + 多条件判断 + 顺序执行服务动作，执行记录落库（30 秒调度，db_viewer 管理） |
 | 📊 **自动化状态传感器** | `sensor.ha_data_store_automation` 实时统计自动化总数/启停/执行结果，前端自动化管理卡片数据源 |
-| 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot + config_id），ts 采用实体状态时间与 device_history 精确关联，`sensor.近期使用设备` 近30天聚合，API工具支持多维度查询 |
+| 🎯 **用户操作记录** | 前端埋点上报每次操作（含完整 action_snapshot + config_id），ts 采用实体状态时间与 device_history 精确关联，`sensor.近期使用设备` 窗口聚合（`number.ha_data_store_recent_days` 可调天数）；另含 `all` 节点（device_history 全量设备最近使用）与 `device_last_used` 查询接口，API工具支持多维度查询 |
+| 📊 **通用指标引擎** | 元数据驱动：新表 `metrics_catalog` 存放指标定义（源表 / 值列或 `@value` 表达式 / 聚合 / 默认分组 / 过滤），通用引擎编译成参数化 SQL 执行；内置 20+ 指标（环境/设备/用电/健康/操作/自动化/attr_*），`GET /query?type=metrics_query&metric_id=xxx` 查询，db_viewer「📊 指标管理」增删改与试运行，**新增指标免重启** |
 | 🏠 **全屋用电/用时** | `whole_house_usage` 查询按 年/月/日 返回 总计→房间→设备 三级统计（时长/用电/开启次数/运行中设备/设备数量/单纯房间名列表），API 工具含查询分组；汇总传感器 `sensor.ha_data_store_all_room_usage` 输出 本年/本月/今日 三级（状态=今日用电 kWh），每分钟刷新 |
 | 🗂️ **全屋实体** | 传感器 `sensor.ha_data_store_all_entities` 按 `report_entities.entity_type` 分组展示全部上报实体（支持多值逗号拆分、跨节点归属），状态值=去重实体个数，表变化才更新 |
+| 🕘 **家庭洞察** | 统一事件流 `timeline`（设备/操作/自动化/扫地机/小爱/健康/打印机合并成一条时间线，设备记录展开 on/off）+ 房间占用排行 `room_occupancy`（严谨区间并集、含门户事件与日/小时分解）；均按天/日期/时间段查询、不分页 |
 
 ---
 
@@ -152,7 +155,7 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 **自动刷新：**
 - HA 启动后 **1 分钟** 自动生成一次
 - 之后每 **30 秒** 自动更新（设备 `running` / `state` / 操作用户等实时字段需时效性）
-- **内容签名去重**：聚合结果与上次一致（忽略 `generated_at`）时**不写状态**，避免每 30 秒向 recorder 落一条大属性
+- 定时刷新**默认强制写入**（`sensor.FAMILY_STATUS_FORCE_WRITE = True`），`generated_at` / `last_updated` 每 30 秒确实刷新；置 `False` 则聚合内容未变化时跳过写入，减轻 recorder 压力
 - 也可手动按钮 / 服务触发（手动触发始终强制写入）
 
 **聚合维度与提醒阈值：**
@@ -215,7 +218,7 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 │  状态值=极简一句；attributes={summary, sections, overall,     │
 │          alerts, alert_text, status_value, offline,          │
 │          presence, lights, date, generated_at}               │
-│  自动刷新：启动后1分钟 + 每30秒（签名去重，无变化不写状态）   │
+│  自动刷新：启动后1分钟 + 每30秒（默认强制写入状态）           │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -248,7 +251,7 @@ http://你的HA地址:8123/api/ha_data_store/db_viewer
 - **cross_day**: 是否跨天
 - **on_user**: 开机操作用户（由前端操作记录 `user_actions` 按 `entity_id` + 时间关联回填）
 - **off_user**: 关机操作用户（同上，关联回填）
-- **icon**: 该次开关操作所对应前端卡片的图标（新增记录时取 `user_actions` 中该实体**最新一条非空** `icon`；加列前的历史数据在启动时统一回填，只填空值、幂等）
+- **icon**: 该设备对应前端卡片的图标（`device_history.entity_id = report_entities.entity_id` 时，取 `report_entities` 中该实体**最新上报**（`id` 最大）的 `icon` 写入，**原样写入、不过滤空值**；历史数据回填**不随 HA 启动执行**，由按钮 `button.ha_data_store_fill_device_icon` 按需触发，**覆盖更新**、不管原值是否为空，无上报记录的实体不动）
 
 **支持的 domain 状态判定：**
 
@@ -582,13 +585,100 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx  # 主动重采
 
 ### 近期使用设备传感器
 
-`user_actions` 写入后，`sensor.近期使用设备`（`sensor.ha_data_store_user_actions`）实时聚合近 30 天数据：
+`user_actions` 写入后，`sensor.近期使用设备`（`sensor.ha_data_store_user_actions`）实时聚合**近 N 天**数据：
 
-- **状态值** = 近 30 天有操作的不同设备面板数
+- **状态值** = 近 N 天有操作的不同设备面板数
 - `attributes.devices` = 按 **action_snapshot 归一化聚合** 的设备列表，每项含：`entity_id / name / icon / room_name / count`（使用次数）/ `last_used` + `last_used_text`（最近使用）/ `state_log`（最近状态变化）/ `config_id` / `device_type` / `action_snapshot`（完整还原快照），按使用次数降序
 - 30 秒定时刷新 + 写入后实时刷新
 
 前端可直接订阅该 sensor，无需调 API 即可渲染"常用设备小卡片"，并凭 `action_snapshot` 还原设备控制面板。
+
+#### `all` 节点（数据源 `device_history`）
+
+`devices` 只覆盖**前端卡片埋点**；`all` 从 `device_history` 取**全量设备**的最近使用（含自动化、定时开关等非卡片操作），每个 `entity_id` 一条：
+
+| 字段 | 说明 |
+|------|------|
+| `entity_id` / `name` / `room` / `icon` | 该实体最新一条记录的信息（`icon` 取 v3.6.8 新增的 `device_history.icon`） |
+| `running` | 最新记录 `on_time` 有值且 `off_time` 为空 → `true`（正在运行） |
+| `last_used_text` / `last_used` | 运行中 = **当前时刻**；否则 = 该记录 `off_time`（附毫秒时间戳） |
+| `on_time` / `off_time` | 最新记录的开关时间 |
+| `count` | 窗口内开关次数 |
+| `duration` / `duration_hour` | 窗口内累计时长（秒 / 小时）；运行中记录按「当前时间 − `on_time`」计 |
+| `energy` | 窗口内累计用电（kWh）；已关闭取 `energy_consumed`，运行中取 `now_kwh − on_power`，无来源记 0 |
+
+- 按 `last_used` 倒序；额外属性：`total_all`（条数）、`all_range`（如"最近 30 天"）、`exclude_count`（生效排除项数）。
+
+#### 窗口天数设置实体
+
+`number.ha_data_store_recent_days`（**近期使用天数**）：范围 **1~365**、默认 **30**、单位「天」，
+可直接在仪表盘调整；缺失/非法/超范围一律回退 30。同时作用于 `devices` 窗口、`all` 节点与
+`device_last_used` 接口；**改动后立即刷新**传感器（`EVENT_STATE_CHANGED` 监听）。
+设置值通过 **`RestoreEntity` 持久化**，**重启 HA 后保持**（不会回到默认 30）。
+
+> 同类设置实体 `text.ha_data_store_ele_list`（用电计量列表条数）也已支持重启恢复。
+
+窗口过滤作用于 `on_time`：从「今天 − (N−1) 天 00:00:00」起算（含今天共 N 个自然日）。
+
+#### 排除项（db_viewer 配置，无字符数限制）
+
+被排除的 `entity_id` 不进入 `all` 节点与 `device_last_used` 接口。存储于
+`api_settings.recent_exclude_entities`（JSON 数组），在 db_viewer
+**「系统配置 → 🕘 近期使用设备」** 子页配置：已选标签（可移除）+ 手动输入（逗号/换行）+
+**实体选择器**（搜索 `entity_id / 名称 / 房间`，一键「➕ 排除」）。保存后立即刷新传感器。
+
+| 接口 | 说明 |
+|------|------|
+| `GET /api/ha_data_store/recent/exclude` | 读取排除项 `{success, count, exclude[]}` |
+| `POST /api/ha_data_store/recent/exclude` | 保存（Body `{"exclude":[...]}` 或 `{"text":"a,b\nc"}`） |
+| `GET /api/ha_data_store/recent/entities` | `device_history` 实体唯一值 `{entity_id, name, room}`（供选择） |
+
+### 近期使用设备接口（`device_last_used`）
+
+`GET /api/ha_data_store/query?type=device_last_used` —— 每个实体的最近使用情况（与 `all` 节点同源同口径），
+**`entities` 为去重后的 entity_id 列表**（按最近使用倒序）：
+
+| 参数 | 说明 |
+|------|------|
+| `entities` / `entity_id` | 逗号分隔实体（空 = 全部） |
+| `start` / `end` | 时间段（作用 `on_time`） |
+| `date` / `month` / `year` | 指定日 / 月 / 年 |
+| `window_days` | 窗口天数（**仅在未传 start/end/date/month/year 时生效**；缺省读设置实体；**传 `0` = 不限窗口/全部历史**） |
+| `filter` | **是否启用「排除项过滤」**，默认 `1`（启用，别名 `use_exclude`）；`0` = 不应用排除项（`exclude` 一并忽略），返回全部设备 |
+| `exclude` | 逗号分隔排除实体；**不传** = 用保存的排除项，显式传空 = 不排除 |
+| `running` | `1` 只返回正在运行的设备 |
+| `detail` | `0` 只返回 `entities` 列表（不返回 `items` 明细），默认 1 |
+| `limit` / `offset` | 分页（0 = 不限） |
+
+时间过滤优先级：`start/end` > `date` > `month` > `year` > 窗口天数 —— 即**时间模式与窗口天数互斥**，
+选了时间段/指定日/月/年后 `window_days` 自动不生效。
+`filter=0` 只关闭**排除项过滤**，不影响时间/实体/运行中等其它条件；
+需要「全量、不做任何过滤」时用 `?type=device_last_used&window_days=0&filter=0`。返回：
+
+```json
+{ "range": "最近 30 天", "window_days": 30, "use_exclude": true, "exclude_count": 2, "total": 42, "count": 42,
+  "entities": ["light.a", "switch.b"],
+  "items": [ { "entity_id": "light.a", "name": "大灯", "room": "客厅", "icon": "mdi:lightbulb",
+               "running": false, "on_time": "...", "off_time": "...",
+               "last_used": 1789778169240, "last_used_text": "2026-09-19 08:00:00",
+               "count": 6, "duration": 3600.0, "duration_hour": 1.0, "energy": 0.5 } ] }
+```
+
+db_viewer「API 工具 → 设备类 → 🕘 近期使用设备」提供可视化参数表单：多实体 + **时间模式**
+（全部时间 / **最近 N 天（窗口）** / 时间段 / 指定日 / 指定月 / 指定年）+ 是否应用排除项过滤 +
+只看正在运行 + 是否返回明细。
+
+> **时间模式与窗口天数互斥**：「最近 N 天（窗口）」是时间模式的一个选项（该选项只在本次查询接口可见，
+> 切到其它接口自动隐藏并回落为「时间段」；进入本接口时默认选中），选中后出现「天数（留空 = 用设置实体）」
+> 输入框；选「全部时间」则**真正不限窗口**（避免"全部时间却只返回 30 天"的歧义）。
+
+#### 监控页展示与角标
+
+- **系统监控** summary 新增卡片 **🕘 最近使用设备**（数字 = 统计到的设备数），点击展开对应区块，
+  表格列：实体ID / 名称 / 房间 / 状态（运行中·已关闭）/ 最近使用 / 次数 / 时长(h) / 用电(kWh)，
+  标题右侧显示 `统计范围 · 运行中 N · 排除项 M`；数据来自 `/monitor` 的 `recent` 节点（最多返回前 100 台）。
+- **系统配置 → 🕘 近期使用设备** 子标签角标显示**排除项数量的负值**（如 `-5` 表示已排除 5 个实体），
+  页面加载即显示，配置页内增删排除项即时反映。
 
 ### 上报接口
 
@@ -1187,11 +1277,119 @@ curl -X POST /api/ha_data_store/apikey/settings \
 
 ---
 
+## 16. 家庭洞察（统一事件流 / 房间占用）
+
+「只提供数据、前端负责 UI」：两个查询接口均按 **天 / 日期 / 时间段 / 月 / 年** 为界
+（`device_history` 已在午夜自动拆分，不存在跨天记录），**不分页**（返回 `count` + `truncated`）。
+
+### 16.1 统一事件流 `timeline`
+
+`GET /api/ha_data_store/query?type=timeline` —— 把 7 类事件合并为一条按时间倒序的时间线：
+
+| source | 数据表 | 事件 |
+|---|---|---|
+| `device` | `device_history` | **一条记录展开为 `on` / `off` 两个事件**；运行中的只有 `on` |
+| `user_action` | `user_actions` | 用户操作（含 `state_log`） |
+| `automation` | `automation_logs` | 自动化执行结果与耗时 |
+| `vacuum` | `vacuum_history` | **仅在 `state` 变化时**产出事件（轨迹点自动折叠） |
+| `xiaoai` | `xiaoai_conversations` | 小爱问答 |
+| `health` | `health_records` | 健康记录 |
+| `printer` | `printer_daily` | 打印机当日作业 |
+
+| 参数 | 说明 |
+|---|---|
+| `date` / `start`+`end` / `month` / `year` / `today=1` | 时间窗（**默认今日**） |
+| `sources` | 来源过滤（逗号分隔，空 = 全部） |
+| `events` | 仅 `device`：`on` / `off`（空 = 两者） |
+| `entities` / `rooms` / `users` | 实体 / 房间 / 用户过滤 |
+| `keyword` | 关键词（设备名 / 操作 / 自动化 / 扫地机 ID / 小爱文本 / 健康 / 打印机） |
+| `limit`（默认 500，上限 5000）/ `detail=0` | 条数上限与明细开关 |
+
+> **来源能力收敛**：`entities` / `rooms` / `users` 属"实体维度"过滤，**不具备该维度的来源会被自动剔除**
+> （如 `entities=` 会剔除 automation / health / printer），被剔除项见返回的 `skipped_sources`。
+
+条目结构：`{ts, ts_ms, source, event, title, entity_id, name, room, icon, user, detail, extra{}}`
+（`ts_ms` 便于前端排序；`extra` 按来源给出 duration/energy/state_log/… 等明细）。
+
+### 16.2 房间占用排行 `room_occupancy`
+
+`GET /api/ha_data_store/query?type=room_occupancy` —— 数据源 `device_history` 中 `name='人在'` 的记录：
+
+- **严谨口径**：同一房间的重叠区间先做**区间并集**再计时（多个"人在"实体、抖动重复上报都不会重复计时），
+  同时给出 `raw_duration_hour` 作为"未并集口径"对照；
+- 每房间输出：`duration(_hour)` / `count` / `segments` / `avg_hour` / `occupied` / `last_seen` / `share`；
+  顶层：`total_duration_hour` / `top_room` / `occupied_rooms` / `room_count`；
+- 参数：时间窗（默认今日）、`rooms`、`include_empty=1`（无数据房间也返回 0）、
+  `bucket=none|day|hour`（按日序列 / 24 小时分布）、`door=0`、`detail=0`；
+- **门户事件** `door`：`open_count` / `open_duration_hour` / `last_open` / `open_now` / `events[]`
+  —— 可直接与 timeline 组合出"回家 / 外出"时间线。
+
+db_viewer：「API 工具 → **家庭洞察**」分组提供上面两个接口的可视化表单（时间模式为
+指定日 / 时间段 / 指定月 / 指定年，缺省今日；含来源勾选、设备事件、关键词、房间、分解粒度、
+含无数据房间、门户事件等控件）。
+
+---
+
+## 17. 通用指标引擎（元数据驱动 · `metrics_catalog`）
+
+以往每加一种统计就要新增一个内建 `type=` 分支；现在把「怎么查」变成**一条数据（指标定义）**：
+**新增 / 修改指标无需重启 HA**（定义存库，运行时读取）。
+
+**两层元数据**
+- **schema 元数据**（不落表）：每张表的中文名 / 分组 / 时间列 / 实体列 / 房间列 / 值列 / 时间粒度（`datetime`|`date`）；`env_*`、`attr_*` 动态生成 —— 同时是引擎的**列白名单**（安全边界）。
+- **指标定义**（新表 `metrics_catalog`）：`metric_id / name / category / source_table / value_col / value_expr / agg / unit / icon / group_by / group_col / filters / enabled / builtin / sort_order / remark`。
+
+**占位符**：`@time` `@entity` `@value` `@room` `@name` `@id` —— 编译时按源表解析为真实列名，同一份定义可跨表复用。
+
+**接口**
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/ha_data_store/query?type=metrics_catalog` | 指标目录（可按 `category` / `keyword` 过滤，默认只返回启用项） |
+| `GET /api/ha_data_store/query?type=metrics_query&metric_id=xxx` | 执行指定指标 |
+
+**`metrics_query` 参数**：`metric_id`（必填）、`start/end`、`date`、`month`、`year`、`days`（最近 N 天）、
+`entities`、`room`、`group_by`（none/entity/room/name/day/hour/month/year）、
+`agg`（avg/sum/max/min/count/count_distinct）、`order`、`filters`（JSON 字符串）、`limit/offset`、`detail`、`sql`。
+
+**返回**：
+```json
+{"metric_id":"env_temperature_avg","name":"温度均值","unit":"°C","range":"最近 7 天",
+ "group_by":"day","agg":"avg","row_count":842,"count":7,
+ "summary":{"rows":7,"samples":842,"total_count":842,"value":162.4,"avg":23.2,"min":17,"max":26.4},
+ "rows":[{"key":"2026-09-18","value":23.2,"count":120}],
+ "series":{"labels":["2026-09-18"],"values":[23.2],"counts":[120]}}
+```
+
+**示例**：`.../query?type=metrics_query&metric_id=env_temperature_avg&days=7&group_by=day`
+
+**管理**：db_viewer「系统配置 → 📊 指标管理」可新建 / 编辑 / 复制 / 启停 / 删除指标、同步内置指标，
+并**试运行**（时间模式 + 实体 + 分组/聚合覆盖，展示生成的 SQL、`summary` 与结果表）；
+「API 工具」新增「📊 通用指标（元数据驱动）」分组（自动生成带 `metric_id` 的 URL）。
+
+**内置指标**（启动时 seed，不覆盖用户改动）：环境（温度/湿度/PM2.5/CO₂/功率 × 均值·最高·最低）、
+设备（开启次数·时长合计·单次均值·用电合计·运行中设备数）、用电、健康、操作（活跃用户数）、
+自动化、卡片上报，以及每个 `attr_*` 类型的记录数与 REAL 列均值（每类型最多 5 列）。
+
+---
+
 ## 更新日志
 
-### v3.6.7 家庭状态设备明细新增实时字段 + device_history 新增 icon（2026-09-18）
+### v3.6.11 元数据 + 通用指标引擎（metrics_catalog）（2026-09-19）
 
-今日家庭状态 `sections.devices.devices[]`（`energy_top`/`times_top` 同源同字段）新增 5 个字段：**`running`**（当日最新记录已开未关，历史口径）、**`time`**（已关闭=最近一次 `off_time`，运行中=`null`）、**`on_user`**（运行中取该记录 `on_user`）、**`off_user`**（已关闭取该记录 `off_user`）、**`state`**（HA 实时状态值，实体不在状态机中为 `null`）。刷新频率由「启动后 1 分钟 + 每 30 分钟」改为「启动后 1 分钟 + **每 30 秒**」，并做**内容签名去重**（结果无变化不写状态，避免刷 recorder），手动触发始终写入。`device_history` 表新增 **`icon`** 列（卡片图标）：旧库自动 `ALTER TABLE` 补列；新增记录（开机写入、午夜拆分新记录）时按 `entity_id` 取 `user_actions` 最新一条非空 `icon` 写入；启动时对历史数据做**幂等回填**（只填空值，日志输出回填实体数与影响行数）。版本号 → `3.6.7`。
+新增 `metrics.py`：把「怎么查」从代码变成**数据** —— **两层元数据**（schema 表/列语义 + 新表 `metrics_catalog` 指标定义：源表 / 值列或 `@value` 等占位符表达式 / 聚合 / 默认分组 / 默认过滤 / 单位 / 图标）。启动时把内置指标 seed 进表（`INSERT OR IGNORE`，**不覆盖用户改动**），覆盖环境（温度/湿度/PM2.5/CO₂/功率 × 均值·最高·最低）、设备（开启次数·时长合计·单次均值·用电合计·运行中设备数）、用电、健康、操作（含 `count_distinct` 活跃用户数）、自动化、卡片上报，外加每个 `attr_*` 类型的记录数与 REAL 列均值。对外新增 **`GET /query?type=metrics_catalog`（指标目录）** 与 **`GET /query?type=metrics_query&metric_id=xxx`（执行）**：支持 `start/end/date/month/year/days` 时间窗、`entities`/`room`、`group_by`（none/entity/room/name/day/hour/month/year）、`agg`（avg/sum/max/min/count/count_distinct）、`order`、`filters`(JSON)、`limit/offset`、`detail`、`sql`，统一返回 `{summary, rows, series}`；聚合与分组走白名单、表名列名为 schema 白名单 + `PRAGMA` 校验、标识符加双引号、值一律参数化。db_viewer「系统配置」新增 **📊 指标管理** 子页（列表/新建/编辑/复制/启停/删除/同步内置 + **试运行**返回 SQL 与结果），「API 工具」新增「📊 通用指标（元数据驱动）」分组。**新增/修改指标无需重启 HA，新增查询 type 需重启一次**。版本号 → `3.6.11`。
+
+### v3.6.10 家庭洞察：统一事件流 timeline + 房间占用排行 room_occupancy（2026-09-19）
+
+新增 `insights.py` 与两个查询接口（不新增业务表）：**`GET /query?type=timeline`** —— 把设备开关（**一条记录展开 on/off 两事件**，运行中只有 on）、用户操作、自动化、扫地机（轨迹点仅在 `state` 变化时出事件）、小爱、健康、打印机合并为一条按时间倒序的时间线，支持时间窗（date/start+end/month/year/today，默认今日）、`sources`/`events`/`entities`/`rooms`/`users`/`keyword` 过滤与 `limit`（不分页，返回 `truncated`），条文统一为 `{ts, ts_ms, source, event, title, entity_id, name, room, icon, user, detail, extra}`；实体维度过滤会**自动剔除不具备该维度的来源**并列入 `skipped_sources`。**`GET /query?type=room_occupancy`** —— 由 `name='人在'` 记录按房间统计有人时长，**严谨口径（同房间重叠区间先并集再计时）**，输出 `duration(_hour)/count/segments/avg_hour/occupied/last_seen/share` + `top_room/occupied_rooms`，支持 `rooms`/`include_empty`/`bucket=day|hour`/`door`/`detail`，并附**门户事件**（`open_count`/`open_duration_hour`/`last_open`/`open_now`/`events[]`）。db_viewer「API 工具」新增**家庭洞察**分组与两个接口的表单（时间模式仅指定日/时间段/指定月/指定年，按接口自动显隐）。版本号 → `3.6.10`。
+
+### v3.6.9 近期使用设备新增 all 节点 + device_last_used 接口 + 窗口/排除项设置（2026-09-19）
+
+`sensor.近期使用设备` 新增 **`all` 节点**：数据源 `device_history`（覆盖自动化等非卡片操作），每个 `entity_id` 一条，字段含 `entity_id/name/room/icon/running/last_used(_text)/on_time/off_time/count/duration/duration_hour/energy`，规则为「最新记录已开未关 → `running=true`、最近使用 = 当前时刻；否则取该记录 `off_time`」，按最近使用倒序，另有 `total_all`/`all_range`/`exclude_count` 属性。新增设置实体 **`number.ha_data_store_recent_days`**（近期使用天数，1~365、默认 30，缺失/非法回退 30，改动即刷新传感器，**`RestoreEntity` 持久化 → 重启保持**），窗口按 `on_time` 过滤「今天 −(N−1) 天」起算。新增接口 **`GET /query?type=device_last_used`**：支持 `entities` / `start`+`end` / `date` / `month` / `year` / `window_days`（与时间模式互斥：仅未传时间条件时生效，缺省读设置实体，`0` = 不限窗口）/ `filter`（`0` = 关闭排除项过滤，别名 `use_exclude`）/ `exclude` / `running` / `detail` / `limit`+`offset`，返回去重后的 `entities` 列表 + `items` 明细（含次数/时长/用电）；顺带修复 `window_days` 缺省时**未读设置实体**（此前一直用常量 30）。新增**排除项配置**：存 `api_settings.recent_exclude_entities`（JSON 数组，无字符数限制），接口 `GET/POST /api/ha_data_store/recent/exclude` 与 `GET /api/ha_data_store/recent/entities`（实体唯一值），db_viewer 新增「系统配置 → 🕘 近期使用设备」子页（已选标签 + 手动输入 + 可按 entity_id/名称/房间搜索选择），API 工具新增「🕘 近期使用设备」查询项（时间模式含 **「最近 N 天（窗口）」**，与窗口天数互斥，仅本接口可见）；**系统监控** summary 新增「🕘 最近使用设备」卡片与区块（`/monitor` 返回 `recent` 节点），「🕘 近期使用设备」子标签角标显示**排除项数量的负值**（`-5` = 排除 5 个）。版本号 → `3.6.9`。
+
+### v3.6.8 家庭状态设备明细新增实时字段 + device_history 新增 icon（2026-09-18）
+
+今日家庭状态 `sections.devices.devices[]`（`energy_top`/`times_top` 同源同字段）新增 5 个字段：**`running`**（当日最新记录已开未关，历史口径）、**`time`**（已关闭=最近一次 `off_time`，运行中=`null`）、**`on_user`**（运行中取该记录 `on_user`）、**`off_user`**（已关闭取该记录 `off_user`）、**`state`**（HA 实时状态值，实体不在状态机中为 `null`）。刷新频率由「启动后 1 分钟 + 每 30 分钟」改为「启动后 1 分钟 + **每 30 秒**」并**默认强制写入状态**（`FAMILY_STATUS_FORCE_WRITE`；此前走内容签名去重，内容未变时不写状态，导致看起来"没按 30 秒刷新"），`generated_at` / `last_updated` 持续更新，手动触发始终写入。`device_history` 表新增 **`icon`** 列（卡片图标）：`device_history.entity_id = report_entities.entity_id` 时把 `report_entities.icon` 写入 `device_history.icon`（同一实体取 `id` 最大的最新上报，**原样写入、不过滤空值**）；旧库自动 `ALTER TABLE` 补列；新增记录（开机写入、午夜拆分新记录）时同步写入；历史数据回填**不再随 HA 启动自动执行**，改由新增按钮 **`button.ha_data_store_fill_device_icon`**（回填设备图标）按需触发——**覆盖更新**（不管原值是否为空，`report_entities` 中无上报记录的实体不动，重复执行结果一致），状态属性记录 `写入行数` / `执行时间`。版本号 → `3.6.8`。
 
 ### v3.6.5 新增「接口管理」模块：新增/修改接口无需重启（2026-09-10）
 

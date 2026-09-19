@@ -17,9 +17,10 @@ from homeassistant.helpers.event import async_track_time_interval
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
     TABLE_USER_ACTIONS, TABLE_AUTOMATIONS, TABLE_AUTOMATION_LOGS,
-    CATEGORY_ATTRIBUTE, VERSION)
+    CATEGORY_ATTRIBUTE, VERSION, RECENT_DAYS_ENTITY_ID)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 from .daily_summary import build_daily_summary_sync
+from .recent_devices import compute_device_last_used_sync, get_window_days
 from .system_resources import (CpuUsageSensor, DiskUsageSensor,
     MemoryUsageSensor, async_collect_system_info)
 
@@ -27,6 +28,11 @@ _LOGGER = logging.getLogger(__name__)
 
 # 自动化星期名（与 automations.py 保持一致）
 _WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+# 今日家庭状态：定时（30 秒）刷新是否强制写入状态
+#   True  → 每 30 秒都写状态（generated_at/last_updated 持续更新，刷新节奏可见）
+#   False → 内容签名（忽略 generated_at）未变化时跳过写入，减轻 recorder 压力
+FAMILY_STATUS_FORCE_WRITE = True
 
 
 class MonitoredEntitiesSensor(SensorEntity):
@@ -108,6 +114,17 @@ class UserActionsSensor(SensorEntity):
               前端可直接据此还原设备控制面板），同一实体被不同用户操作时各自独立成条，
               每条带独立 user_name / count / last_used，按使用次数降序。
               额外字段：total_user_devices = 用户×设备 组合条数。
+
+    另有 all 节点（数据源 device_history，与 devices 节点互补）：
+      all / total_all → 每个 entity_id 一条「最近使用」记录，覆盖自动化触发等非前端卡片操作，
+        字段 entity_id/name/room/icon/running/last_used/last_used_text/on_time/off_time/
+        count/duration/duration_hour/energy，按最近使用时间倒序；
+        all_range = 实际统计范围文案，exclude_count = 生效的排除项个数。
+      规则：最新记录 on_time 有值且 off_time 空 → running=true、last_used_text=当前时刻；
+            否则 last_used_text = 该记录 off_time。
+
+    窗口天数：读 number.ha_data_store_recent_days（本类的 WINDOW_DAYS 仅为默认值）；
+    排除项：api_settings.recent_exclude_entities（db_viewer「近期使用设备排除项」配置）。
     """
 
     _attr_has_entity_name = False
@@ -115,7 +132,8 @@ class UserActionsSensor(SensorEntity):
     _attr_icon = "mdi:chart-histogram"
     _attr_native_unit_of_measurement = "个"
 
-    # 统计窗口（天），可整体调整
+    # 统计窗口（天）默认值；实际值优先读设置实体 number.ha_data_store_recent_days
+    # （缺失/非法/超范围回退此默认值，见 recent_devices.get_window_days）
     WINDOW_DAYS = 30
 
     def __init__(self, hass, device_info):
@@ -127,13 +145,16 @@ class UserActionsSensor(SensorEntity):
 
     def _load_data(self):
         db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        # 窗口天数：优先取设置实体 number.ha_data_store_recent_days，缺失/非法回退 30
+        days = get_window_days(self._hass)
         if not db_path:
-            return {"window_days": self.WINDOW_DAYS, "total_actions": 0, "total_devices": 0, "devices": []}
+            return {"window_days": days, "total_actions": 0, "total_devices": 0,
+                    "devices": [], "all": [], "total_all": 0}
         try:
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             try:
-                cutoff = int(time.time() * 1000) - self.WINDOW_DAYS * 24 * 3600 * 1000
+                cutoff = int(time.time() * 1000) - days * 24 * 3600 * 1000
                 rows = [dict(r) for r in conn.execute(
                     f"SELECT user_name, entity_id, action, name, icon, room_name, "
                     f"service, card_type, other, state_log, ts, ts_text, action_snapshot, config_id, device_type FROM {TABLE_USER_ACTIONS} "
@@ -143,7 +164,8 @@ class UserActionsSensor(SensorEntity):
                 conn.close()
         except Exception as e:
             _LOGGER.error("[HDS] user_actions 传感器加载失败: %s", e)
-            return {"window_days": self.WINDOW_DAYS, "total_actions": 0, "total_devices": 0, "devices": [], "error": str(e)}
+            return {"window_days": days, "total_actions": 0, "total_devices": 0,
+                    "devices": [], "all": [], "total_all": 0, "error": str(e)}
 
         # 按 (用户, action_snapshot) 归一化聚合。
         # 同一设备面板多实体组合归为一条；同一实体被不同用户操作时，各自独立成条
@@ -197,12 +219,32 @@ class UserActionsSensor(SensorEntity):
             # 增加人类可读的最近使用时间（本地时区），保留原始时间戳供程序使用
             d["last_used_text"] = self._format_ts(d.get("last_used") or 0)
         devices.sort(key=lambda d: (d["count"], d["last_used"]), reverse=True)
+
+        # all 节点：device_history 全量设备的「最近使用」（每个 entity_id 一条，
+        # 覆盖自动化触发等非前端卡片操作，与 devices 节点互补）。
+        # 规则：最新记录 on_time 有值且 off_time 空 → running=true、last_used_text=当前时刻；
+        #       否则 last_used_text = 该记录 off_time。排除项来自 api_settings（db_viewer 配置）。
+        all_items: list = []
+        all_range = ""
+        exclude_count = 0
+        try:
+            all_data = compute_device_last_used_sync(db_path, window_days=days)
+            all_items = all_data.get("items") or []
+            all_range = all_data.get("range") or ""
+            exclude_count = int(all_data.get("exclude_count") or 0)
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning("[HDS] 近期使用设备 all 节点计算失败: %s", e)
+
         return {
-            "window_days": self.WINDOW_DAYS,
+            "window_days": days,
             "total_actions": len(rows),
             "total_devices": dedup_entities,
             "total_user_devices": len(devices),
             "devices": devices,
+            "all": all_items,
+            "total_all": len(all_items),
+            "all_range": all_range,
+            "exclude_count": exclude_count,
         }
 
     @staticmethod
@@ -853,8 +895,10 @@ class TodayFamilyStatusSensor(SensorEntity):
     刷新：每 30 秒定时聚合（设备 running / state / 操作用户实时性要求）；
     另可由按钮 button.ha_data_store_daily_summary 或服务
     ha_data_store.generate_daily_summary 手动触发 async_trigger_refresh。
-    定时刷新做内容签名去重（忽略 generated_at），内容未变不写状态，避免
-    每 30 秒向 recorder 落一条大属性；手动触发始终写入。
+    定时刷新默认**强制写入**（`FAMILY_STATUS_FORCE_WRITE=True`），保证
+    generated_at / last_updated 每 30 秒确实刷新；若置 False 则走内容签名去重
+    （忽略 generated_at），内容未变时跳过写入以减轻 recorder 压力。
+    手动触发（按钮/服务）始终强制写入。
     """
 
     _attr_has_entity_name = True
@@ -891,8 +935,8 @@ class TodayFamilyStatusSensor(SensorEntity):
     async def async_trigger_refresh(self, date_str=None, force: bool = False):
         """生成今日总结。
 
-        force=True  → 强制写入状态（按钮/服务手动触发）
-        force=False → 内容与上次一致则跳过写入（30 秒定时刷新，避免刷 recorder）
+        force=True  → 强制写入状态（30 秒定时刷新默认走此分支，按钮/服务手动触发）
+        force=False → 内容与上次一致则跳过写入（可选，减轻 recorder 压力）
         """
         try:
             data = await self._hass.async_add_executor_job(self._load_data, date_str)
@@ -1455,6 +1499,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     hass.bus.async_listen(EVENT_STATE_CHANGED, _on_ele_list_changed)
 
+    # number.ha_data_store_recent_days（近期使用天数设置）变化 → 立即刷新「近期使用设备」
+    async def _on_recent_days_changed(event):
+        if not event.data or event.data.get("entity_id") != RECENT_DAYS_ENTITY_ID:
+            return
+        try:
+            await user_actions_sensor._async_refresh(None)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 窗口天数变化刷新近期使用设备失败")
+
+    hass.bus.async_listen(EVENT_STATE_CHANGED, _on_recent_days_changed)
+
     # 自动化状态传感器：定时轮询作为兜底；automation_logs 新数据由写日志回调触发；
     # automation.* 实体（ha_automation 节点）状态变化实时监听触发（2 秒防抖）
     async_track_time_interval(hass, automation_status_sensor.async_trigger_refresh, timedelta(seconds=30))
@@ -1469,21 +1524,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_track_time_interval(hass, disk_sensor._async_refresh, timedelta(seconds=30))
 
     # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 秒更新 ──
-    # 说明：设备 running / state / 操作用户需实时性，改为 30 秒轮询；
-    #       聚合结果内容未变化时由传感器内部跳过写入，不会刷 recorder。
+    # 说明：设备 running / state / 操作用户需实时性，故 30 秒轮询；
+    #       默认强制写入状态（FAMILY_STATUS_FORCE_WRITE=True），保证每 30 秒
+    #       generated_at/last_updated 都刷新（置 False 则内容未变时跳过写入）。
     async def _delayed_first_refresh():
         """启动后延迟 1 分钟生成一次家庭状态。"""
         try:
             await asyncio.sleep(60)
-            await summary_sensor.async_trigger_refresh()
+            await summary_sensor.async_trigger_refresh(force=True)
             _LOGGER.info("[HDS] 今日家庭状态已自动生成（启动后1分钟）")
         except Exception as e:
             _LOGGER.exception("[HDS] 启动后自动生成今日家庭状态失败: %s", e)
 
     async def _periodic_refresh(now=None):
-        """每 30 秒更新家庭状态（内容无变化则不写状态）。"""
+        """每 30 秒刷新家庭状态（按 FAMILY_STATUS_FORCE_WRITE 决定是否强制写入）。"""
         try:
-            await summary_sensor.async_trigger_refresh()
+            await summary_sensor.async_trigger_refresh(force=FAMILY_STATUS_FORCE_WRITE)
         except Exception as e:
             _LOGGER.exception("[HDS] 定时更新今日家庭状态失败: %s", e)
 

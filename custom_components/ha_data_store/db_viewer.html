@@ -34,22 +34,30 @@
   select:focus { outline: 2px solid var(--accent); }
   .info { color: var(--text2); font-size: 13px; }
   /* table */
-  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; max-height: 65vh; margin-bottom: 20px;}
+  .table-wrap { overflow-x: auto; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; max-height: 65vh; margin-bottom: 20px;}
   table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
   th { background: var(--header-bg); color: var(--text); padding: 10px 12px; text-align: left;
-       white-space: nowrap; position: sticky; top: 0; z-index: 1; }
+      white-space: nowrap; position: sticky; top: 0; z-index: 3;
+      /* border-collapse:collapse 下边框不随 sticky 移动，用内阴影补出底线 */
+      box-shadow: inset 0 -1px 0 var(--border); }
   td { padding: 8px 12px; border-top: 1px solid var(--border); white-space: nowrap;
        max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
   tr:hover td { background: var(--hover); }
   td { cursor: default; }
   td.editable:hover { outline: 1px dashed var(--accent); cursor: cell; }
-  td.editing { padding: 2px 4px; }
-  td.editing input { background: #0d1117; color: var(--text); border: 1px solid var(--accent);
-                     padding: 4px 6px; border-radius: 4px; font-size: 12px; width: 100%; max-width: 200px; }
-  td.editing .btn-save { margin-left: 4px; padding: 3px 10px; font-size: 11px; border-radius: 4px;
-                         background: var(--green); color: #fff; border: none; cursor: pointer; }
-  td.editing .btn-cancel { margin-left: 2px; padding: 3px 8px; font-size: 11px; border-radius: 4px;
-                           background: #555; color: #fff; border: none; cursor: pointer; }
+  /* 编辑态：内容改为浮层，避免窄列把「保存/取消」裁剪掉 */
+  td.editing { padding: 2px 4px; position: relative; overflow: visible; z-index: 2; }
+  td.editing .edit-box { position: absolute; top: 50%; left: 0; transform: translateY(-50%);
+                         display: flex; align-items: center; gap: 4px; z-index: 2;
+                         background: var(--card); border: 1px solid var(--accent); border-radius: 6px;
+                         padding: 3px 5px; box-shadow: 0 4px 14px rgba(0,0,0,.55); white-space: nowrap; }
+  td.editing .edit-box input { background: #0d1117; color: var(--text); border: 1px solid var(--accent);
+                    padding: 4px 6px; border-radius: 4px; font-size: 12px;
+                    width: 200px; min-width: 120px; max-width: 40vw; }
+  td.editing .edit-box .btn-save { margin-left: 4px; padding: 3px 10px; font-size: 11px; border-radius: 4px;
+                        background: var(--green); color: #fff; border: none; cursor: pointer; }
+  td.editing .edit-box .btn-cancel { margin-left: 2px; padding: 3px 8px; font-size: 11px; border-radius: 4px;
+                          background: #555; color: #fff; border: none; cursor: pointer; }
   .btn-del { padding: 2px 10px; font-size: 11px; border-radius: 4px;
              background: transparent; color: var(--accent); border: 1px solid var(--accent); cursor: pointer; }
   .btn-del:hover { background: var(--accent); color: #fff; }
@@ -69,12 +77,30 @@
   th.sortable .sort-arrow { margin-left: 4px; font-size: 10px; opacity: 0.4; }
   th.sortable.sorted .sort-arrow { opacity: 1; color: var(--accent); }
   th.sortable.sorted-asc .sort-arrow { opacity: 1; color: var(--accent); }
-  /* 列宽拖拽 */
-  th.resizable { position: relative; }
+  /* .table-wrap 内的通用数据表：列宽按内容自适应（#dataTable 仍由 JS 计算 + 可拖拽） */
+  table.auto-fit { table-layout: auto; }
+  /* 列宽拖拽（保持 sticky，否则会覆盖上面的表头固定；sticky 同样是定位元素，绝对定位手柄仍以本 th 为参照） */
+  th.resizable { position: sticky; top: 0; }
   th .resize-handle { position: absolute; top: 0; right: -4px; width: 8px; height: 100%;
                       cursor: col-resize; z-index: 2; }
   th .resize-handle:hover, th.resizing .resize-handle { background: rgba(52,152,219,.35); }
   body.col-resizing { cursor: col-resize; user-select: none; }
+  /* 字段显示/隐藏 下拉 */
+  .colvis-wrap { position: relative; display: inline-block; }
+  .colvis-menu { display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 300;
+                 min-width: 220px; max-width: 320px; max-height: 340px; overflow: auto;
+                 background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 8px 0 4px; box-shadow: 0 8px 24px rgba(0,0,0,.55); }
+  .colvis-menu.open { display: block; }
+  .colvis-title { padding: 2px 12px 8px; margin-bottom: 4px; font-size: 12px; color: var(--text2);
+                  border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .colvis-item { display: flex; align-items: center; gap: 8px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
+  .colvis-item:hover { background: var(--hover); }
+  .colvis-item input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); flex: none; }
+  .colvis-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'Consolas', monospace; font-size: 12px; }
+  .colvis-actions { display: flex; gap: 6px; padding: 8px 12px 6px; margin-top: 4px; border-top: 1px solid var(--border); }
+  .colvis-actions button { padding: 4px 10px; font-size: 12px; border-radius: 4px; }
+  .colvis-empty { padding: 10px 12px; font-size: 12px; color: var(--text2); }
   /* filter bar */
   .filter-bar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; padding: 10px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
   .filter-row { display: flex; gap: 6px; align-items: center; }
@@ -123,13 +149,42 @@
   #tab-monitor .toolbar { background: transparent; padding: 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
   /* summary cards — equal height grid */
   .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: 8px; margin-bottom: 16px; }
-  .summary-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; text-align: center; position: relative; overflow: hidden; }
+  .summary-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; text-align: center; position: relative; overflow: hidden; cursor: pointer; transition: border-color .15s, background .15s; }
+  .summary-card:hover { border-color: var(--accent); background: var(--hover); }
+  .section-head.flash { background: rgba(233,69,96,.16); border-radius: 4px; box-shadow: 0 0 0 1px var(--accent); }
   .summary-card .num { font-size: 26px; font-weight: 700; color: var(--text); }
   .summary-card .lbl { font-size: 11px; color: var(--text2); margin-top: 2px; }
-  .health-dot { position: absolute; top: 7px; right: 8px; width: 8px; height: 8px; border-radius: 50%; }
-  .health-dot.good { background: var(--green); box-shadow: 0 0 5px var(--green); }
-  .health-dot.warn { background: var(--orange); box-shadow: 0 0 5px var(--orange); }
-  .health-dot.bad { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
+  /* 第三行：同步自下方区块标题（section-head）右侧的健康徽标 + 统计数字 */
+  .summary-card .card-sub { margin-top: 5px; font-size: 10px; line-height: 1.5;
+                            display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; }
+  .summary-card .card-sub:empty { display: none; }
+  .summary-card .card-sub .stat-dot { margin-right: 1px; }
+  /* 当前展开区块对应的卡片（再次点击可折叠） */
+  .summary-card.sec-open { border-color: var(--accent); background: var(--hover); box-shadow: inset 0 0 0 1px var(--accent); }
+  .issue-pill { font-size: 11px; padding: 1px 9px; border-radius: 10px; border: 1px solid var(--border);
+                color: var(--text2); background: var(--card); white-space: nowrap; }
+  .issue-pill.bad { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 600; cursor: pointer; }
+  .issue-pill.bad:hover { filter: brightness(1.15); box-shadow: 0 0 0 2px rgba(233,69,96,.35); }
+  /* 卡片右上角：该分类的问题数（无问题不显示） */
+  .summary-card .issue-pill { position: absolute; top: 6px; right: 6px; padding: 1px 7px; }
+  /* 异常明细气泡（点击角标弹出） */
+  #issueBubble { position: fixed; z-index: 300; width: 400px; max-width: calc(100vw - 24px);
+                 background: var(--card); border: 1px solid var(--accent); border-radius: 8px;
+                 box-shadow: 0 10px 28px rgba(0,0,0,.6); font-size: 12px; overflow: hidden; }
+  #issueBubble .ib-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+                          background: var(--header-bg); border-bottom: 1px solid var(--border);
+                          font-weight: 600; color: var(--text); }
+  #issueBubble .ib-head .ib-x { margin-left: auto; background: transparent; border: none; color: var(--text2);
+                                cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
+  #issueBubble .ib-head .ib-x:hover { color: var(--accent); }
+  #issueBubble .ib-body { max-height: 320px; overflow: auto; padding: 4px 8px 8px; }
+  #issueBubble .ib-item { padding: 6px 4px; border-top: 1px solid rgba(255,255,255,.06); }
+  #issueBubble .ib-item:first-child { border-top: none; }
+  #issueBubble .ib-entity { color: var(--text); font-weight: 600; word-break: break-all; }
+  #issueBubble .ib-sub { color: var(--text2); font-weight: 400; margin-left: 6px; word-break: break-all; }
+  #issueBubble .ib-reason { color: var(--accent); margin-top: 2px; word-break: break-all; }
+  #issueBubble .ib-time { color: var(--text2); margin-top: 1px; }
+  #issueBubble .ib-empty { color: var(--text2); padding: 8px 4px; }
   .title-good { color: var(--green); }
   .title-warn { color: var(--orange); }
   .title-bad { color: var(--accent); }
@@ -246,6 +301,10 @@
     <button id="btnVacuum" class="btn-accent" onclick="vacuumDatabase()" style="background:var(--orange);border-color:var(--orange);font-size:12px;padding:6px 12px" title="压缩数据库文件">🗜 压缩</button>
     <button class="btn-accent" onclick="showUnclosedToday()" style="background:#8e44ad;border-color:#8e44ad;font-size:12px;padding:6px 12px" title="查找当日有on_time但没有off_time的记录">⚠ 未关闭记录</button>
     <button class="btn-accent" onclick="showSQLModal()" style="background:#2ecc71;border-color:#2ecc71;font-size:12px;padding:6px 12px" title="执行自定义 SQL 语句">▶ 执行SQL</button>
+    <span class="colvis-wrap" id="colVisWrap">
+      <button id="btnColVis" class="btn-accent" onclick="toggleColVisMenu(event)" style="background:#34495e;border-color:#34495e;font-size:12px;padding:6px 12px" title="勾选需要显示的字段列（按表分别记忆）">👁 显示字段</button>
+      <div class="colvis-menu" id="colVisMenu"></div>
+    </span>
     <span class="info" id="tableInfo"></span>
     <span class="batch-info" id="batchInfo"></span>
   </div>
@@ -412,6 +471,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('media')">🎵 媒体播放列表<span class="sub-tab-badge" id="badge-media"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('xiaoai')">💬 小爱对话<span class="sub-tab-badge" id="badge-xiaoai"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('printer')">🖨️ 打印机配置<span class="sub-tab-badge" id="badge-printer"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('recent')">🕘 近期使用设备<span class="sub-tab-badge" id="badge-recent"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('metrics')">📊 指标管理<span class="sub-tab-badge" id="badge-metrics"></span></button>
   </div>
 
   <!-- 子面板: 设备类 -->
@@ -1182,6 +1243,263 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 近期使用设备（窗口天数 / 排除项） -->
+  <div id="sub-recent" class="sub-panel">
+    <div class="section">
+      <h3>🕘 近期使用设备</h3>
+      <div class="hint">
+        「近期使用设备」传感器（<code>sensor.近期使用设备</code>）的统计窗口与排除项。
+        窗口天数由 HA 实体 <code>number.ha_data_store_recent_days</code> 控制（默认 30 天，范围 1~365，可直接在仪表盘调整）；
+        本页的排除项用于剔除不需要统计的实体，同时作用于传感器的 <code>all</code> 节点与
+        <code>/query?type=device_last_used</code> 接口。
+      </div>
+    </div>
+
+    <div class="section">
+      <h4 class="sep-title">排除项（不参与统计的实体）</h4>
+      <div id="recentExcludeList" style="margin-bottom:8px"></div>
+      <div class="form-row">
+        <div class="full">
+          <label>手动输入（逗号或换行分隔，支持一次粘贴多个）</label>
+          <textarea id="recentExcludeText" rows="2" placeholder="light.keting_dadeng, switch.xxx"></textarea>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-green" onclick="saveRecentExclude()">💾 保存排除项</button>
+        <button class="btn-accent" onclick="loadRecentExclude()">🔄 刷新</button>
+        <span class="hint">修改后需点「保存排除项」才写入数据库（保存后传感器立即刷新）</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h4 class="sep-title">从设备实体中选择（数据源：device_history）</h4>
+      <div class="form-row">
+        <div>
+          <label>搜索（entity_id / 名称 / 房间）</label>
+          <input type="text" id="recentEntitySearch" placeholder="输入关键字过滤"
+                 oninput="renderRecentEntityPicker()">
+        </div>
+        <div style="align-self:flex-end">
+          <button class="btn-accent" onclick="loadRecentEntityPicker()">🔄 重新加载实体</button>
+        </div>
+      </div>
+      <div id="recentEntityPicker" style="max-height:320px;overflow:auto;margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- 子面板: 指标管理（元数据 + 通用指标引擎 metrics_catalog） -->
+  <div id="sub-metrics" class="sub-panel">
+    <div class="section">
+      <h3>📊 指标管理</h3>
+      <div class="hint">
+        一条指标 = <b>源表 + 值列/表达式 + 聚合方式 + 默认分组 + 默认过滤</b>，由通用引擎编译为参数化 SQL 执行。
+        对外接口：<code>/query?type=metrics_catalog</code>（目录）、
+        <code>/query?type=metrics_query&amp;metric_id=xxx</code>（执行，支持 start/end/date/month/year/days、
+        entities、room、group_by、agg、order、filters、limit/offset、detail）。
+        内置指标在 HA 启动时自动同步（<b>不覆盖</b>你的改动）；新增属性类型 / 结构变更后可点
+        「🔄 同步内置指标」补齐。
+      </div>
+    </div>
+
+    <div class="section">
+      <h4 class="sep-title">指标列表</h4>
+      <div class="form-row">
+        <div>
+          <label>分类</label>
+          <select id="metricFilterCat" onchange="loadMetrics()"><option value="">全部分类</option></select>
+        </div>
+        <div>
+          <label>关键字（metric_id / 名称 / 说明）</label>
+          <input type="text" id="metricFilterKw" placeholder="如 temperature、用电" oninput="loadMetrics()">
+        </div>
+        <div style="align-self:flex-end;display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn-accent" onclick="loadMetrics()">🔄 刷新</button>
+          <button class="btn-accent" onclick="syncMetrics(false)"
+                  title="只补齐缺失的内置指标，不会覆盖已存在的改动">🔄 同步内置指标</button>
+          <button class="btn-accent" onclick="syncMetrics(true)"
+                  title="按最新定义覆盖所有内置指标的参数（自定义指标不受影响）"
+                  style="background:#c0392b;border-color:#c0392b">♻︎ 重置内置</button>
+          <button class="btn-green" onclick="newMetric()">➕ 新建指标</button>
+        </div>
+      </div>
+      <div id="metricListWrap" style="margin-top:8px">加载中...</div>
+    </div>
+
+    <div class="section" id="metricEditWrap" style="display:none">
+      <h4 class="sep-title" id="metricEditTitle">新建指标</h4>
+      <div class="form-row">
+        <div>
+          <label>metric_id（小写字母/数字/下划线）</label>
+          <input type="text" id="mMetricId" placeholder="my_metric_1">
+        </div>
+        <div>
+          <label>名称</label>
+          <input type="text" id="mName" placeholder="客厅日均温度">
+        </div>
+        <div>
+          <label>分类</label>
+          <select id="mCategory"></select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>源表</label>
+          <select id="mTable" onchange="onMetricTableChange()"></select>
+        </div>
+        <div>
+          <label>值列（可选，支持 @value 等占位符）</label>
+          <select id="mValueCol"></select>
+        </div>
+        <div>
+          <label>值表达式（可选，如 CAST(@value AS REAL)）</label>
+          <input type="text" id="mValueExpr" placeholder="留空则用「值列」，如 CAST(@value AS REAL)">
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>聚合方式</label>
+          <select id="mAgg">
+            <option value="avg">avg 平均值</option>
+            <option value="sum">sum 求和</option>
+            <option value="max">max 最大值</option>
+            <option value="min">min 最小值</option>
+            <option value="count">count 记录数（不需值列）</option>
+            <option value="count_distinct">count_distinct 去重计数</option>
+          </select>
+        </div>
+        <div>
+          <label>默认分组</label>
+          <select id="mGroupBy" onchange="onMetricGroupChange()">
+            <option value="none">none 不分组（整体一个值）</option>
+            <option value="day">day 按天</option>
+            <option value="hour">hour 按小时</option>
+            <option value="month">month 按月</option>
+            <option value="year">year 按年</option>
+            <option value="entity">entity 按实体</option>
+            <option value="room">room 按房间</option>
+            <option value="name">name 按名称</option>
+            <option value="type">type 按自定义列</option>
+          </select>
+        </div>
+        <div id="mGroupColWrap" style="display:none">
+          <label>分组列（group_by=type 时必填）</label>
+          <select id="mGroupCol"></select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>默认过滤（JSON 对象，等值条件）</label>
+          <input type="text" id="mFilters" placeholder='如 {"off_time": ""}'>
+        </div>
+        <div>
+          <label>单位</label>
+          <input type="text" id="mUnit" placeholder="°C / kWh / 次">
+        </div>
+        <div>
+          <label>图标</label>
+          <input type="text" id="mIcon" placeholder="mdi:thermometer">
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>排序值（越小越靠前）</label>
+          <input type="number" id="mSort" value="100">
+        </div>
+        <div class="full">
+          <label>说明</label>
+          <input type="text" id="mRemark" placeholder="可选">
+        </div>
+      </div>
+      <div class="form-row">
+        <div style="align-self:flex-end">
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer"
+                 title="停用后 /query?type=metrics_query 调用该指标会报错">
+            <input type="checkbox" id="mEnabled" checked> 启用
+          </label>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-green" onclick="saveMetric()">💾 保存</button>
+        <button class="btn-accent" onclick="runMetricTest()">▶ 试运行</button>
+        <button class="btn-accent" onclick="closeMetricEdit()">✕ 取消</button>
+        <span class="hint" id="metricEditHint"></span>
+      </div>
+    </div>
+
+    <div class="section" id="metricTestWrap" style="display:none">
+      <h4 class="sep-title">试运行参数（不保存定义，直接执行）</h4>
+      <div class="form-row">
+        <div>
+          <label>时间模式</label>
+          <select id="mtMode" onchange="onMetricTestModeChange()">
+            <option value="days">最近 N 天</option>
+            <option value="range">时间段 start/end</option>
+            <option value="date">指定日</option>
+            <option value="month">指定月</option>
+            <option value="year">指定年</option>
+            <option value="">全部时间</option>
+          </select>
+        </div>
+        <div id="mtDaysWrap">
+          <label>N（天）</label>
+          <input type="number" id="mtDays" value="7" min="1">
+        </div>
+        <div id="mtRangeWrap" style="display:none">
+          <label>start ~ end（YYYY-MM-DD）</label>
+          <div style="display:flex;gap:4px">
+            <input type="text" id="mtStart" placeholder="2026-09-01">
+            <input type="text" id="mtEnd" placeholder="2026-09-30">
+          </div>
+        </div>
+        <div id="mtSingleWrap" style="display:none">
+          <label>值（日:2026-09-18 / 月:2026-09 / 年:2026）</label>
+          <input type="text" id="mtSingle" placeholder="2026-09">
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>实体过滤（逗号分隔，可留空）</label>
+          <input type="text" id="mtEntities" placeholder="sensor.a, sensor.b">
+        </div>
+        <div>
+          <label>分组（留空=用指标默认）</label>
+          <select id="mtGroupBy">
+            <option value="">（默认）</option>
+            <option value="none">none</option>
+            <option value="day">day</option>
+            <option value="hour">hour</option>
+            <option value="month">month</option>
+            <option value="year">year</option>
+            <option value="entity">entity</option>
+            <option value="room">room</option>
+            <option value="name">name</option>
+          </select>
+        </div>
+        <div>
+          <label>聚合（留空=用指标默认）</label>
+          <select id="mtAgg">
+            <option value="">（默认）</option>
+            <option value="avg">avg</option>
+            <option value="sum">sum</option>
+            <option value="max">max</option>
+            <option value="min">min</option>
+            <option value="count">count</option>
+            <option value="count_distinct">count_distinct</option>
+          </select>
+        </div>
+        <div>
+          <label>返回行数上限</label>
+          <input type="number" id="mtLimit" value="0" min="0" title="0 = 不限">
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-green" onclick="runMetricTest()">▶ 运行</button>
+        <span class="hint" id="metricTestHint"></span>
+      </div>
+      <div id="metricTestResult" style="margin-top:8px"></div>
+    </div>
+  </div>
+
 </div>
 
 <!-- ================================================ -->
@@ -1228,6 +1546,17 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <optgroup label="设备类">
           <option value="device_history">设备开关记录</option>
           <option value="device_entities">🗂 设备实体清单（entity_id/name/room）</option>
+          <option value="device_last_used">🕘 近期使用设备（每个实体最近一次使用）</option>
+        </optgroup>
+        <optgroup label="家庭洞察">
+          <option value="timeline">🕘 统一事件流（设备/操作/自动化…合并时间线）</option>
+          <option value="room_occupancy">🏠 房间占用排行（有人时长 + 门户事件）</option>
+        </optgroup>
+        <optgroup label="📊 通用指标（元数据驱动）">
+          <option value="metrics_catalog">📊 指标目录（可用 metric_id 清单）</option>
+          <option value="metrics_query">📊 通用指标查询（按 metric_id 执行）</option>
+        </optgroup>
+        <optgroup label="设备类（续）">
           <option value="entity_daily_by_year">📈 实体按日用电（指定年）</option>
           <option value="entity_daily_all">📈 实体按日用电（全部）</option>
           <option value="entities_daily_flat">📈 全部实体按月按日（平铺）</option>
@@ -1435,6 +1764,71 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <label style="font-size:13px;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="attribute" onchange="generateApiUrl()"> 属性提取</label>
       </div>
     </div>
+    <!-- 通用指标查询（metrics_query）：指标选择 + 分组/聚合/排序覆盖 -->
+    <div id="apiMetricsOptsWrap" style="display:none;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <div>
+        <label>指标（metric_id）</label>
+        <div style="display:flex;gap:4px;align-items:center">
+          <select id="apiMetricId" onchange="onApiMetricChange()" style="min-width:280px"></select>
+          <button type="button" class="apiMiniBtn" onclick="refreshApiMetricOptions()"
+                  title="重新加载指标目录（在「📊 指标管理」新增/修改/停用指标后点此刷新）">🔄</button>
+        </div>
+      </div>
+      <div style="flex:1 1 100%">
+        <span class="hint" id="apiMetricInfo"></span>
+      </div>
+      <div>
+        <label>分组（group_by，留空=指标默认）</label>
+        <select id="apiMetricGroupBy" onchange="generateApiUrl()">
+          <option value="">（默认）</option>
+          <option value="none">none 不分组</option>
+          <option value="day">day 按天</option>
+          <option value="hour">hour 按小时</option>
+          <option value="month">month 按月</option>
+          <option value="year">year 按年</option>
+          <option value="entity">entity 按实体</option>
+          <option value="room">room 按房间</option>
+          <option value="name">name 按名称</option>
+        </select>
+      </div>
+      <div>
+        <label>聚合（agg，留空=指标默认）</label>
+        <select id="apiMetricAgg" onchange="generateApiUrl()">
+          <option value="">（默认）</option>
+          <option value="avg">avg</option>
+          <option value="sum">sum</option>
+          <option value="max">max</option>
+          <option value="min">min</option>
+          <option value="count">count</option>
+          <option value="count_distinct">count_distinct</option>
+        </select>
+      </div>
+      <div>
+        <label>排序（order）</label>
+        <select id="apiMetricOrder" onchange="generateApiUrl()">
+          <option value="">（自动）</option>
+          <option value="asc">asc 升序</option>
+          <option value="desc">desc 降序</option>
+        </select>
+      </div>
+    </div>
+    <!-- 指标目录（metrics_catalog）：分类 / 关键字 / 是否含停用 -->
+    <div id="apiMetricsCatalogOptsWrap" style="display:none;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <div>
+        <label>分类（category，留空=全部）</label>
+        <select id="apiMetricCat" onchange="generateApiUrl()"><option value="">（全部）</option></select>
+      </div>
+      <div>
+        <label>关键字（metric_id / 名称 / 说明）</label>
+        <input type="text" id="apiMetricKw" placeholder="如 temperature、用电" oninput="generateApiUrl()">
+      </div>
+      <div>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+               title="默认只返回启用中的指标；勾选后可查看已停用的指标">
+          <input type="checkbox" id="apiMetricIncludeDisabled" onchange="generateApiUrl()"> 含已停用
+        </label>
+      </div>
+    </div>
     <div id="apiYearRow" style="display:none">
       <label>年份 (YYYY)</label>
       <input type="number" id="apiYear" min="2020" max="2099" placeholder="2026" onchange="generateApiUrl()">
@@ -1485,8 +1879,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="apiEntitiesAggRow" style="display:none" class="full">
       <label id="apiEntitiesAggLabel">多实体接口（entities 逗号分隔，留空 = 全部；时间段可选）</label>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;width:100%">
-        <div style="flex:1 1 220px">
-          <label>实体ID(逗号分隔)</label>
+        <div id="apiMultiEntitiesWrap" style="flex:1 1 220px">
+          <label id="apiMultiEntitiesLabel">实体ID(逗号分隔)</label>
           <input type="text" id="apiMultiEntities" placeholder="switch.a,switch.b（留空=全部）" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px" oninput="generateApiUrl()">
         </div>
         <div id="apiAggBucketWrap" style="display:none">
@@ -1536,6 +1930,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <label>时间模式</label>
           <select id="apiMultiTimeMode" onchange="onMultiTimeModeChange()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
             <option value="all">全部时间</option>
+            <option value="window" data-for="device_last_used" style="display:none">最近 N 天（窗口）</option>
             <option value="range">时间段</option>
             <option value="date">指定日</option>
             <option value="month">指定月</option>
@@ -1554,6 +1949,10 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <div id="apiMultiTimeMonthWrap" style="display:none">
             <label>月</label>
             <input type="text" id="apiMultiTimeMonth" placeholder="9" onchange="generateApiUrl()" style="width:60px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div id="apiMultiTimeWindowWrap" style="display:none">
+            <label>天数（留空=用设置实体）</label>
+            <input type="text" id="apiMultiTimeWindowDays" placeholder="30" onchange="generateApiUrl()" style="width:110px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
           </div>
         </div>
 
@@ -1600,6 +1999,93 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
                    title="返回 summary 合计节点：全局总计 + 每个实体的合计（次数/时长/用电），不受分页影响。取消勾选可减小响应体积">
               <input type="checkbox" id="apiDevSummary" onchange="generateApiUrl()" checked>
               返回合计节点（summary）
+            </label>
+          </div>
+        </div>
+        <!-- 近期使用设备（device_last_used）：过滤开关 / 只看运行中 / 返回明细
+             （窗口天数已并入上方「时间模式 → 最近 N 天（窗口）」，二者互斥） -->
+        <div id="apiRecentOptsWrap" style="display:none;gap:12px;align-items:flex-end;flex-wrap:wrap">
+          <div>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+                   title="勾选（默认）= 应用 db_viewer「近期使用设备」中保存的排除项；取消勾选 = 不做排除过滤，返回全部设备">
+              <input type="checkbox" id="apiRecentExcludeFilter" onchange="generateApiUrl()" checked>
+              应用排除项过滤
+            </label>
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+                   title="只返回当前正在运行的设备（最新记录已开未关）">
+              <input type="checkbox" id="apiRecentRunning" onchange="generateApiUrl()">
+              只看正在运行
+            </label>
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+                   title="勾选返回 items 明细（含 count/duration/energy 等）；取消勾选只返回 entities 唯一值列表">
+              <input type="checkbox" id="apiRecentDetail" onchange="generateApiUrl()" checked>
+              返回明细 items
+            </label>
+          </div>
+        </div>
+
+        <!-- 家庭洞察：timeline（统一事件流）参数 -->
+        <div id="apiTlWrap" style="display:none;gap:10px;align-items:flex-end;flex-wrap:wrap;width:100%">
+          <div>
+            <label>来源（不勾选 = 全部）</label>
+            <div id="apiTlSources" style="display:flex;gap:10px;flex-wrap:wrap;font-size:12px;padding-top:4px">
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="device" onchange="generateApiUrl()">设备</label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="user_action" onchange="generateApiUrl()">用户操作</label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="automation" onchange="generateApiUrl()">自动化</label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="vacuum" onchange="generateApiUrl()">扫地机</label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="xiaoai" onchange="generateApiUrl()">小爱</label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="health" onchange="generateApiUrl()">健康</label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" value="printer" onchange="generateApiUrl()">打印机</label>
+            </div>
+          </div>
+          <div>
+            <label>设备事件</label>
+            <select id="apiTlEvents" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+              <option value="">开启 + 关闭</option>
+              <option value="on">仅开启</option>
+              <option value="off">仅关闭</option>
+            </select>
+          </div>
+          <div>
+            <label>关键词（设备名 / 操作 / 自动化 / 小爱文本…）</label>
+            <input type="text" id="apiTlKeyword" placeholder="可选" oninput="generateApiUrl()" style="width:200px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div>
+            <label>返回条数上限（默认 500）</label>
+            <input type="text" id="apiTlLimit" placeholder="500" onchange="generateApiUrl()" style="width:90px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+        </div>
+
+        <!-- 家庭洞察：room_occupancy（房间占用排行）参数 -->
+        <div id="apiRoWrap" style="display:none;gap:10px;align-items:flex-end;flex-wrap:wrap;width:100%">
+          <div>
+            <label>房间（逗号分隔，留空 = 全部）</label>
+            <input type="text" id="apiRoRooms" placeholder="客厅,主卧" oninput="generateApiUrl()" style="width:180px;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+          </div>
+          <div>
+            <label>分解粒度</label>
+            <select id="apiRoBucket" onchange="generateApiUrl()" style="padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+              <option value="none">不分解</option>
+              <option value="day">按日序列</option>
+              <option value="hour">24 小时分布（单日）</option>
+            </select>
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+                   title="无数据的房间也返回 0（房间清单取自设备配置表）">
+              <input type="checkbox" id="apiRoIncludeEmpty" onchange="generateApiUrl()">
+              含无数据房间
+            </label>
+          </div>
+          <div>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap"
+                   title="附带入户门开启/关闭事件与开合统计">
+              <input type="checkbox" id="apiRoDoor" onchange="generateApiUrl()" checked>
+              门户事件
             </label>
           </div>
         </div>
@@ -1982,6 +2468,67 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="bldRoot"></div>
   </div>
   </div>
+
+  <!-- 🧩 接口管理（新接口）面板 —— 新增/修改接口无需重启 HA -->
+  <div id="apisub-ext" class="api-sub-panel">
+    <style>
+      #apisub-ext input, #apisub-ext select, #apisub-ext textarea, #apisub-ext button {
+        min-width: 0; box-sizing: border-box;
+      }
+      #extTable th, #extTable td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12px; text-align: left; vertical-align: middle; }
+      #extTable th { color: var(--text2); font-weight: 600; }
+      #extTable tr:hover { background: var(--bg); }
+      .ext-badge { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; border:1px solid var(--border); }
+      .ext-badge.on { color: var(--green); }
+      .ext-badge.off { color: var(--text3); }
+    </style>
+    <div class="section" style="margin-top:16px">
+      <h3>🧩 接口管理（新接口）</h3>
+      <div class="hint">
+        新接口统一走固定路由 <code>GET/POST /api/ha_data_store/ext/{接口名}</code>：定义存库、运行时加载，
+        <b>新增 / 修改 / 启停接口均无需重启 HA</b>（改 .py 后端逻辑仍需重启）。
+        <b>旧接口（自定义路由 / query 等）不在本模块内，保持原样。</b>
+        鉴权与现有接口完全一致（<code>api_enabled</code> + API Key + 局域网判断），未新增任何开关。
+      </div>
+
+      <div style="display:flex;gap:8px;margin:10px 0;align-items:center;flex-wrap:wrap">
+        <button class="btn-green" onclick="extNewForm()" style="padding:6px 14px">➕ 新建接口</button>
+        <button class="btn-accent" onclick="extLoadList()" style="padding:6px 14px">🔄 刷新列表</button>
+        <span id="extListStatus" style="font-size:12px;color:var(--text2)"></span>
+      </div>
+
+      <!-- 编辑表单 -->
+      <div id="extFormWrap" style="display:none;margin:10px 0;background:var(--bg);padding:12px;border-radius:6px;border:1px solid var(--border)">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label>接口名 name（URL 中使用，字母开头）</label>
+            <input type="text" id="extName" placeholder="如：device_hour_dist" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+          <div><label>显示名 title</label>
+            <input type="text" id="extTitle" placeholder="如：设备时段分布" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label>描述 description</label>
+            <input type="text" id="extDesc" placeholder="接口用途说明" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+          <div><label>最大返回行数 max_rows</label>
+            <input type="number" id="extMaxRows" value="1000" min="1" max="50000" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
+        </div>
+        <div style="margin-bottom:8px">
+          <label>接口定义 query_def（JSON，可在「查询构造器」里配好后复制过来）</label>
+          <textarea id="extQueryDef" placeholder='{"table":"device_history","filters":[...],"aggs":[...]}' style="width:100%;height:150px;padding:6px;font-family:monospace;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;resize:vertical"></textarea>
+        </div>
+        <div id="extParamsWrap" style="margin-bottom:8px"></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn-green" onclick="extSave()" style="padding:6px 14px">💾 保存（立即生效，无需重启）</button>
+          <button class="btn-accent" onclick="extTest()" style="padding:6px 14px">▶ 试运行</button>
+          <button onclick="extCancelForm()" style="padding:6px 12px">取消</button>
+          <span id="extFormStatus" style="font-size:12px;color:var(--text2)"></span>
+        </div>
+        <div id="extTestResult" style="margin-top:10px;display:none"></div>
+      </div>
+
+      <!-- 列表 -->
+      <div id="extListWrap" style="border:1px solid var(--border);border-radius:6px;overflow:auto;max-height:420px"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ================================================ -->
@@ -2144,66 +2691,6 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
   </div>
 </div>
 
-  <!-- 🧩 接口管理（新接口）面板 —— 新增/修改接口无需重启 HA -->
-  <div id="apisub-ext" class="api-sub-panel">
-    <style>
-      #apisub-ext input, #apisub-ext select, #apisub-ext textarea, #apisub-ext button {
-        min-width: 0; box-sizing: border-box;
-      }
-      #extTable th, #extTable td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12px; text-align: left; vertical-align: middle; }
-      #extTable th { color: var(--text2); font-weight: 600; }
-      #extTable tr:hover { background: var(--bg); }
-      .ext-badge { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; border:1px solid var(--border); }
-      .ext-badge.on { color: var(--green); }
-      .ext-badge.off { color: var(--text3); }
-    </style>
-    <div class="section" style="margin-top:16px">
-      <h3>🧩 接口管理（新接口）</h3>
-      <div class="hint">
-        新接口统一走固定路由 <code>GET/POST /api/ha_data_store/ext/{接口名}</code>：定义存库、运行时加载，
-        <b>新增 / 修改 / 启停接口均无需重启 HA</b>（改 .py 后端逻辑仍需重启）。
-        <b>旧接口（自定义路由 / query 等）不在本模块内，保持原样。</b>
-        鉴权与现有接口完全一致（<code>api_enabled</code> + API Key + 局域网判断），未新增任何开关。
-      </div>
-
-      <div style="display:flex;gap:8px;margin:10px 0;align-items:center;flex-wrap:wrap">
-        <button class="btn-green" onclick="extNewForm()" style="padding:6px 14px">➕ 新建接口</button>
-        <button class="btn-accent" onclick="extLoadList()" style="padding:6px 14px">🔄 刷新列表</button>
-        <span id="extListStatus" style="font-size:12px;color:var(--text2)"></span>
-      </div>
-
-      <!-- 编辑表单 -->
-      <div id="extFormWrap" style="display:none;margin:10px 0;background:var(--bg);padding:12px;border-radius:6px;border:1px solid var(--border)">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-          <div><label>接口名 name（URL 中使用，字母开头）</label>
-            <input type="text" id="extName" placeholder="如：device_hour_dist" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
-          <div><label>显示名 title</label>
-            <input type="text" id="extTitle" placeholder="如：设备时段分布" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-bottom:8px">
-          <div><label>描述 description</label>
-            <input type="text" id="extDesc" placeholder="接口用途说明" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
-          <div><label>最大返回行数 max_rows</label>
-            <input type="number" id="extMaxRows" value="1000" min="1" max="50000" style="width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px"></div>
-        </div>
-        <div style="margin-bottom:8px">
-          <label>接口定义 query_def（JSON，可在「查询构造器」里配好后复制过来）</label>
-          <textarea id="extQueryDef" placeholder='{"table":"device_history","filters":[...],"aggs":[...]}' style="width:100%;height:150px;padding:6px;font-family:monospace;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;resize:vertical"></textarea>
-        </div>
-        <div id="extParamsWrap" style="margin-bottom:8px"></div>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn-green" onclick="extSave()" style="padding:6px 14px">💾 保存（立即生效，无需重启）</button>
-          <button class="btn-accent" onclick="extTest()" style="padding:6px 14px">▶ 试运行</button>
-          <button onclick="extCancelForm()" style="padding:6px 12px">取消</button>
-          <span id="extFormStatus" style="font-size:12px;color:var(--text2)"></span>
-        </div>
-        <div id="extTestResult" style="margin-top:10px;display:none"></div>
-      </div>
-
-      <!-- 列表 -->
-      <div id="extListWrap" style="border:1px solid var(--border);border-radius:6px;overflow:auto;max-height:420px"></div>
-    </div>
-  </div>
 </div>
 
 <script>
@@ -2251,6 +2738,9 @@ let showAllTables = false;
 let currentSortCol = '';     // 当前排序列
 let currentSortDir = '';     // 排序方向: ASC / DESC
 let currentFilters = [];     // 当前筛选条件 [{col, op, val}]
+let currentTableData = null; // 当前表数据快照（用于字段显隐的本地重渲染）
+let currentAllCols = [];     // 当前表全部字段（不含 _rowid）
+const HIDDEN_COLS_KEY = 'hds_dbviewer_hidden_cols_v1';  // 各表隐藏字段，按表名记录
 const DB_API = '/api/ha_data_store/db_viewer/data';
 
 const FILTER_OPS = [
@@ -2738,6 +3228,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // 新接口（ext）：填充地址生成器的 ext 分组
     if (typeof extLoadIntoApi === 'function') extLoadIntoApi();
   }, 500);
+  // 静态表格也做一次增强（动态表格由 MutationObserver 兜底）
+  if (typeof enhanceTableWrapTables === 'function') enhanceTableWrapTables(document);
+  // 媒体播放列表角标：不打开子面板也要有数量
+  if (typeof loadMediaBadge === 'function') loadMediaBadge();
+  // 「🕘 近期使用设备」角标：显示排除项数量（负值），无需点开子面板
+  if (typeof loadRecentBadge === 'function') loadRecentBadge();
+  // 「📊 指标管理」角标：显示指标总数，无需点开子面板
+  if (typeof loadMetricsBadge === 'function') loadMetricsBadge();
 });
 
 // ==============================
@@ -2895,6 +3393,7 @@ async function loadTable(page) {
     currentFilters = [];
     document.getElementById('filterRows').innerHTML = '';
     document.getElementById('filterStatus').textContent = '';
+    closeColVisMenu();
   }
 
   content.innerHTML = '<div class="loading">加载中...</div>';
@@ -2927,50 +3426,11 @@ async function loadTable(page) {
     }
     document.getElementById('tableInfo').textContent = infoText;
 
-    if (!d.rows || d.rows.length === 0) {
-      content.innerHTML = '<div class="empty">该表无数据</div>';
+    if (!renderDbTable(d)) {
       document.getElementById('pagination').style.display = 'none';
       document.getElementById('filterBar').style.display = 'none';
       return;
     }
-
-    const allCols = d.columns || Object.keys(d.rows[0]);
-    const cols = allCols.filter(c => c !== '_rowid');  // 隐藏 _rowid 列
-    let html = '<div class="table-wrap"><table id="dataTable" onDblClick><thead><tr>';
-    html += '<th class="cb-col"><input type="checkbox" id="selectAllCb" onchange="toggleSelectAllRows(this)" title="全选/取消全选"></th>';
-    cols.forEach(c => {
-      let cls = 'sortable resizable';
-      let arrow = '';
-      if (c === currentSortCol) {
-        cls += currentSortDir === 'ASC' ? ' sorted-asc' : ' sorted';
-        arrow = currentSortDir === 'ASC' ? ' ▲' : ' ▼';
-      }
-      html += '<th class="' + cls + '" data-col="' + escAttr(c) + '" onclick="sortTable(this)">' + escHtml(c) + '<span class="sort-arrow">' + arrow + '</span></th>';
-    });
-    html += '<th style="width:60px">操作</th></tr></thead><tbody>';
-    d.rows.forEach(row => {
-      const rid = row._rowid;
-      html += '<tr data-rowid="' + rid + '">';
-      html += '<td class="cb-col"><input type="checkbox" class="row-cb" data-rowid="' + rid + '" onchange="onRowCheckboxChange(this)"></td>';
-      cols.forEach(c => {
-        let v = row[c];
-        let display;
-        if (v === null || v === undefined) display = '<span style="color:#666">NULL</span>';
-        else if (typeof v === 'number') display = String(v);
-        else display = escHtml(String(v));
-        html += '<td class="editable" data-rowid="' + rid + '" data-col="' + escAttr(c) + '" data-orig="' + escAttr(v === null || v === undefined ? '__NULL__' : String(v)) + '" title="双击编辑 | ' + escAttr(String(row[c]??'')) + '">' + display + '</td>';
-      });
-      html += '<td><button class="btn-del" data-rowid="' + rid + '" onclick="deleteRow(event)">删除</button></td>';
-      html += '</tr>';
-    });
-    html += '</tbody></table></div>';
-    content.innerHTML = html;
-    // 显示筛选栏（必须在渲染后调用）
-    showFilterBar();
-    // 绑定双击编辑事件
-    bindDblClickEdit(d.table);
-    // 绑定列宽拖拽
-    initColResize();
 
     document.getElementById('pagination').style.display = 'flex';
     document.getElementById('pageInfo').textContent =
@@ -2984,6 +3444,230 @@ async function loadTable(page) {
     document.getElementById('pagination').style.display = 'none';
     document.getElementById('filterBar').style.display = 'none';
   }
+}
+
+// ==============================
+//  数据表渲染（字段显隐时可本地重渲染，不重新请求服务端）
+// ==============================
+function renderDbTable(d) {
+  const content = document.getElementById('dbContent');
+  currentTableData = d;
+  const tableName = d.table || '';
+
+  if (!d.rows || d.rows.length === 0) {
+    currentAllCols = [];
+    content.innerHTML = '<div class="empty">该表无数据</div>';
+    updateColVisButton();
+    return false;
+  }
+
+  const allCols = (d.columns || Object.keys(d.rows[0])).filter(c => c !== '_rowid');  // 隐藏 _rowid 列
+  currentAllCols = allCols;
+  const hidden = new Set(getHiddenCols(tableName));
+  const cols = allCols.filter(c => !hidden.has(c));
+
+  let html = '<div class="table-wrap"><table id="dataTable" onDblClick><thead><tr>';
+  html += '<th class="cb-col"><input type="checkbox" id="selectAllCb" onchange="toggleSelectAllRows(this)" title="全选/取消全选"></th>';
+  cols.forEach(c => {
+    let cls = 'sortable resizable';
+    let arrow = '';
+    if (c === currentSortCol) {
+      cls += currentSortDir === 'ASC' ? ' sorted-asc' : ' sorted';
+      arrow = currentSortDir === 'ASC' ? ' ▲' : ' ▼';
+    }
+    html += '<th class="' + cls + '" data-col="' + escAttr(c) + '" onclick="sortTable(this)">' + escHtml(c) + '<span class="sort-arrow">' + arrow + '</span></th>';
+  });
+  html += '<th style="width:60px">操作</th></tr></thead><tbody>';
+  d.rows.forEach(row => {
+    const rid = row._rowid;
+    html += '<tr data-rowid="' + rid + '">';
+    html += '<td class="cb-col"><input type="checkbox" class="row-cb" data-rowid="' + rid + '" onchange="onRowCheckboxChange(this)"></td>';
+    cols.forEach(c => {
+      let v = row[c];
+      let display;
+      if (v === null || v === undefined) display = '<span style="color:#666">NULL</span>';
+      else if (typeof v === 'number') display = String(v);
+      else display = escHtml(String(v));
+      html += '<td class="editable" data-rowid="' + rid + '" data-col="' + escAttr(c) + '" data-orig="' + escAttr(v === null || v === undefined ? '__NULL__' : String(v)) + '" title="双击编辑 | ' + escAttr(String(row[c]??'')) + '">' + display + '</td>';
+    });
+    html += '<td><button class="btn-del" data-rowid="' + rid + '" onclick="deleteRow(event)">删除</button></td>';
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  content.innerHTML = html;
+  // 显示筛选栏（必须在渲染后调用）
+  showFilterBar();
+  // 绑定双击编辑事件
+  bindDblClickEdit(tableName);
+  // 绑定列宽拖拽
+  initColResize();
+  // 按内容自动分配各列宽度
+  autoFitColWidths();
+  updateColVisButton();
+  return true;
+}
+
+// ==============================
+//  按内容自动分配列宽
+// ==============================
+let _measureCanvas = null;
+function measureTextWidth(text, font) {
+  if (!_measureCanvas) _measureCanvas = document.createElement('canvas').getContext('2d');
+  _measureCanvas.font = font;
+  return _measureCanvas.measureText(text).width;
+}
+
+function autoFitColWidths() {
+  const table = document.getElementById('dataTable');
+  if (!table) return;
+  const wrap = table.parentNode;
+  const ths = Array.from(table.querySelectorAll('thead th'));
+  if (!ths.length) return;
+  const rows = Array.from(table.querySelectorAll('tbody tr'));
+
+  const cs = getComputedStyle(table);
+  const font = (cs.fontSize || '13px') + ' ' + (cs.fontFamily || 'sans-serif');
+
+  const PAD = 24;        // 单元格左右 padding 合计
+  const MIN_W = 70;      // 数据列最小宽度
+  const MAX_W = 300;     // 数据列最大宽度（与 td 的 max-width 一致）
+  const CB_W = 36;       // 复选框列
+  const OP_W = 64;       // 操作列
+
+  // 1) 逐列计算内容自然宽度（表头与所有单元格取最大值）
+  const widths = ths.map((th, i) => {
+    if (th.classList.contains('cb-col')) return CB_W;
+    if (!th.hasAttribute('data-col')) return OP_W;
+    let natural = measureTextWidth(th.textContent.replace(/[▲▼]/g, '').trim(), font) + PAD + 16;
+    for (const tr of rows) {
+      const td = tr.children[i];
+      if (!td) continue;
+      const w = measureTextWidth(td.textContent, font) + PAD;
+      if (w > natural) natural = w;
+    }
+    return Math.max(MIN_W, Math.min(MAX_W, Math.ceil(natural)));
+  });
+
+  const flexIdx = ths.map((th, i) => i).filter(i => ths[i].hasAttribute('data-col'));
+  const fixedSum = widths.reduce((a, w, i) => flexIdx.indexOf(i) >= 0 ? a : a + w, 0);
+  const avail = Math.max((wrap.clientWidth || 800) - 2, 400);
+
+  // 2) 空间富余时按比例放大，让表格铺满容器
+  let dataSum = flexIdx.reduce((a, i) => a + widths[i], 0);
+  if (dataSum > 0 && fixedSum + dataSum < avail) {
+    const scale = (avail - fixedSum) / dataSum;
+    flexIdx.forEach(i => { widths[i] = Math.min(MAX_W, Math.round(widths[i] * scale)); });
+    dataSum = flexIdx.reduce((a, i) => a + widths[i], 0);
+  }
+
+  // 3) 内容超宽则以实际总宽渲染（横向滚动），否则铺满容器
+  const total = fixedSum + dataSum;
+  table.style.width = (total > avail ? total : avail) + 'px';
+  ths.forEach((th, i) => { th.style.width = widths[i] + 'px'; });
+  // 清掉拖拽残留的行内宽度，避免与自动布局冲突
+  rows.forEach(tr => Array.from(tr.children).forEach(td => { td.style.width = ''; }));
+}
+
+// ==============================
+//  字段显示 / 隐藏
+// ==============================
+function getHiddenColsMap() {
+  try { return JSON.parse(localStorage.getItem(HIDDEN_COLS_KEY) || '{}') || {}; }
+  catch(e) { return {}; }
+}
+function getHiddenCols(tableName) {
+  if (!tableName) return [];
+  const v = getHiddenColsMap()[tableName];
+  return Array.isArray(v) ? v : [];
+}
+function setHiddenCols(tableName, arr) {
+  const m = getHiddenColsMap();
+  if (arr && arr.length) m[tableName] = arr; else delete m[tableName];
+  try { localStorage.setItem(HIDDEN_COLS_KEY, JSON.stringify(m)); } catch(e) {}
+}
+
+function updateColVisButton() {
+  const btn = document.getElementById('btnColVis');
+  if (!btn) return;
+  const tableName = document.getElementById('tableSelect').value;
+  const n = currentAllCols.filter(c => getHiddenCols(tableName).indexOf(c) >= 0).length;
+  btn.textContent = n > 0 ? '👁 显示字段 (' + n + ' 隐藏)' : '👁 显示字段';
+  btn.style.background = n > 0 ? '#8e44ad' : '#34495e';
+  btn.style.borderColor = n > 0 ? '#8e44ad' : '#34495e';
+}
+
+function toggleColVisMenu(ev) {
+  if (ev) ev.stopPropagation();
+  const menu = document.getElementById('colVisMenu');
+  if (!menu) return;
+  if (menu.classList.contains('open')) { closeColVisMenu(); return; }
+  renderColVisMenu();
+  menu.classList.add('open');
+  document.addEventListener('click', onColVisOutsideClick, true);
+}
+
+function closeColVisMenu() {
+  const menu = document.getElementById('colVisMenu');
+  if (menu) menu.classList.remove('open');
+  document.removeEventListener('click', onColVisOutsideClick, true);
+}
+
+function onColVisOutsideClick(e) {
+  const wrap = document.getElementById('colVisWrap');
+  if (wrap && wrap.contains(e.target)) return;
+  closeColVisMenu();
+}
+
+function renderColVisMenu() {
+  const menu = document.getElementById('colVisMenu');
+  if (!menu) return;
+  if (!currentAllCols.length) {
+    menu.innerHTML = '<div class="colvis-empty">请先选择一个有数据的数据表</div>';
+    return;
+  }
+  const tableName = document.getElementById('tableSelect').value;
+  const hidden = getHiddenCols(tableName);
+  let h = '<div class="colvis-title">勾选要显示的字段（共 ' + currentAllCols.length + ' 列，已隐藏 ' + hidden.length + ' 列）</div>';
+  currentAllCols.forEach(c => {
+    const on = hidden.indexOf(c) < 0;
+    h += '<label class="colvis-item"><input type="checkbox" value="' + escAttr(c) + '"' + (on ? ' checked' : '') +
+         ' onchange="onColVisChange(this)"><span title="' + escAttr(c) + '">' + escHtml(c) + '</span></label>';
+  });
+  h += '<div class="colvis-actions">' +
+       '<button onclick="setAllColVis(true)">全选</button>' +
+       '<button onclick="setAllColVis(false)">全不选</button>' +
+       '<button onclick="resetColVis()">恢复默认</button></div>';
+  menu.innerHTML = h;
+}
+
+function onColVisChange(cb) {
+  const tableName = document.getElementById('tableSelect').value;
+  if (!tableName) return;
+  const hidden = getHiddenCols(tableName).filter(c => c !== cb.value);
+  if (!cb.checked) hidden.push(cb.value);
+  setHiddenCols(tableName, hidden);
+  applyColVisLocal(tableName);
+}
+
+function setAllColVis(show) {
+  const tableName = document.getElementById('tableSelect').value;
+  if (!tableName) return;
+  setHiddenCols(tableName, show ? [] : currentAllCols.slice());
+  applyColVisLocal(tableName);
+}
+
+function resetColVis() {
+  const tableName = document.getElementById('tableSelect').value;
+  if (!tableName) return;
+  setHiddenCols(tableName, []);
+  applyColVisLocal(tableName);
+}
+
+// 用已缓存的数据本地重渲染 + 刷新下拉勾选状态
+function applyColVisLocal(tableName) {
+  if (currentTableData) renderDbTable(currentTableData);
+  updateColVisButton();
+  renderColVisMenu();
 }
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -3042,6 +3726,108 @@ function sortTable(th) {
 }
 
 // ==============================
+//  .table-wrap 通用增强：表头点击排序 + 列宽按内容自适应
+// ==============================
+const _enhancedTables = new WeakSet();   // 已增强过的表格，避免重复处理
+
+// 文本比较：数字比大小，其余按字典序（ISO 时间串可直接比较）
+function _cmpCellText(a, b) {
+  const sa = (a || '').trim(), sb = (b || '').trim();
+  const na = sa === '' ? NaN : Number(sa.replace(/,/g, ''));
+  const nb = sb === '' ? NaN : Number(sb.replace(/,/g, ''));
+  if (!isNaN(na) && !isNaN(nb)) return na - nb;
+  if (!isNaN(na) !== !isNaN(nb)) return !isNaN(na) ? -1 : 1;   // 数字排在非数字之前
+  return sa.localeCompare(sb, 'zh');
+}
+
+// 点击表头：正序 → 倒序 → 恢复原始顺序
+function sortTableByHeader(th) {
+  const table = th.closest('table');
+  const tbody = table && table.tBodies[0];
+  if (!tbody) return;
+  const idx = Array.prototype.indexOf.call(th.parentNode.children, th);
+  // 首次点击（或表体被重新渲染）时记录原始顺序
+  if (!table._origOrder || table._origOrder.some(tr => tr.parentNode !== tbody)) {
+    table._origOrder = Array.from(tbody.rows);
+  }
+
+  const dir = th.dataset.sortDir === 'asc' ? 'desc' : (th.dataset.sortDir === 'desc' ? '' : 'asc');
+  th.parentNode.querySelectorAll('th').forEach(x => {
+    delete x.dataset.sortDir;
+    x.classList.remove('sorted', 'sorted-asc');
+    const a = x.querySelector('.sort-arrow');
+    if (a) a.textContent = a.dataset.idle || '';
+  });
+  th.dataset.sortDir = dir;
+
+  const rows = Array.from(tbody.rows);
+  if (dir === '') {
+    table._origOrder.forEach(tr => tbody.appendChild(tr));          // 恢复原始顺序
+  } else {
+    const sign = dir === 'asc' ? 1 : -1;
+    rows.sort((r1, r2) => {
+      const c1 = r1.cells[idx], c2 = r2.cells[idx];
+      return sign * _cmpCellText(c1 ? c1.textContent : '', c2 ? c2.textContent : '');
+    });
+    rows.forEach(tr => tbody.appendChild(tr));
+  }
+
+  const arrow = th.querySelector('.sort-arrow');
+  if (arrow) arrow.textContent = dir === 'asc' ? '▲' : (dir === 'desc' ? '▼' : (arrow.dataset.idle || ''));
+  th.classList.toggle('sorted-asc', dir === 'asc');
+  th.classList.toggle('sorted', dir === 'desc');
+  th.title = dir === 'asc' ? '升序，点击切换倒序' : (dir === 'desc' ? '倒序，点击恢复原顺序' : '点击排序');
+}
+
+// 遍历所有 .table-wrap 里的表格：只读数据表 → 可排序 + 列宽自适应
+function enhanceTableWrapTables(root) {
+  (root || document).querySelectorAll('.table-wrap > table').forEach(table => {
+    if (_enhancedTables.has(table)) return;
+    const thead = table.tHead, tbody = table.tBodies[0];
+    if (!thead || !thead.rows.length || !tbody || !tbody.rows.length) return;  // 数据未就绪，留待下次
+    _enhancedTables.add(table);
+    if (tbody.querySelector('td[colspan]')) return;                 // 空结果占位行
+    if (table.id === 'dataTable' || thead.querySelector('th[data-col]')) return;  // 已有服务端排序 + 拖拽
+
+    // 列宽按内容自适应
+    table.classList.add('auto-fit');
+
+    // 录入类表格（行内含文本框/下拉/文本域）不排序，避免干扰输入
+    if (tbody.querySelector('input:not([type="checkbox"]):not([type="radio"]), select, textarea')) return;
+
+    const ths = Array.from(thead.rows[0].cells);
+    ths.forEach(th => {
+      // 含勾选框/按钮的表头不参与排序
+      if (th.querySelector('input, select, textarea, button')) return;
+      th.classList.add('sortable', 'auto-sort');
+      th.title = '点击排序';
+      const a = document.createElement('span');
+      a.className = 'sort-arrow';
+      a.dataset.idle = '⇅';
+      a.textContent = '⇅';
+      th.appendChild(a);
+      th.addEventListener('click', () => sortTableByHeader(th));
+    });
+  });
+}
+
+// 内容被省略号截断时，悬停显示完整内容
+document.addEventListener('mouseover', e => {
+  const td = e.target && e.target.closest && e.target.closest('.table-wrap td');
+  if (!td || td.title) return;
+  if (td.scrollWidth > td.clientWidth + 1) td.title = td.textContent.trim();
+}, true);
+
+// 表格都是 innerHTML 动态渲染的，用 MutationObserver 统一兜底增强
+if (typeof MutationObserver !== 'undefined') {
+  let _enhTimer = null;
+  new MutationObserver(() => {
+    if (_enhTimer) return;
+    _enhTimer = setTimeout(() => { _enhTimer = null; enhanceTableWrapTables(document); }, 60);
+  }).observe(document.body, { childList: true, subtree: true });
+}
+
+// ==============================
 //  列宽拖拽
 // ==============================
 let _resizeTh = null;
@@ -3073,6 +3859,8 @@ function onResizeStart(e) {
   _resizing = true;
   _resizeStartX = e.clientX;
   _resizeStartW = th.getBoundingClientRect().width;
+  const tbl = th.closest('table');
+  _resizeStartTableW = tbl ? tbl.getBoundingClientRect().width : 0;
   th.classList.add('resizing');
   document.body.classList.add('col-resizing');
   document.addEventListener('mousemove', onResizeMove);
@@ -3087,6 +3875,8 @@ function onResizeMove(e) {
   // 同步该列表格首行 td 宽度（table-layout:fixed 下 th 宽度即可，这里保险同步）
   const table = _resizeTh.closest('table');
   if (table) {
+    // 表格总宽同步增减，避免拖宽某一列时挤压其它列
+    if (_resizeStartTableW > 0) table.style.width = Math.max(200, _resizeStartTableW + delta) + 'px';
     const idx = Array.prototype.indexOf.call(_resizeTh.parentNode.children, _resizeTh);
     const rows = table.querySelectorAll('tbody tr');
     rows.forEach(r => {
@@ -3286,8 +4076,17 @@ function startEdit(td) {
   td.classList.add('editing');
   const orig = td.getAttribute('data-orig');
   const displayVal = orig === '__NULL__' ? '' : orig;
-  td.innerHTML = '<input value="' + escAttr(displayVal) + '"><button class="btn-save" onclick="saveEdit(this.closest(\'td\'))">保存</button><button class="btn-cancel" onclick="cancelEdit(this.closest(\'td\'))">取消</button>';
+  td.innerHTML = '<div class="edit-box"><input value="' + escAttr(displayVal) + '">' +
+                 '<button class="btn-save" onclick="saveEdit(this.closest(\'td\'))">保存</button>' +
+                 '<button class="btn-cancel" onclick="cancelEdit(this.closest(\'td\'))">取消</button></div>';
   const inp = td.querySelector('input');
+  const box = td.querySelector('.edit-box');
+  // 浮层若超出表格容器右边界则改为向左展开，保证按钮始终可见可点
+  const wrap = td.closest('.table-wrap');
+  if (box && wrap) {
+    const br = box.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+    if (br.right > wr.right - 2) { box.style.left = 'auto'; box.style.right = '0'; }
+  }
   inp.focus();
   inp.select();
   // 回车保存, ESC 取消
@@ -3503,10 +4302,11 @@ function statusBadge(status, stateLabel) {
   return '<span class="badge ' + m[0] + '" style="font-size:11px;padding:1px 8px">' + escHtml(m[1]) + '</span>';
 }
 
+// 子选项卡角标：支持负值（如 -5 表示"排除 5 个"，供「🕘 近期使用设备」显示排除项数量）
 function setSubTabBadge(id, count) {
   const el = document.getElementById('badge-' + id);
   if (!el) return;
-  if (count > 0) {
+  if (count) {
     el.textContent = count;
     el.classList.add('show');
   } else {
@@ -3525,6 +4325,142 @@ async function fetchBatchStates(entityIds) {
     const json = await resp.json();
     return json.success ? (json.data || {}) : {};
   } catch(e) { return {}; }
+}
+
+// summary 卡片 key → 监控区块标题（点击卡片定位下方对应区块用）
+const MONITOR_SEC_LABELS = {
+  device: '📡 设备类', environment: '🌡️ 传感器类', attribute: '📊 属性提取',
+  export: '📁 实体→json', file_source: '📄 json→实体', api_source: '🌐 API→实体',
+  push_target: '🌐 实体→网络', xiaoai: '💬 小爱对话', bridge: '🌉 桥接设备',
+  virtual: '🔮 虚拟设备', helper: '🧩 辅助元素',   power: '⚡ 用电计量', printer: '🖨️ 打印机',
+  media: '🎵 媒体播放列表', recent: '🕘 最近使用设备', metrics: '📊 指标管理',
+};
+
+// 给区块标题标注 data-sec（按标题文字匹配，忽略图标/角标/统计数字的差异）
+function _monitorSecKey(head) {
+  if (!head) return '';
+  const cached = head.getAttribute('data-sec');
+  if (cached) return cached;
+  const norm = s => (s || '').replace(/[^\u4e00-\u9fa5A-Za-z0-9→]/g, '');
+  const txt = norm(head.textContent);
+  for (const k in MONITOR_SEC_LABELS) {
+    if (txt.startsWith(norm(MONITOR_SEC_LABELS[k]))) { head.setAttribute('data-sec', k); return k; }
+  }
+  return '';
+}
+
+// 折叠所有已展开的区块（except 之外的都折叠）
+function _collapseMonitorSections(except) {
+  const content = document.getElementById('monitorContent');
+  if (!content) return;
+  content.querySelectorAll('.section-head').forEach(h => {
+    if (except && h === except) return;
+    const b = h.nextElementSibling;
+    if (b && b.classList.contains('section-content') && !b.classList.contains('collapsed')) {
+      b.classList.add('collapsed');
+      h.classList.remove('expanded');
+    }
+  });
+}
+
+// 取某 key 对应的区块内容容器（section-content），未渲染/不存在返回 null
+function _monitorSectionBody(key) {
+  const content = document.getElementById('monitorContent');
+  if (!content || !key) return null;
+  let head = content.querySelector('.section-head[data-sec="' + key + '"]');
+  if (!head) head = Array.from(content.querySelectorAll('.section-head')).find(h => _monitorSecKey(h) === key);
+  const b = head && head.nextElementSibling;
+  return (b && b.classList.contains('section-content')) ? b : null;
+}
+
+// 按区块展开状态同步 summary 卡片的高亮（.sec-open）
+function syncSummaryCardState() {
+  const summary = document.getElementById('monitorSummary');
+  if (!summary) return;
+  summary.querySelectorAll('.summary-card').forEach(card => {
+    const b = _monitorSectionBody(card.getAttribute('data-target'));
+    card.classList.toggle('sec-open', !!b && !b.classList.contains('collapsed'));
+  });
+}
+
+// 点击 summary 卡片 → 展开下方 monitorContent 中对应区块并滚动定位；
+// 再次点击已展开的卡片 → 折叠；切换到其它卡片时自动折叠上一个（同时只展开一个）
+function expandMonitorSection(key, retried) {
+  closeIssueBubble();
+  const content = document.getElementById('monitorContent');
+  if (!content) return;
+  let head = content.querySelector('.section-head[data-sec="' + key + '"]');
+  if (!head) {
+    content.querySelectorAll('.section-head').forEach(h => { if (!head && _monitorSecKey(h) === key) head = h; });
+  }
+  if (!head) {
+    // 监控数据可能还在加载，稍后重试一次
+    if (!retried) setTimeout(() => expandMonitorSection(key, true), 800);
+    return;
+  }
+  const body = head.nextElementSibling;
+  const isSection = !!(body && body.classList.contains('section-content'));
+  const wasOpen = isSection && !body.classList.contains('collapsed');
+  // 先折叠其它已展开的区块（保证同时只开一个）
+  _collapseMonitorSections(head);
+  if (wasOpen) {
+    // 再次点击同一个卡片 → 折叠，不再滚动
+    body.classList.add('collapsed');
+    head.classList.remove('expanded');
+    if (window._secFlashHead) window._secFlashHead.classList.remove('flash');
+    window._secFlashHead = null;
+    clearTimeout(window._secFlashTimer);
+    syncSummaryCardState();
+    return;
+  }
+  if (isSection) {
+    body.classList.remove('collapsed');
+    head.classList.add('expanded');
+  }
+  syncSummaryCardState();
+  // 高亮提示当前展开的区块
+  if (window._secFlashHead) window._secFlashHead.classList.remove('flash');
+  window._secFlashHead = head;
+  head.classList.add('flash');
+  clearTimeout(window._secFlashTimer);
+  window._secFlashTimer = setTimeout(() => {
+    if (window._secFlashHead) window._secFlashHead.classList.remove('flash');
+  }, 1300);
+  // 滚动到区块（留出顶部 sticky 头部的空间）
+  const top = head.getBoundingClientRect().top + window.scrollY - 96;
+  window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+}
+
+// 把区块标题（section-head）右侧的健康徽标 + 统计数字，同步到 summary 卡片的第三行（lbl 下方）
+function syncSummarySub(key, head) {
+  const card = document.querySelector('#monitorSummary .summary-card[data-target="' + key + '"]');
+  if (!card) return;
+  const holder = card.querySelector('.card-sub');
+  if (!holder) return;
+  if (!head) {
+    const content = document.getElementById('monitorContent');
+    if (!content) return;
+    head = content.querySelector('.section-head[data-sec="' + key + '"]');
+    if (!head) head = Array.from(content.querySelectorAll('.section-head')).find(h => _monitorSecKey(h) === key);
+  }
+  if (!head) return;
+  holder.innerHTML = '';
+  Array.from(head.children).forEach(el => {
+    const c = el.cloneNode(true);
+    c.removeAttribute('id');       // 避免与区块标题里的元素 id 重复
+    c.style.fontSize = '10px';     // 适配卡片宽度（覆盖标题行的内联字号）
+    if (c.classList.contains('badge')) c.style.padding = '0 5px';
+    holder.appendChild(c);
+  });
+  holder.style.display = holder.children.length ? '' : 'none';
+}
+
+// 从监控页「📊 指标管理」区块跳转到「系统配置 → 📊 指标管理」子页
+function gotoMetricsManage() {
+  if (typeof switchTab === 'function') switchTab('manage');
+  const btn = document.querySelector('.sub-tab-btn[onclick*="\'metrics\'"]');
+  if (btn) btn.click();
+  else if (typeof switchSubTab === 'function') switchSubTab('metrics');
 }
 
 async function loadMonitor() {
@@ -3547,23 +4483,49 @@ async function loadMonitor() {
     const apiSrc = d.api_sources || [];
     const types = d.types || {};
 
-    // summary cards with corner health dot
-    const healthCls = {good:'good', warn:'warn', bad:'bad'};
-    function makeCard(key, label) {
-      let h = (types[key]||{}).health||'good';
-      return '<div class="summary-card c-online"><div class="health-dot ' + (healthCls[h]||'good') + '"></div><div class="num">' + ((types[key]||{}).count||0) + '</div><div class="lbl">' + label + '</div></div>';
+    // 各分类的问题数（与后端 health 判定口径一致）
+    const issues = [
+      ['📡 设备类', (types.device||{}).unavailable||0],
+      ['🌡️ 传感器类', (types.environment||{}).unavailable||0],
+      ['📊 属性提取', (types.attribute||{}).unavailable||0],
+      ['📁 实体→json', (types.export||{}).bad||0],
+      ['📄 json→实体', (types.file_source||{}).bad||0],
+      ['🌐 API→实体', (types.api_source||{}).bad||0],
+      ['🌐 实体→网络', (types.push_target||{}).bad||0],
+      ['💬 小爱对话', (types.xiaoai||{}).bad||0],
+      ['🖨️ 打印机', (types.printer||{}).bad||0],
+    ];
+    const issueMap = {};
+    issues.forEach(x => { issueMap[x[0]] = x[1]; });
+
+    // 异常明细（点击角标气泡展示）
+    window._issueDetails = buildIssueDetails(d);
+
+    // summary cards：有问题的分类在卡片右上角显示问题数徽标，无问题不显示
+    // 卡片整体点击 → 直接展开下方 monitorContent 中对应的区块并滚动定位（右上角角标仍为异常明细气泡）
+    function makeCard(key, label, id) {
+      const n = issueMap[label] || 0;
+      const pill = n > 0 ? '<span class="issue-pill bad" title="点击查看异常明细" data-issue="' + escAttr(key) +
+                            '" data-issue-label="' + escAttr(label) + '" onclick="showIssueBubble(event, this)">' + n + '</span>' : '';
+      return '<div class="summary-card c-online" data-target="' + escAttr(key) + '" title="点击展开下方对应内容"' +
+             ' onclick="expandMonitorSection(\'' + escAttr(key) + '\')"' + (id ? ' id="' + id + '"' : '') + '>' + pill +
+             '<div class="num">' + ((types[key]||{}).count||0) + '</div><div class="lbl">' + label + '</div>' +
+             '<div class="card-sub"></div></div>';
     }
     document.getElementById('monitorSummary').innerHTML =
       makeCard('device','📡 设备类') + makeCard('environment','🌡️ 传感器类') +
       makeCard('attribute','📊 属性提取') + makeCard('export','📁 实体→json') +
       makeCard('file_source','📄 json→实体') + makeCard('api_source','🌐 API→实体') +
       makeCard('push_target','🌐 实体→网络') +
-      '<div class="summary-card c-online" id="bridgeCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🌉 桥接设备</div></div>' +
-      '<div class="summary-card c-online" id="virtualCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🔮 虚拟设备</div></div>' +
-      '<div class="summary-card c-online" id="helperCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">🧩 辅助元素</div></div>' +
-      '<div class="summary-card c-online" id="powerCard"><div class="health-dot good"></div><div class="num">--</div><div class="lbl">⚡ 用电计量</div></div>' +
-      '<div class="summary-card c-online" id="xiaoaiCard"><div class="health-dot ' + (healthCls[(types.xiaoai||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.xiaoai||{}).count||0) + '</div><div class="lbl">💬 小爱对话</div></div>' +
-      '<div class="summary-card c-online" id="printerCard"><div class="health-dot ' + (healthCls[(types.printer||{}).health||'good']||'good') + '"></div><div class="num">' + ((types.printer||{}).count||0) + '</div><div class="lbl">🖨️ 打印机</div></div>';
+      '<div class="summary-card c-online" id="bridgeCard" data-target="bridge" title="点击展开下方对应内容" onclick="expandMonitorSection(\'bridge\')"><div class="num">--</div><div class="lbl">🌉 桥接设备</div><div class="card-sub"></div></div>' +
+      '<div class="summary-card c-online" id="virtualCard" data-target="virtual" title="点击展开下方对应内容" onclick="expandMonitorSection(\'virtual\')"><div class="num">--</div><div class="lbl">🔮 虚拟设备</div><div class="card-sub"></div></div>' +
+      '<div class="summary-card c-online" id="helperCard" data-target="helper" title="点击展开下方对应内容" onclick="expandMonitorSection(\'helper\')"><div class="num">--</div><div class="lbl">🧩 辅助元素</div><div class="card-sub"></div></div>' +
+      '<div class="summary-card c-online" id="powerCard" data-target="power" title="点击展开下方对应内容" onclick="expandMonitorSection(\'power\')"><div class="num">--</div><div class="lbl">⚡ 用电计量</div><div class="card-sub"></div></div>' +
+      makeCard('xiaoai','💬 小爱对话','xiaoaiCard') +
+      makeCard('printer','🖨️ 打印机','printerCard') +
+      makeCard('recent','🕘 最近使用设备','recentCard') +
+      makeCard('metrics','📊 指标管理','metricsCard') +
+      '<div class="summary-card c-online" id="mediaCard" data-target="media" title="点击展开下方对应内容" onclick="expandMonitorSection(\'media\')"><div class="num">--</div><div class="lbl">🎵 媒体播放列表</div><div class="card-sub"></div></div>';
 
     // 更新 sub-tab 角标
     setSubTabBadge('device', (types.device||{}).count||0);
@@ -3575,6 +4537,10 @@ async function loadMonitor() {
     setSubTabBadge('push', (types.push_target||{}).count||0);
     setSubTabBadge('xiaoai', (types.xiaoai||{}).count||0);
     setSubTabBadge('printer', (types.printer||{}).count||0);
+    // 「🕘 近期使用设备」角标 = 排除项数量的负值（如 -5 表示排除 5 个；0 时不显示）
+    setSubTabBadge('recent', -((types.recent||{}).exclude_count||0));
+    // 「📊 指标管理」角标 = 指标总数
+    setSubTabBadge('metrics', (types.metrics||{}).count||0);
 
     document.getElementById('monitorInfo').textContent = '刷新: ' + new Date().toLocaleTimeString();
 
@@ -3594,25 +4560,25 @@ async function loadMonitor() {
 
     // -- 设备类 --
     let dh = (types.device||{}).health||'good';
-    html += '<h4 class="section-head ' + (tc[dh]||'title-good') + '">📡 设备类 ' + healthBadge(dh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.device?types.device.online:0)+' <span class="stat-dot orange"></span>'+(types.device?types.device.offline:0)+' <span class="stat-dot red"></span>'+(types.device?types.device.unavailable:0)+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[dh]||'title-good') + '">📡 设备类 ' + healthBadge(dh) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.device?types.device.online:0)+' <span class="stat-dot orange"></span>'+(types.device?types.device.offline:0)+' <span class="stat-dot red"></span>'+(types.device?types.device.unavailable:0)+'</span></h4>';
     let dEnts = ents.filter(e => e.category === 'device');
     html += sectionContent(dEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildEntityTable(dEnts));
 
     // -- 传感器类 --
     let eh = (types.environment||{}).health||'good';
-    html += '<h4 class="section-head ' + (tc[eh]||'title-good') + '">🌡️ 传感器类 ' + healthBadge(eh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.environment?types.environment.online:0)+' <span class="stat-dot red"></span>'+(types.environment?types.environment.unavailable:0)+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[eh]||'title-good') + '">🌡️ 传感器类 ' + healthBadge(eh) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.environment?types.environment.online:0)+' <span class="stat-dot red"></span>'+(types.environment?types.environment.unavailable:0)+'</span></h4>';
     let eEnts = ents.filter(e => e.category === 'environment');
     html += sectionContent(eEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildEntityTable(eEnts));
 
     // -- 属性提取 --
     let ah = (types.attribute||{}).health||'good';
-    html += '<h4 class="section-head ' + (tc[ah]||'title-good') + '">📊 属性提取 ' + healthBadge(ah) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.attribute?types.attribute.online:0)+' <span class="stat-dot red"></span>'+(types.attribute?types.attribute.unavailable:0)+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[ah]||'title-good') + '">📊 属性提取 ' + healthBadge(ah) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.attribute?types.attribute.online:0)+' <span class="stat-dot red"></span>'+(types.attribute?types.attribute.unavailable:0)+'</span></h4>';
     let aEnts = ents.filter(e => e.category === 'attribute');
     html += sectionContent(aEnts.length === 0 ? '<div class="empty" style="padding:8px">暂无</div>' : buildAttrEntityTable(aEnts));
 
     // -- 实体导出 --
     let xh = (types.export||{}).health||'good';
-    html += '<h4 class="section-head ' + (tc[xh]||'title-good') + '">📁 实体→json ' + healthBadge(xh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.export?types.export.ok:0)+' <span class="stat-dot red"></span>'+(types.export?types.export.bad:0)+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[xh]||'title-good') + '">📁 实体→json ' + healthBadge(xh) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(types.export?types.export.ok:0)+' <span class="stat-dot red"></span>'+(types.export?types.export.bad:0)+'</span></h4>';
     html += '<div class="section-content collapsed">';
     if (exports.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
@@ -3629,7 +4595,7 @@ async function loadMonitor() {
     // -- 文件源 --
     let fh = (types.file_source||{}).health||'good';
     var fsCount = (types.file_source||{}).count||0, fsBad = (types.file_source||{}).bad||0;
-    html += '<h4 class="section-head ' + (tc[fh]||'title-good') + '">📄 json→实体 ' + healthBadge(fh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(fsCount-fsBad)+' <span class="stat-dot red"></span>'+fsBad+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[fh]||'title-good') + '">📄 json→实体 ' + healthBadge(fh) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+(fsCount-fsBad)+' <span class="stat-dot red"></span>'+fsBad+'</span></h4>';
     html += '<div class="section-content collapsed">';
     if (fileSrc.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
@@ -3648,7 +4614,7 @@ async function loadMonitor() {
 
     // -- API 源 --
     let sh = (types.api_source||{}).health||'good';
-    html += '<h4 class="section-head ' + (tc[sh]||'title-good') + '">🌐 API→实体 ' + healthBadge(sh) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.api_source||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.api_source||{}).bad||0)+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[sh]||'title-good') + '">🌐 API→实体 ' + healthBadge(sh) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.api_source||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.api_source||{}).bad||0)+'</span></h4>';
     html += '<div class="section-content collapsed">';
     if (apiSrc.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
@@ -3668,7 +4634,7 @@ async function loadMonitor() {
     // -- 实体→网络 --
     let pushTargets = d.push_targets || [];
     let pth = (types.push_target||{}).health||'good';
-    html += '<h4 class="section-head ' + (tc[pth]||'title-good') + '">🌐 实体→网络 ' + healthBadge(pth) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.push_target||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.push_target||{}).bad||0)+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[pth]||'title-good') + '">🌐 实体→网络 ' + healthBadge(pth) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.push_target||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.push_target||{}).bad||0)+'</span></h4>';
     html += '<div class="section-content collapsed">';
     if (pushTargets.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
@@ -3692,7 +4658,7 @@ async function loadMonitor() {
     // -- 小爱对话 --
     let xiaoaiList = d.xiaoai || [];
     let xiaoaiH = (types.xiaoai||{}).health||'good';
-    html += '<h4 class="section-head ' + (tc[xiaoaiH]||'title-good') + '">💬 小爱对话 ' + healthBadge(xiaoaiH) + '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.xiaoai||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.xiaoai||{}).bad||0)+'</span></h4>';
+    html += '<h4 class="section-head ' + (tc[xiaoaiH]||'title-good') + '">💬 小爱对话 ' + healthBadge(xiaoaiH) + '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.xiaoai||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.xiaoai||{}).bad||0)+'</span></h4>';
     html += '<div class="section-content collapsed">';
     if (xiaoaiList.length === 0) { html += '<div class="empty" style="padding:8px">暂无配置</div>'; }
     else {
@@ -3710,26 +4676,26 @@ async function loadMonitor() {
     html += '</div>';
 
     // -- 桥接设备 --
-    html += '<h4 class="section-head title-good">🌉 桥接设备 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="bridgeStat">加载中...</span></h4>';
+    html += '<h4 class="section-head title-good">🌉 桥接设备 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="bridgeStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="bridgeTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
     // -- 虚拟设备 --
-    html += '<h4 class="section-head title-good">🔮 虚拟设备 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="virtualStat">加载中...</span></h4>';
+    html += '<h4 class="section-head title-good">🔮 虚拟设备 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="virtualStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="virtualTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
     // -- 辅助元素 --
-    html += '<h4 class="section-head title-good">🧩 辅助元素 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="helperStat">加载中...</span></h4>';
+    html += '<h4 class="section-head title-good">🧩 辅助元素 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="helperStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="helperTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
     // -- 用电计量 --
-    html += '<h4 class="section-head title-good">⚡ 用电计量 <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)" id="powerStat">加载中...</span></h4>';
+    html += '<h4 class="section-head title-good">⚡ 用电计量 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="powerStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="powerTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
     // -- 打印机监控 --
     let printerList = d.printer || [];
     let printerH = (types.printer||{}).health||'good';
     html += '<h4 class="section-head ' + (tc[printerH]||'title-good') + '">🖨️ 打印机监控 ' + healthBadge(printerH) +
-      '<span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.printer||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.printer||{}).bad||0)+'</span></h4>';
+      '<span style="font-weight:400;font-size:11px;color:var(--text2)"><span class="stat-dot green"></span>'+((types.printer||{}).ok||0)+' <span class="stat-dot red"></span>'+((types.printer||{}).bad||0)+'</span></h4>';
     html += '<div class="section-content collapsed">';
     if (printerList.length === 0) { html += '<div class="empty" style="padding:8px">暂无打印机配置</div>'; }
     else {
@@ -3752,29 +4718,261 @@ async function loadMonitor() {
     }
     html += '</div>';
 
+    // -- 媒体播放列表 --
+    html += '<h4 class="section-head title-good">🎵 媒体播放列表 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="mediaStat">加载中...</span></h4>';
+    html += '<div class="section-content collapsed"><div id="mediaTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
+
+    // -- 最近使用设备（device_history 全量：每个 entity_id 一条）--
+    const recentInfo = d.recent || {};
+    const recentItems = recentInfo.items || [];
+    const recentH = (types.recent||{}).health||'good';
+    html += '<h4 class="section-head ' + (tc[recentH]||'title-good') + '">🕘 最近使用设备 ' + healthBadge(recentH) +
+      '<span style="font-weight:400;font-size:11px;color:var(--text2)">' +
+      escHtml(recentInfo.range||'') + ' · 运行中 ' + (recentInfo.running||0) +
+      ' · 排除项 ' + (recentInfo.exclude_count||0) + '</span></h4>';
+    html += '<div class="section-content collapsed">';
+    if (!recentItems.length) {
+      html += '<div class="empty" style="padding:8px">暂无数据</div>';
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr>';
+      html += '<th style="width:26%">实体ID</th><th style="width:12%">名称</th><th style="width:10%">房间</th>'
+           +  '<th style="width:10%">状态</th><th style="width:18%">最近使用</th>'
+           +  '<th style="width:8%">次数</th><th style="width:8%">时长(h)</th><th style="width:8%">用电(kWh)</th>';
+      html += '</tr></thead><tbody>';
+      recentItems.forEach(it => {
+        html += '<tr><td>' + escHtml(it.entity_id||'') + '</td>';
+        html += '<td>' + escHtml(it.name||'-') + '</td>';
+        html += '<td>' + escHtml(it.room||'-') + '</td>';
+        html += '<td><span class="badge ' + (it.running ? 'badge-online' : 'badge-offline') + '">'
+             +  (it.running ? '运行中' : '已关闭') + '</span></td>';
+        html += '<td style="font-size:12px;color:var(--text2)">' + escHtml(it.last_used_text||'-') + '</td>';
+        html += '<td>' + (it.count||0) + '</td>';
+        html += '<td>' + (it.duration_hour||0) + '</td>';
+        html += '<td>' + (it.energy||0) + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+      if ((recentInfo.total||0) > recentItems.length) {
+        html += '<div class="hint" style="padding:6px 8px">仅显示前 ' + recentItems.length +
+                ' 台（共 ' + recentInfo.total + ' 台，可用 API 工具「🕘 近期使用设备」查看全部）</div>';
+      }
+    }
+    html += '</div>';
+
+    // -- 指标管理（metrics_catalog：元数据 + 通用指标引擎）--
+    const metricsInfo = d.metrics || {};
+    const metricItems = metricsInfo.items || [];
+    const metricsH = (types.metrics||{}).health||'good';
+    html += '<h4 class="section-head ' + (tc[metricsH]||'title-good') + '">📊 指标管理 ' + healthBadge(metricsH) +
+      '<span style="font-weight:400;font-size:11px;color:var(--text2)">' +
+      '启用 ' + (metricsInfo.enabled||0) + ' · 停用 ' + (metricsInfo.disabled||0) +
+      ' · 内置 ' + (metricsInfo.builtin||0) + ' · 自定义 ' + (metricsInfo.custom||0) + '</span></h4>';
+    html += '<div class="section-content collapsed">';
+    html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">'
+      + '<button class="btn-accent" onclick="gotoMetricsManage()">⚙️ 前往「系统配置 → 📊 指标管理」</button>'
+      + '<span class="hint">指标定义存库，新增/修改<b>无需重启 HA</b>；对外调用 '
+      + '<code>/query?type=metrics_query&amp;metric_id=...</code></span></div>';
+    const mCats = metricsInfo.categories || {};
+    const mCatKeys = Object.keys(mCats);
+    if (mCatKeys.length) {
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">';
+      mCatKeys.forEach(k => {
+        html += '<span class="issue-pill" title="该分类下的指标数">' + escHtml(k) + ' · ' + mCats[k] + '</span>';
+      });
+      html += '</div>';
+    }
+    if (!metricItems.length) {
+      html += '<div class="empty" style="padding:8px">暂无指标（可在「系统配置 → 📊 指标管理」点「🔄 同步内置指标」生成）</div>';
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr>'
+        + '<th style="width:22%">metric_id</th><th style="width:14%">名称</th><th style="width:9%">分类</th>'
+        + '<th style="width:15%">源表</th><th style="width:14%">值列/表达式</th>'
+        + '<th style="width:7%">聚合</th><th style="width:9%">默认分组</th>'
+        + '<th style="width:5%">单位</th><th style="width:7%">状态</th></tr></thead><tbody>';
+      metricItems.forEach(m => {
+        html += '<tr><td><code>' + escHtml(m.metric_id||'') + '</code></td>'
+          + '<td>' + escHtml(m.name||'-') + '</td>'
+          + '<td>' + escHtml(m.category||'-') + (m.builtin ? ' <span style="color:#3498db">内置</span>' : '') + '</td>'
+          + '<td><code>' + escHtml(m.source_table||'-') + '</code></td>'
+          + '<td>' + escHtml(m.value_expr || m.value_col || '-') + '</td>'
+          + '<td>' + escHtml(m.agg||'-') + '</td>'
+          + '<td>' + escHtml(m.group_by||'-') + '</td>'
+          + '<td>' + escHtml(m.unit||'-') + '</td>'
+          + '<td><span class="badge ' + (m.enabled ? 'badge-online' : 'badge-offline') + '">'
+          + (m.enabled ? '启用' : '停用') + '</span></td></tr>';
+      });
+      html += '</tbody></table></div>';
+      if ((metricsInfo.total||0) > metricItems.length) {
+        html += '<div class="hint" style="padding:6px 8px">仅显示前 ' + metricItems.length
+          + ' 条（共 ' + metricsInfo.total + ' 条，完整列表见「系统配置 → 📊 指标管理」）</div>';
+      }
+    }
+    html += '</div>';
+
     content.innerHTML = html;
 
-    // 绑定 section-head 点击展开/折叠
+    // 绑定 section-head 点击展开/折叠（同时标注 data-sec，供 summary 卡片定位）
     content.querySelectorAll('.section-head').forEach(el => {
+      const secKey = _monitorSecKey(el);
+      if (secKey) syncSummarySub(secKey, el);   // 标题右侧的状态/统计 → 卡片第三行
       el.addEventListener('click', function() {
         const sib = this.nextElementSibling;
         if (sib && sib.classList.contains('section-content')) {
           sib.classList.toggle('collapsed');
           this.classList.toggle('expanded');
+          syncSummaryCardState();   // 手动折叠/展开后同步卡片高亮
         }
       });
     });
 
-    // 异步加载桥接/虚拟设备/辅助元素/用电计量数据
+    // 异步加载桥接/虚拟设备/辅助元素/用电计量/媒体播放列表数据
     loadMonitorBridge();
     loadMonitorVirtual();
     loadMonitorHelper();
     loadMonitorPower();
+    loadMonitorMedia();
   } catch(e) {
     content.innerHTML = '<div class="empty">请求失败: ' + e + '</div>';
     document.getElementById('pagination').style.display = 'none';
     document.getElementById('filterBar').style.display = 'none';
   }
+}
+
+// 汇总各分类的异常明细（口径与后端 health 判定一致），供点击角标气泡展示
+function buildIssueDetails(d) {
+  const out = {};
+  function add(key, item) { (out[key] = out[key] || []).push(item); }
+  const types = d.types || {};
+  const CAT_KEY = { device: 'device', environment: 'environment', attribute: 'attribute' };
+
+  // 设备类 / 传感器类 / 属性提取：仅 status = unavailable 计入异常
+  (d.entities || []).forEach(e => {
+    const key = CAT_KEY[e.category];
+    if (!key || e.status !== 'unavailable') return;
+    add(key, {
+      title: e.entity_id,
+      sub: [e.name, e.room].filter(Boolean).join(' · '),
+      reason: '实体状态: ' + (e.state || 'unavailable'),
+      time: e.last_updated || '',
+    });
+  });
+
+  // 实体→json：实体不可用 或 导出文件不存在（updated_at 为空视为文件未生成）
+  (d.exports || []).forEach(e => {
+    const reasons = [];
+    if (e.status !== '在线') reasons.push('实体状态: ' + (e.state || 'unavailable'));
+    if (!e.updated_at) reasons.push('导出文件不存在或尚未生成');
+    if (!reasons.length) return;
+    add('export', { title: e.entity_id, sub: '文件: ' + (e.file_name || '-'),
+                    reason: reasons.join('；'), time: e.updated_at || '' });
+  });
+
+  // json→实体：文件不存在 / 生成实体不可用
+  const fsInfo = (types.file_source || {}).files || [];
+  (d.file_sources || []).forEach((e, i) => {
+    const info = fsInfo[i] || {};
+    const reasons = [];
+    if (info.exists === false) reasons.push('文件不存在');
+    if (info.ent_ok === false) reasons.push('生成实体不可用');
+    if (!reasons.length) return;
+    add('file_source', { title: e.name || ('#' + e.id), sub: '路径: ' + (e.file_path || '-'),
+                         reason: reasons.join('；'), time: e.updated_at || '' });
+  });
+
+  // API→实体：请求失败 / 生成实体不可用
+  const asInfo = (types.api_source || {}).sources || [];
+  (d.api_sources || []).forEach((e, i) => {
+    const info = asInfo[i] || {};
+    const reasons = [];
+    if ((e.fail_count || 0) > 0) reasons.push('API 请求失败 ' + e.fail_count + ' 次');
+    if (info.ent_ok === false) reasons.push('生成实体不可用');
+    if (!reasons.length) return;
+    add('api_source', { title: e.name || ('#' + e.id), sub: 'URL: ' + (e.url || '-'),
+                        reason: reasons.join('；'), time: e.updated_at || '' });
+  });
+
+  // 实体→网络 / 小爱对话 / 打印机：配置实体状态不可用
+  (d.push_targets || []).forEach(p => {
+    if (p.status === '在线') return;
+    add('push_target', { title: p.entity_id, sub: p.name || '',
+                         reason: '实体状态: ' + (p.state || 'unavailable'), time: p.updated_at || '' });
+  });
+  (d.xiaoai || []).forEach(x => {
+    if (x.status === '在线') return;
+    add('xiaoai', { title: x.entity_id, sub: x.name || '',
+                    reason: '实体状态: ' + (x.state || 'unavailable'), time: x.updated_at || '' });
+  });
+  (d.printer || []).forEach(p => {
+    if (p.status === '在线') return;
+    add('printer', { title: p.name || '-',
+                     sub: '统计: ' + (p.stats_entity || '-') + ' · 详细: ' + (p.detail_entity || '-'),
+                     reason: '统计实体状态: ' + (p.stats_state || 'unavailable'), time: p.updated_at || '' });
+  });
+
+  return out;
+}
+
+// 点击卡片右上角异常角标 → 弹出气泡显示该分类的具体异常项
+function showIssueBubble(ev, el) {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  const key = el.getAttribute('data-issue') || '';
+  const label = el.getAttribute('data-issue-label') || key;
+  const list = (window._issueDetails || {})[key] || [];
+  const prev = document.getElementById('issueBubble');
+  const samePill = prev && prev.getAttribute('data-key') === key;
+  closeIssueBubble();
+  if (samePill) return;  // 再次点击同一角标 = 关闭
+
+  let body = '';
+  if (list.length) {
+    list.forEach(it => {
+      body += '<div class="ib-item"><div class="ib-entity">' + escHtml(it.title || '-');
+      if (it.sub) body += '<span class="ib-sub">' + escHtml(it.sub) + '</span>';
+      body += '</div>';
+      if (it.reason) body += '<div class="ib-reason">' + escHtml(it.reason) + '</div>';
+      if (it.time) body += '<div class="ib-time">最后更新: ' + escHtml(it.time) + '</div>';
+      body += '</div>';
+    });
+  } else {
+    body = '<div class="ib-empty">该分类暂无异常明细</div>';
+  }
+
+  const b = document.createElement('div');
+  b.id = 'issueBubble';
+  b.setAttribute('data-key', key);
+  b.innerHTML = '<div class="ib-head"><span>' + escHtml(label) + ' · 异常 ' +
+                (list.length || el.textContent.trim()) + ' 个</span>' +
+                '<button class="ib-x" title="关闭">✕</button></div>' +
+                '<div class="ib-body">' + body + '</div>';
+  b.querySelector('.ib-x').addEventListener('click', closeIssueBubble);
+  b.addEventListener('click', function(e) { e.stopPropagation(); });
+  document.body.appendChild(b);
+
+  // 贴在角标下方；下方空间不足则显示在角标上方
+  const r = el.getBoundingClientRect();
+  const bw = b.offsetWidth, bh = b.offsetHeight;
+  const left = Math.max(8, Math.min(r.right - bw, window.innerWidth - bw - 8));
+  let top = r.bottom + 6;
+  if (top + bh > window.innerHeight - 8) top = Math.max(8, r.top - bh - 6);
+  b.style.left = left + 'px';
+  b.style.top = top + 'px';
+
+  if (!window._issueBubbleBound) {
+    window._issueBubbleBound = true;
+    document.addEventListener('click', closeIssueBubble);
+    document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeIssueBubble(); });
+    window.addEventListener('resize', closeIssueBubble);
+    // 气泡自身内部滚动不关闭
+    window.addEventListener('scroll', function(e) {
+      const b = document.getElementById('issueBubble');
+      if (b && e.target && e.target !== document && b.contains(e.target)) return;
+      closeIssueBubble();
+    }, true);
+  }
+}
+
+function closeIssueBubble() {
+  const b = document.getElementById('issueBubble');
+  if (b) b.remove();
 }
 
 async function loadMonitorBridge() {
@@ -3791,6 +4989,7 @@ async function loadMonitorBridge() {
 
     var stat = document.getElementById('bridgeStat');
     if (stat) stat.textContent = conns.length + ' 连接, ' + ents.length + ' 实体';
+    syncSummarySub('bridge');   // 同步到卡片第三行
 
     setSubTabBadge('bridge', conns.length);
 
@@ -3821,6 +5020,7 @@ async function loadMonitorVirtual() {
 
     var stat = document.getElementById('virtualStat');
     if (stat) stat.textContent = devices.length + ' 个虚拟设备';
+    syncSummarySub('virtual');   // 同步到卡片第三行
 
     setSubTabBadge('virtual', devices.length);
 
@@ -3855,6 +5055,7 @@ async function loadMonitorHelper() {
 
     var stat = document.getElementById('helperStat');
     if (stat) stat.textContent = helpers.length + ' 个辅助元素';
+    syncSummarySub('helper');   // 同步到卡片第三行
 
     setSubTabBadge('helper', helpers.length);
 
@@ -3884,6 +5085,7 @@ async function loadMonitorPower() {
 
     var stat = document.getElementById('powerStat');
     if (stat) stat.textContent = meters.length + ' 个功率计量';
+    syncSummarySub('power');   // 同步到卡片第三行
 
     setSubTabBadge('power', meters.length);
 
@@ -3896,6 +5098,36 @@ async function loadMonitorPower() {
       html += '<tr><td>' + escHtml(d.entity_id) + '</td><td>' + escHtml(d.device_name || '') + '</td>' +
         '<td>' + escHtml(d.room || '') + '</td><td>' + escHtml(d.id_slug || '') + '</td>' +
         '<td>' + escHtml(d.unit || 'W') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    tbl.innerHTML = html;
+  } catch(e) { /* silent */ }
+}
+
+async function loadMonitorMedia() {
+  try {
+    var resp = await fetch(MEDIA_API);
+    var json = await resp.json();
+    var playlists = (json.data || {}).playlists || [];
+    var songs = playlists.reduce(function(a, p) { return a + (p.song_count || 0); }, 0);
+
+    var card = document.getElementById('mediaCard');
+    if (card) card.querySelector('.num').textContent = playlists.length;
+
+    var stat = document.getElementById('mediaStat');
+    if (stat) stat.textContent = playlists.length + ' 个播放列表, ' + songs + ' 首歌';
+    syncSummarySub('media');   // 同步到卡片第三行
+
+    if (typeof setMediaTabBadge === 'function') setMediaTabBadge(playlists);   // 顺带刷新管理页子选项卡角标
+
+    var tbl = document.getElementById('mediaTbl');
+    if (!tbl) return;
+    if (!playlists.length) { tbl.innerHTML = '<div class="empty">暂无媒体播放列表</div>'; return; }
+
+    var html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>播放列表名称</th><th>歌曲数</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>';
+    playlists.forEach(function(p) {
+      html += '<tr><td>' + p.id + '</td><td>' + escHtml(p.name || '') + '</td><td>' + (p.song_count || 0) +
+        '</td><td>' + escHtml(p.created_at || '') + '</td><td>' + escHtml(p.updated_at || '') + '</td></tr>';
     });
     html += '</tbody></table></div>';
     tbl.innerHTML = html;
@@ -4300,6 +5532,129 @@ const ATTR_CONFIG_API = '/api/ha_data_store/attr_config';
 let attrEntityState = null;
 let attrCurrentMode = '';
 
+// ==============================
+//  近期使用设备：窗口天数 / 排除项
+// ==============================
+const RECENT_EXCLUDE_API = '/api/ha_data_store/recent/exclude';
+const RECENT_ENTITIES_API = '/api/ha_data_store/recent/entities';
+let recentExclude = [];      // 已保存的排除项（待保存的改动保存在输入框中）
+let recentEntRows = [];      // device_history 实体唯一值 [{entity_id,name,room}]
+let recentEntLoaded = false;
+
+// 页面加载时先取一次排除项数量，让「🕘 近期使用设备」角标在未点开该子面板时也显示（-N）
+async function loadRecentBadge() {
+  try {
+    const resp = await fetch(RECENT_EXCLUDE_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    setSubTabBadge('recent', -((json.exclude || []).length));
+  } catch (e) { /* 忽略：角标不阻断页面 */ }
+}
+
+async function loadRecentExclude() {
+  try {
+    const resp = await fetch(RECENT_EXCLUDE_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    recentExclude = (json.exclude || []).slice();
+  } catch (e) {
+    recentExclude = [];
+  }
+  document.getElementById('recentExcludeText').value = recentExclude.join(', ');
+  renderRecentExcludeList();
+  setSubTabBadge('recent', -recentExclude.length);   // 角标：排除项数的负值
+  if (!recentEntLoaded) { loadRecentEntityPicker(); } else { renderRecentEntityPicker(); }
+}
+
+function renderRecentExcludeList() {
+  const box = document.getElementById('recentExcludeList');
+  if (!recentExclude.length) {
+    box.innerHTML = '<div class="hint">（暂无排除项）</div>';
+    return;
+  }
+  box.innerHTML = recentExclude.map(e =>
+    '<span style="display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;padding:3px 8px;'
+    + 'border:1px solid var(--border);border-radius:12px;background:var(--bg2)">'
+    + '<code>' + escHtml(e) + '</code>'
+    + '<a href="javascript:void(0)" onclick="removeRecentExclude(\'' + escAttr(e) + '\')" '
+    + 'style="color:var(--accent);text-decoration:none">✕</a></span>').join('');
+}
+
+function addRecentExclude(eid) {
+  if (!recentExclude.includes(eid)) recentExclude.push(eid);
+  syncRecentExcludeInput();
+}
+
+function removeRecentExclude(eid) {
+  recentExclude = recentExclude.filter(x => x !== eid);
+  syncRecentExcludeInput();
+}
+
+function syncRecentExcludeInput() {
+  document.getElementById('recentExcludeText').value = recentExclude.join(', ');
+  renderRecentExcludeList();
+  setSubTabBadge('recent', -recentExclude.length);   // 角标：排除项数的负值（本地改动即时反映）
+  renderRecentEntityPicker();
+}
+
+async function saveRecentExclude() {
+  const raw = document.getElementById('recentExcludeText').value || '';
+  const list = raw.replace(/，/g, ',').split(/[\n,]/).map(s => s.trim()).filter(s => s);
+  try {
+    const resp = await fetch(RECENT_EXCLUDE_API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exclude: list }),
+    });
+    const json = await resp.json();
+    if (!json.success) { showToast('保存失败: ' + (json.error || ''), false); return; }
+    recentExclude = (json.exclude || []).slice();
+    syncRecentExcludeInput();
+    showToast('排除项已保存（' + recentExclude.length + ' 个），传感器已刷新', true);
+  } catch (e) {
+    showToast('保存失败: ' + e, false);
+  }
+}
+
+async function loadRecentEntityPicker() {
+  const box = document.getElementById('recentEntityPicker');
+  box.innerHTML = '加载中...';
+  try {
+    const resp = await fetch(RECENT_ENTITIES_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    recentEntRows = json.rows || [];
+    recentEntLoaded = true;
+  } catch (e) {
+    recentEntRows = [];
+    recentEntLoaded = true;
+    box.innerHTML = '加载失败: ' + e;
+    return;
+  }
+  renderRecentEntityPicker();
+}
+
+function renderRecentEntityPicker() {
+  const box = document.getElementById('recentEntityPicker');
+  const kw = (document.getElementById('recentEntitySearch').value || '').trim().toLowerCase();
+  const rows = recentEntRows.filter(r => {
+    if (!kw) return true;
+    return (r.entity_id || '').toLowerCase().includes(kw)
+      || (r.name || '').toLowerCase().includes(kw)
+      || (r.room || '').toLowerCase().includes(kw);
+  });
+  if (!rows.length) { box.innerHTML = '<div class="hint">没有匹配的实体</div>'; return; }
+  box.innerHTML = rows.map(r => {
+    const excluded = recentExclude.includes(r.entity_id);
+    return '<div style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid var(--border)">'
+      + '<code style="min-width:280px">' + escHtml(r.entity_id) + '</code>'
+      + '<span style="flex:1;color:var(--text2)">' + escHtml(r.name || '(未命名)')
+      + (r.room ? ' · ' + escHtml(r.room) : '') + '</span>'
+      + (excluded
+        ? '<button class="btn-accent" onclick="removeRecentExclude(\'' + escAttr(r.entity_id) + '\')">✔ 已排除（取消）</button>'
+        : '<button class="btn-green" onclick="addRecentExclude(\'' + escAttr(r.entity_id) + '\')">➕ 排除</button>')
+      + '</div>';
+  }).join('');
+}
+
 function switchSubTab(name) {
   document.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
@@ -4315,6 +5670,452 @@ function switchSubTab(name) {
   if (name === 'media') { loadMediaPlaylists(); }
   if (name === 'printer') { loadPrinterConfigs(); }
   if (name === 'power') { loadPowerMeters(); }
+  if (name === 'recent') { loadRecentExclude(); }
+  if (name === 'metrics') { loadMetrics(); }
+}
+
+// ==============================
+//  指标管理（metrics_catalog：元数据 + 通用指标引擎）
+// ==============================
+const METRICS_API = '/api/ha_data_store/metrics';
+const METRICS_SCHEMA_API = '/api/ha_data_store/metrics_schema';
+const METRICS_TEST_API = '/api/ha_data_store/metrics_test';
+const METRICS_SYNC_API = '/api/ha_data_store/metrics_sync';
+let metricRows = [];        // 指标列表
+let metricSchema = [];      // [{key,label,tables:[{table,label,category,columns:[{name,type}]...}]}]
+let metricEditId = '';      // '' = 新建
+
+// 未打开子面板时也加载角标（指标总数）
+async function loadMetricsBadge() {
+  try {
+    const r = await fetch(METRICS_API + '?enabled_only=0', { credentials: 'same-origin' });
+    const j = await r.json();
+    setSubTabBadge('metrics', (j.metrics || []).length);
+  } catch (e) { /* 角标不阻断页面 */ }
+}
+
+// API 工具「📊 通用指标查询」：把指标目录加载进 metric_id 下拉（按分类分组）
+// 缓存由 apiMetricsLoaded 控制；在「📊 指标管理」里增删改/同步后会被置为 false，下次自动重拉。
+let apiMetricsLoaded = false;
+let apiMetricRows = [];
+async function loadApiMetricOptions(force) {
+  const sel = document.getElementById('apiMetricId');
+  if (!sel) return;
+  if (!force && apiMetricsLoaded && sel.options.length) { updateApiMetricInfo(); generateApiUrl(); return; }
+  sel.innerHTML = '<option value="">加载中...</option>';
+  try {
+    const r = await fetch(METRICS_API + '?enabled_only=1', { credentials: 'same-origin' });
+    const j = await r.json();
+    const items = j.metrics || [];
+    apiMetricRows = items;
+    if (!items.length) { sel.innerHTML = '<option value="">（无可用指标，请先到「📊 指标管理」同步）</option>'; return; }
+    const groups = {};
+    items.forEach(m => { (groups[m.category] = groups[m.category] || []).push(m); });
+    sel.innerHTML = Object.keys(groups).map(cat =>
+      '<optgroup label="' + escAttr(cat) + '">' + groups[cat].map(m =>
+        '<option value="' + escAttr(m.metric_id) + '">' + escHtml((m.name || m.metric_id) + ' · ' + m.metric_id)
+        + '</option>').join('') + '</optgroup>').join('');
+    apiMetricsLoaded = true;
+  } catch (e) {
+    sel.innerHTML = '<option value="">（指标目录加载失败）</option>';
+  }
+  updateApiMetricInfo();
+  generateApiUrl();
+}
+
+function refreshApiMetricOptions() { loadApiMetricOptions(true); }
+
+// 「📊 指标目录」参数：分类下拉（从指标目录提取去重）
+async function loadApiMetricCategories() {
+  const sel = document.getElementById('apiMetricCat');
+  if (!sel) { generateApiUrl(); return; }
+  if (sel.options.length > 1) { generateApiUrl(); return; }
+  try {
+    const r = await fetch(METRICS_API + '?enabled_only=0', { credentials: 'same-origin' });
+    const j = await r.json();
+    const cats = [];
+    (j.metrics || []).forEach(m => {
+      if (m.category && cats.indexOf(m.category) < 0) cats.push(m.category);
+    });
+    sel.innerHTML = '<option value="">（全部）</option>'
+      + cats.map(c => '<option value="' + escAttr(c) + '">' + escHtml(c) + '</option>').join('');
+  } catch (e) { /* 分类下拉加载失败不影响 URL 生成 */ }
+  generateApiUrl();
+}
+
+function onApiMetricChange() { updateApiMetricInfo(); generateApiUrl(); }
+
+// 选中指标后显示其定义摘要（源表 / 默认分组 / 聚合 / 单位），便于确认口径
+function updateApiMetricInfo() {
+  const el = document.getElementById('apiMetricInfo');
+  const sel = document.getElementById('apiMetricId');
+  if (!el || !sel) return;
+  const m = apiMetricRows.find(x => x.metric_id === sel.value);
+  if (!m) { el.textContent = ''; return; }
+  const val = m.value_expr || m.value_col || '-';
+  el.textContent = '源表 ' + m.source_table + ' · 值 ' + val + ' · 默认分组 ' + m.group_by
+    + ' · 聚合 ' + m.agg + (m.unit ? ' · 单位 ' + m.unit : '') + (m.remark ? ' · ' + m.remark : '');
+}
+
+async function loadMetricSchema() {
+  try {
+    const r = await fetch(METRICS_SCHEMA_API, { credentials: 'same-origin' });
+    const j = await r.json();
+    metricSchema = j.groups || [];
+  } catch (e) { metricSchema = []; }
+  fillMetricCategories();
+  fillMetricTables();
+}
+
+function fillMetricCategories() {
+  const cats = metricSchema.map(g => ({ k: g.key, l: g.label }));
+  if (!cats.length) return;
+  const cur = (document.getElementById('metricFilterCat') || {}).value || '';
+  const sel = document.getElementById('metricFilterCat');
+  sel.innerHTML = '<option value="">全部分类</option>'
+    + cats.map(c => '<option value="' + escAttr(c.k) + '">' + escHtml(c.l) + '</option>').join('');
+  sel.value = cur;
+  const mcat = document.getElementById('mCategory');
+  const cur2 = mcat.value;
+  mcat.innerHTML = cats.map(c => '<option value="' + escAttr(c.k) + '">' + escHtml(c.l) + '</option>').join('');
+  if (cur2) mcat.value = cur2;
+}
+
+function allMetricTables() {
+  const out = [];
+  metricSchema.forEach(g => (g.tables || []).forEach(t => out.push({ ...t, group: g.label })));
+  return out;
+}
+
+function fillMetricTables() {
+  const sel = document.getElementById('mTable');
+  if (!sel) return;
+  const cur = sel.value;
+  const tables = allMetricTables();
+  sel.innerHTML = tables.map(t =>
+    '<option value="' + escAttr(t.table) + '">' + escHtml(t.group + ' / ' + t.label) + '</option>').join('');
+  if (cur) sel.value = cur;
+  onMetricTableChange();
+}
+
+function onMetricTableChange() {
+  const tname = (document.getElementById('mTable') || {}).value || '';
+  const t = allMetricTables().find(x => x.table === tname);
+  const cols = (t && t.columns) ? t.columns : [];
+  const opts = ['<option value="">（不指定）</option>']
+    .concat(['@value', '@entity', '@time', '@room', '@name', '@id'].map(p =>
+      '<option value="' + p + '">' + p + '（占位符）</option>'))
+    .concat(cols.map(c => '<option value="' + escAttr(c.name) + '">' + escHtml(c.name + ' · ' + c.type) + '</option>'));
+  ['mValueCol', 'mGroupCol'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const cur = el.value;
+    el.innerHTML = opts.join('');
+    if (cur) el.value = cur;
+  });
+}
+
+function onMetricGroupChange() {
+  const gb = (document.getElementById('mGroupBy') || {}).value || '';
+  const wrap = document.getElementById('mGroupColWrap');
+  if (wrap) wrap.style.display = (gb === 'type') ? '' : 'none';
+}
+
+function onMetricTestModeChange() {
+  const mode = (document.getElementById('mtMode') || {}).value || '';
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+  show('mtDaysWrap', mode === 'days');
+  show('mtRangeWrap', mode === 'range');
+  show('mtSingleWrap', ['date', 'month', 'year'].indexOf(mode) >= 0);
+}
+
+async function loadMetrics() {
+  const cat = (document.getElementById('metricFilterCat') || {}).value || '';
+  const kw = (document.getElementById('metricFilterKw') || {}).value || '';
+  const qs = new URLSearchParams({ category: cat, keyword: kw, enabled_only: '0' });
+  try {
+    const r = await fetch(METRICS_API + '?' + qs.toString(), { credentials: 'same-origin' });
+    const j = await r.json();
+    metricRows = j.metrics || [];
+  } catch (e) { metricRows = []; }
+  renderMetrics();
+  setSubTabBadge('metrics', metricRows.length);
+  if (!metricSchema.length) loadMetricSchema();
+}
+
+function renderMetrics() {
+  const box = document.getElementById('metricListWrap');
+  if (!box) return;
+  if (!metricRows.length) {
+    box.innerHTML = '<div class="hint">（暂无指标 —— 点「🔄 同步内置指标」生成内置指标，或「➕ 新建指标」自定义）</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr><th>状态</th><th>分类</th><th>metric_id</th>'
+    + '<th>名称</th><th>源表</th><th>值列/表达式</th><th>聚合</th><th>单位</th><th>默认分组</th>'
+    + '<th>说明</th><th>操作</th></tr></thead><tbody>';
+  metricRows.forEach(m => {
+    const val = m.value_expr || m.value_col || '-';
+    html += '<tr>'
+      + '<td style="color:' + (m.enabled ? '#27ae60' : '#999') + '">' + (m.enabled ? '启用' : '停用') + '</td>'
+      + '<td>' + escHtml(m.category || '') + (m.builtin ? ' <span style="color:#3498db">内置</span>' : '') + '</td>'
+      + '<td><code>' + escHtml(m.metric_id) + '</code></td>'
+      + '<td>' + escHtml(m.name || '') + '</td>'
+      + '<td><code>' + escHtml(m.source_table || '') + '</code></td>'
+      + '<td>' + escHtml(val) + '</td>'
+      + '<td>' + escHtml(m.agg || '') + '</td>'
+      + '<td>' + escHtml(m.unit || '') + '</td>'
+      + '<td>' + escHtml(m.group_by || '') + '</td>'
+      + '<td style="color:var(--text2)">' + escHtml(m.remark || '') + '</td>'
+      + '<td style="white-space:nowrap">'
+      + '<button class="btn-accent" onclick="editMetric(\'' + escAttr(m.metric_id) + '\')">✎ 编辑</button> '
+      + '<button class="btn-accent" onclick="toggleMetric(\'' + escAttr(m.metric_id) + '\','
+      + (m.enabled ? 0 : 1) + ')">' + (m.enabled ? '⏸ 停用' : '▶ 启用') + '</button> '
+      + '<button class="btn-accent" onclick="copyMetric(\'' + escAttr(m.metric_id) + '\')">⧉ 复制</button> '
+      + (m.builtin ? '' : '<button class="btn-accent" onclick="deleteMetric(\'' + escAttr(m.metric_id)
+        + '\')" style="background:#c0392b;border-color:#c0392b">🗑 删除</button>')
+      + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  box.innerHTML = html;
+}
+
+async function syncMetrics(reset) {
+  const tip = reset ? '将按最新定义覆盖所有内置指标的参数，继续？' : '将补齐缺失的内置指标（不覆盖已有改动），继续？';
+  if (!confirm(tip)) return;
+  try {
+    const r = await fetch(METRICS_SYNC_API, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reset: !!reset }),
+    });
+    const j = await r.json();
+    if (!j.success) { alert('同步失败：' + (j.error || '未知错误')); return; }
+    apiMetricsLoaded = false;
+    loadMetrics();
+  } catch (e) { alert('同步失败：' + e); }
+}
+
+function newMetric() {
+  metricEditId = '';
+  document.getElementById('metricEditTitle').textContent = '新建指标';
+  document.getElementById('metricEditWrap').style.display = '';
+  document.getElementById('metricTestWrap').style.display = '';
+  document.getElementById('metricEditHint').textContent = '';
+  ['mMetricId', 'mName', 'mValueExpr', 'mFilters', 'mUnit', 'mIcon', 'mRemark'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('mMetricId').disabled = false;
+  document.getElementById('mSort').value = 100;
+  document.getElementById('mEnabled').checked = true;
+  document.getElementById('mAgg').value = 'avg';
+  document.getElementById('mGroupBy').value = 'day';
+  onMetricGroupChange();
+  if (!metricSchema.length) { loadMetricSchema().then(() => { fillMetricTables(); }); }
+  else { fillMetricTables(); }
+  document.getElementById('mTable').focus();
+}
+
+function editMetric(id) {
+  const m = metricRows.find(x => x.metric_id === id);
+  if (!m) return;
+  metricEditId = id;
+  document.getElementById('metricEditTitle').textContent = '编辑指标：' + id + (m.builtin ? '（内置，不可删除）' : '');
+  document.getElementById('metricEditWrap').style.display = '';
+  document.getElementById('metricTestWrap').style.display = '';
+  document.getElementById('metricEditHint').textContent = '';
+  document.getElementById('mMetricId').value = m.metric_id || '';
+  document.getElementById('mMetricId').disabled = true;   // 编辑时不允许改 ID
+  document.getElementById('mName').value = m.name || '';
+  document.getElementById('mValueExpr').value = m.value_expr || '';
+  document.getElementById('mFilters').value = m.filters_text || '';
+  document.getElementById('mUnit').value = m.unit || '';
+  document.getElementById('mIcon').value = m.icon || '';
+  document.getElementById('mRemark').value = m.remark || '';
+  document.getElementById('mSort').value = m.sort_order || 100;
+  document.getElementById('mEnabled').checked = !!m.enabled;
+  document.getElementById('mAgg').value = m.agg || 'avg';
+  document.getElementById('mGroupBy').value = m.group_by || 'day';
+  onMetricGroupChange();
+  const apply = () => {
+    document.getElementById('mTable').value = m.source_table || '';
+    onMetricTableChange();
+    document.getElementById('mValueCol').value = m.value_col || '';
+    document.getElementById('mGroupCol').value = m.group_col || '';
+    document.getElementById('mCategory').value = m.category || 'custom';
+  };
+  if (!metricSchema.length) { loadMetricSchema().then(apply); } else { apply(); }
+}
+
+function copyMetric(id) {
+  const m = metricRows.find(x => x.metric_id === id);
+  if (!m) return;
+  const nid = prompt('复制为新的 metric_id（小写字母/数字/下划线）：', m.metric_id + '_copy');
+  if (!nid) return;
+  fetch(METRICS_API, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...m, metric_id: nid.trim(), builtin: 0 }),
+  }).then(r => r.json()).then(j => {
+    if (!j.success) { alert('复制失败：' + (j.error || '')); return; }
+    apiMetricsLoaded = false;
+    loadMetrics();
+  }).catch(e => alert('复制失败：' + e));
+}
+
+function closeMetricEdit() {
+  document.getElementById('metricEditWrap').style.display = 'none';
+  document.getElementById('metricTestWrap').style.display = 'none';
+  document.getElementById('metricTestResult').innerHTML = '';
+}
+
+function buildMetricPayload() {
+  const filtersRaw = (document.getElementById('mFilters').value || '').trim();
+  let filters = {};
+  if (filtersRaw) {
+    try { filters = JSON.parse(filtersRaw); } catch (e) { throw new Error('默认过滤需为合法 JSON'); }
+    if (!filters || typeof filters !== 'object' || Array.isArray(filters)) {
+      throw new Error('默认过滤需为 JSON 对象，如 {"off_time": ""}');
+    }
+  }
+  return {
+    metric_id: (document.getElementById('mMetricId').value || '').trim(),
+    name: (document.getElementById('mName').value || '').trim(),
+    category: document.getElementById('mCategory').value || 'custom',
+    source_table: document.getElementById('mTable').value || '',
+    value_col: document.getElementById('mValueCol').value || '',
+    value_expr: (document.getElementById('mValueExpr').value || '').trim(),
+    agg: document.getElementById('mAgg').value || 'avg',
+    unit: (document.getElementById('mUnit').value || '').trim(),
+    icon: (document.getElementById('mIcon').value || '').trim(),
+    group_by: document.getElementById('mGroupBy').value || 'day',
+    group_col: document.getElementById('mGroupCol').value || '',
+    filters: filters,
+    sort_order: parseInt(document.getElementById('mSort').value || '100', 10) || 100,
+    remark: (document.getElementById('mRemark').value || '').trim(),
+    enabled: document.getElementById('mEnabled').checked ? 1 : 0,
+  };
+}
+
+async function saveMetric() {
+  let payload;
+  try { payload = buildMetricPayload(); } catch (e) { alert(e.message); return; }
+  if (!payload.metric_id) { alert('请填写 metric_id'); return; }
+  try {
+    const r = await fetch(METRICS_API, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (!j.success) { alert('保存失败：' + (j.error || '')); return; }
+    document.getElementById('metricEditHint').textContent = '已保存 ' + payload.metric_id;
+    metricEditId = payload.metric_id;
+    apiMetricsLoaded = false;   // 让 API 工具的指标下拉下次自动重拉
+    loadMetrics();
+  } catch (e) { alert('保存失败：' + e); }
+}
+
+async function toggleMetric(id, enabled) {
+  const m = metricRows.find(x => x.metric_id === id);
+  if (!m) return;
+  try {
+    const r = await fetch(METRICS_API, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...m, enabled: enabled ? 1 : 0 }),
+    });
+    const j = await r.json();
+    if (!j.success) { alert('操作失败：' + (j.error || '')); return; }
+    apiMetricsLoaded = false;
+    loadMetrics();
+  } catch (e) { alert('操作失败：' + e); }
+}
+
+async function deleteMetric(id) {
+  if (!confirm('确认删除指标 ' + id + '？')) return;
+  try {
+    const r = await fetch(METRICS_API + '?metric_id=' + encodeURIComponent(id), {
+      method: 'DELETE', credentials: 'same-origin',
+    });
+    const j = await r.json();
+    if (!j.success) { alert('删除失败：' + (j.error || '')); return; }
+    if (metricEditId === id) closeMetricEdit();
+    apiMetricsLoaded = false;
+    loadMetrics();
+  } catch (e) { alert('删除失败：' + e); }
+}
+
+async function runMetricTest() {
+  let payload;
+  try { payload = buildMetricPayload(); } catch (e) { alert(e.message); return; }
+  const body = { metric: payload };
+  const mode = (document.getElementById('mtMode') || {}).value || '';
+  if (mode === 'days') body.days = parseInt(document.getElementById('mtDays').value || '7', 10) || 7;
+  else if (mode === 'range') {
+    body.start = (document.getElementById('mtStart').value || '').trim();
+    body.end = (document.getElementById('mtEnd').value || '').trim();
+  } else if (mode) body[mode] = (document.getElementById('mtSingle').value || '').trim();
+  body.entities = (document.getElementById('mtEntities').value || '')
+    .replace(/，/g, ',').split(',').map(s => s.trim()).filter(s => s);
+  body.group_by = (document.getElementById('mtGroupBy').value || '').trim();
+  body.agg = (document.getElementById('mtAgg').value || '').trim();
+  body.limit = parseInt(document.getElementById('mtLimit').value || '0', 10) || 0;
+
+  const hint = document.getElementById('metricTestHint');
+  const box = document.getElementById('metricTestResult');
+  hint.textContent = '执行中...';
+  try {
+    const r = await fetch(METRICS_TEST_API, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.success) { hint.textContent = ''; box.innerHTML = '<div class="hint" style="color:#c0392b">'
+      + escHtml(j.error || '执行失败') + '</div>'; return; }
+    renderMetricTestResult(j.result);
+    hint.textContent = '完成';
+  } catch (e) {
+    hint.textContent = '';
+    box.innerHTML = '<div class="hint" style="color:#c0392b">' + escHtml(String(e)) + '</div>';
+  }
+}
+
+function renderMetricTestResult(res) {
+  const box = document.getElementById('metricTestResult');
+  const s = res.summary || {};
+  const rows = res.rows || [];
+  let html = '<div class="hint">'
+    + '范围 <b>' + escHtml(res.range || '-') + '</b> · 分组 <code>' + escHtml(res.group_by || '-')
+    + '</code> · 聚合 <code>' + escHtml(res.agg || '-') + '</code> · 原始记录 <b>' + (res.row_count || 0)
+    + '</b> 条 · 结果 <b>' + (res.count || 0) + '</b> 行'
+    + (res.unit ? ' · 单位 ' + escHtml(res.unit) : '')
+    + ' · 合计 ' + (s.value !== undefined ? s.value : '-')
+    + ' / 均值 ' + (s.avg !== undefined ? s.avg : '-')
+    + ' / 最小 ' + (s.min !== undefined ? s.min : '-')
+    + ' / 最大 ' + (s.max !== undefined ? s.max : '-')
+    + '</div>';
+  if (res.sql) {
+    html += '<div style="margin:6px 0"><code style="word-break:break-all;color:var(--text2)">'
+      + escHtml(res.sql) + '</code></div>';
+  }
+  if (!rows.length) {
+    html += '<div class="hint">（该条件下没有数据）</div>';
+  } else {
+    const extra = Object.keys(rows[0]).filter(k => ['key', 'value', 'count'].indexOf(k) < 0);
+    html += '<div class="table-wrap"><table><thead><tr><th>分组键</th>'
+      + extra.map(k => '<th>' + escHtml(k) + '</th>').join('')
+      + '<th>值</th><th>样本数</th></tr></thead><tbody>';
+    rows.forEach(r => {
+      html += '<tr><td><code>' + escHtml(r.key === '' ? '(整体)' : r.key) + '</code></td>'
+        + extra.map(k => '<td>' + escHtml(r[k] || '') + '</td>').join('')
+        + '<td>' + escHtml(r.value === null || r.value === undefined ? '-' : r.value) + '</td>'
+        + '<td>' + escHtml(r.count) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+  box.innerHTML = html;
+  if (typeof enhanceTableWrapTables === 'function') enhanceTableWrapTables(box);
 }
 
 // API 工具子选项卡：gen=API 地址生成器，routes=自定义路由管理
@@ -6616,6 +8417,24 @@ const MEDIA_API = '/api/ha_data_store/media/playlists';
 const MEDIA_DEFAULT_USER = 'default';   // 后端 user_name 必填，前端固定用 default，用户无需感知
 var _expandedPlaylistId = null;          // 当前展开歌曲详情的播放列表 ID
 
+// 子选项卡角标：播放列表数（悬浮提示附带歌曲总数）
+function setMediaTabBadge(playlists) {
+  var songs = (playlists || []).reduce(function(a, p) { return a + (p.song_count || 0); }, 0);
+  setSubTabBadge('media', (playlists || []).length);
+  var el = document.getElementById('badge-media');
+  if (el) el.title = '播放列表 ' + (playlists || []).length + ' 个 · 歌曲 ' + songs + ' 首';
+}
+
+// 页面加载时先取一次数量，让角标在未点开该子面板时也能显示
+async function loadMediaBadge() {
+  try {
+    var resp = await fetch(MEDIA_API);
+    var json = await resp.json();
+    if (!resp.ok || !json.success) return;
+    setMediaTabBadge((json.data || {}).playlists || []);
+  } catch(e) {}
+}
+
 async function loadMediaPlaylists() {
   var div = document.getElementById('mediaPlaylistContent');
   try {
@@ -6628,6 +8447,7 @@ async function loadMediaPlaylists() {
     }
     var data = json.data || {};
     var playlists = data.playlists || [];
+    setMediaTabBadge(playlists);
     if (!playlists.length) {
       div.innerHTML = '<div class="hint">暂无播放列表，请在上方添加。</div>';
       document.getElementById('mediaSongsSection').style.display = 'none';
@@ -7167,7 +8987,7 @@ const MULTI_ENTITIES_API_TYPES = [
   'entities_period_agg', 'entities_dates', 'entities_hours_agg',
   'entities_weekday_hours', 'power_energy_multi', 'device_usage_multi',
   'device_usage_detail', 'device_usage_total', 'device_usage_history',
-  'device_usage_avg',
+  'device_usage_avg', 'device_last_used', 'timeline', 'room_occupancy',
 ];
 function isMultiEntitiesApiType(qt) {
   return MULTI_ENTITIES_API_TYPES.indexOf(qt) !== -1;
@@ -7219,6 +9039,7 @@ function onMultiTimeModeChange() {
   const dW = document.getElementById('apiMultiTimeDateWrap');
   const yW = document.getElementById('apiMultiTimeYearWrap');
   const mW = document.getElementById('apiMultiTimeMonthWrap');
+  const wW = document.getElementById('apiMultiTimeWindowWrap');
   const showRange = (mode === 'range');
   if (rangeWrap) rangeWrap.style.display = showRange ? '' : 'none';
   if (rangeWrap2) rangeWrap2.style.display = showRange ? '' : 'none';
@@ -7226,7 +9047,47 @@ function onMultiTimeModeChange() {
   if (dW) dW.style.display = (mode === 'date') ? '' : 'none';
   if (yW) yW.style.display = (mode === 'year' || mode === 'month') ? '' : 'none';
   if (mW) mW.style.display = (mode === 'month') ? '' : 'none';
+  if (wW) wW.style.display = (mode === 'window') ? '' : 'none';
   generateApiUrl();
+}
+
+// 各接口可用的「时间模式」集合（option 无法可靠 hidden，同时设 hidden/disabled/display）：
+//   device_last_used  → 含「最近 N 天（窗口）」，与窗口天数互斥（见 generateApiUrl 分支）
+//   timeline / room_occupancy → 语义是"某天 / 某段 / 某月 / 某年"，不提供「全部时间」
+//                              （后端缺省时间窗即"今日"）
+//   其它多实体接口 → 保持原有 全部时间 / 时间段 / 指定日 / 指定月 / 指定年
+const MULTI_TIME_MODE_SETS = {
+  device_last_used: ['window', 'all', 'range', 'date', 'month', 'year'],
+  timeline: ['date', 'range', 'month', 'year'],
+  room_occupancy: ['date', 'range', 'month', 'year'],
+};
+const MULTI_TIME_MODE_DEFAULT = {
+  device_last_used: 'window',
+  timeline: 'date',
+  room_occupancy: 'date',
+  metrics_query: 'all',
+};
+
+function syncMultiTimeOptions(qt) {
+  const sel = document.getElementById('apiMultiTimeMode');
+  if (!sel) return;
+  const allow = MULTI_TIME_MODE_SETS[qt] || ['all', 'range', 'date', 'month', 'year'];
+  const fallback = MULTI_TIME_MODE_DEFAULT[qt] || 'range';
+  let pickFallback = false;
+  for (const opt of sel.options) {
+    const ok = allow.indexOf(opt.value) !== -1;
+    opt.hidden = !ok;
+    opt.disabled = !ok;
+    opt.style.display = ok ? '' : 'none';
+    if (!ok && sel.value === opt.value) pickFallback = true;
+  }
+  if (pickFallback || allow.indexOf(sel.value) === -1) {
+    sel.value = fallback;
+  } else if (qt === 'device_last_used' && sel.value === 'all') {
+    // 首次切到 device_last_used（默认值仍是"全部时间"）：默认「最近 N 天」，
+    // 与传感器 all 节点口径一致；用户手动改选其它模式后不再干预。
+    sel.value = 'window';
+  }
 }
 
 // 把「时间模式」拼成 URL 查询参数（return 追加片段；全部时间返回空串）
@@ -7309,6 +9170,25 @@ function onApiTypeChange() {
   // 默认隐藏多实体接口区；仅相关分支显示
   const elEntitiesAgg = document.getElementById('apiEntitiesAggRow');
   if (elEntitiesAgg) elEntitiesAgg.style.display = 'none';
+  // ---- 通用指标（metrics_query / metrics_catalog）专属参数区 ----
+  // 必须放在下面的 if/else 接口族分支之外：这两个 type 不属于任何既有接口族，
+  // 写进分支里永远不会被执行到（曾导致选它们时看不到参数）。
+  const isMetricsApi = (qt === 'metrics_query');
+  const isMetricsCatalog = (qt === 'metrics_catalog');
+  const elMetricsOptsWrap = document.getElementById('apiMetricsOptsWrap');
+  if (elMetricsOptsWrap) elMetricsOptsWrap.style.display = isMetricsApi ? 'flex' : 'none';
+  const elMetricsCatWrap = document.getElementById('apiMetricsCatalogOptsWrap');
+  if (elMetricsCatWrap) elMetricsCatWrap.style.display = isMetricsCatalog ? 'flex' : 'none';
+  // 复用「多实体接口区」的实体输入框作为 entities 过滤（metrics_query 支持该参数）；
+  // metrics_catalog 不需要实体过滤，故隐藏（下方接口族分支不会再覆盖它的 display）
+  const elMeLabel = document.getElementById('apiMultiEntitiesLabel');
+  if (elMeLabel) {
+    elMeLabel.textContent = isMetricsApi ? '实体过滤 entities（逗号分隔）' : '实体ID(逗号分隔)';
+  }
+  const elMeWrap = document.getElementById('apiMultiEntitiesWrap');
+  if (elMeWrap) elMeWrap.style.display = isMetricsCatalog ? 'none' : '';
+  if (isMetricsApi && typeof loadApiMetricOptions === 'function') loadApiMetricOptions();
+  if (isMetricsCatalog && typeof loadApiMetricCategories === 'function') loadApiMetricCategories();
   const isRoomsDaily = qt === 'rooms_daily';
   const isVacuumHistory = qt === 'vacuum_history';
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
@@ -7365,7 +9245,13 @@ function onApiTypeChange() {
   // 设备用时/用电 多实体×多维度聚合（device_history）
   const isDeviceMulti = qt === 'device_usage_multi';
   // 统一取模块级清单，避免与 generateApiUrl 的判断不一致
-  const isMultiEntitiesApi = isMultiEntitiesApiType(qt);
+  // 注：通用指标查询（metrics_query）复用了「多实体接口区」中的时间模式控件
+  // （apiMultiTimeModeWrap 嵌在 apiEntitiesAggRow 内），故此处一并放行让其时间参数可见；
+  // generateApiUrl 中 metrics_query 有独立分支，不会走多实体的 URL 取值逻辑。
+  // metrics_catalog 一并放行：复用该分支「隐藏通用控件（实体ID/房间/limit/日期模式…）」的逻辑，
+  // 使其界面只剩自己的分类/关键字参数；它不会走多实体的 URL 取值（generateApiUrl 有独立分支）。
+  const isMultiEntitiesApi = isMultiEntitiesApiType(qt) || qt === 'metrics_query'
+    || qt === 'metrics_catalog';
   // 需要显示"粒度/返回结构"下拉的：汇聚接口 + 两类多维度聚合
   const isAggBucketVisible = isMultiBucketApiType(qt);
   // 多维度聚合族（返回结构文案为 实体→时间桶 / 时间桶→实体）
@@ -7918,7 +9804,8 @@ function onApiTypeChange() {
     //   多维度聚合族 + 设备类明细 + entities_dates(多实体有数据日期) 等
     //   —— 后端 _fetch_usage_rows / _usage_range_params 均支持 date/month/year
     const isTimeModeApi = isBucketMode || isDevDetailApiType(qt)
-      || qt === 'entities_dates';
+      || qt === 'entities_dates' || qt === 'device_last_used'
+      || qt === 'timeline' || qt === 'room_occupancy' || qt === 'metrics_query';
     const elTimeModeWrap = document.getElementById('apiMultiTimeModeWrap');
     if (elTimeModeWrap) {
       if (isTimeModeApi) {
@@ -7926,6 +9813,8 @@ function onApiTypeChange() {
         const sel = document.getElementById('apiMultiTimeMode');
         // 首次进入该模式时默认"时间段"，保持与原有交互一致
         if (sel && !sel.value) sel.value = 'range';
+        // 「最近 N 天（窗口）」仅 device_last_used 可用（按接口显隐 option 并按需回落）
+        syncMultiTimeOptions(qt);
         onMultiTimeModeChange();
       } else {
         elTimeModeWrap.style.display = 'none';
@@ -7969,6 +9858,18 @@ function onApiTypeChange() {
     const elDevLimitWrap = document.getElementById('apiDevLimitWrap');
     if (elDevLimitWrap) elDevLimitWrap.style.display = isDevDetail ? 'flex' : 'none';
 
+    // ---- 近期使用设备（device_last_used）：过滤开关 / 只看运行中 / 返回明细 ----
+    // 窗口天数已并入「时间模式 → 最近 N 天（窗口）」（见 syncMultiTimeOptions）
+    const isRecentApi = (qt === 'device_last_used');
+    const elRecentOptsWrap = document.getElementById('apiRecentOptsWrap');
+    if (elRecentOptsWrap) elRecentOptsWrap.style.display = isRecentApi ? 'flex' : 'none';
+
+    // ---- 家庭洞察（timeline / room_occupancy）专属参数区 ----
+    const elTlWrap = document.getElementById('apiTlWrap');
+    if (elTlWrap) elTlWrap.style.display = (qt === 'timeline') ? 'flex' : 'none';
+    const elRoWrap = document.getElementById('apiRoWrap');
+    if (elRoWrap) elRoWrap.style.display = (qt === 'room_occupancy') ? 'flex' : 'none';
+
     const elAggLabel = document.getElementById('apiEntitiesAggLabel');
     if (elAggLabel) {
       if (isPowerMulti) {
@@ -7983,6 +9884,12 @@ function onApiTypeChange() {
         elAggLabel.textContent = '多实体历史同期（entities 逗号分隔，留空 = 全部；历史今日 / 历史本月）';
       } else if (qt === 'device_usage_avg') {
         elAggLabel.textContent = '多实体平均指标（entities 逗号分隔，留空 = 全部；平均每日次数/时长、平均每次时长）';
+      } else if (qt === 'device_last_used') {
+        elAggLabel.textContent = '近期使用设备（entities 逗号分隔，留空 = 全部；每实体一条，取最近一次使用时间，含次数/时长/用电）';
+      } else if (qt === 'timeline') {
+        elAggLabel.textContent = '统一事件流（时间模式选「指定日/时间段」；来源不勾选 = 全部；设备事件可选仅开启/仅关闭；entities 过滤实体）';
+      } else if (qt === 'room_occupancy') {
+        elAggLabel.textContent = '房间占用排行（数据源 name="人在"；严谨口径 = 同房间重叠区间先并集；可选按日/小时分解与门户事件）';
       } else {
         elAggLabel.textContent = '多实体接口（entities 逗号分隔，留空 = 全部；时间段可选）';
       }
@@ -8607,6 +10514,38 @@ function generateApiUrl() {
     return;
   }
 
+  // ---- 通用指标引擎（metrics_query / metrics_catalog）----
+  // 必须放在「按接口族分支」之外：这两个 type 不属于任何既有接口族，
+  // 写在族分支内部永远执行不到（曾导致参数拼不进 URL）。
+  if (qt === 'metrics_catalog') {
+    const elCat = document.getElementById('apiMetricCat');
+    if (elCat && elCat.value) url += '&category=' + encodeURIComponent(elCat.value);
+    const elKw = document.getElementById('apiMetricKw');
+    if (elKw && elKw.value.trim()) url += '&keyword=' + encodeURIComponent(elKw.value.trim());
+    const elDis = document.getElementById('apiMetricIncludeDisabled');
+    if (elDis && elDis.checked) url += '&enabled_only=0';
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+  if (qt === 'metrics_query') {
+    const elMid = document.getElementById('apiMetricId');
+    if (elMid && elMid.value) url += '&metric_id=' + encodeURIComponent(elMid.value);
+    url += multiTimeQuery();
+    // 复用「多实体接口区」的实体输入框（metrics_query 支持 entities 过滤）
+    const elMe = document.getElementById('apiMultiEntities');
+    if (elMe && elMe.value.trim()) {
+      url += '&entities=' + encodeURIComponent(elMe.value.trim());
+    }
+    const elGb = document.getElementById('apiMetricGroupBy');
+    if (elGb && elGb.value) url += '&group_by=' + encodeURIComponent(elGb.value);
+    const elAg = document.getElementById('apiMetricAgg');
+    if (elAg && elAg.value) url += '&agg=' + encodeURIComponent(elAg.value);
+    const elOd = document.getElementById('apiMetricOrder');
+    if (elOd && elOd.value) url += '&order=' + encodeURIComponent(elOd.value);
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
   // vacuum_history 模式特殊处理
   if (qt === 'vacuum_history') {
     if (entityId) url += '&vacuum_id=' + encodeURIComponent(entityId);
@@ -8852,6 +10791,63 @@ function generateApiUrl() {
       // 合计节点默认返回；取消勾选时显式传 summary=0
       const elSum = document.getElementById('apiDevSummary');
       if (elSum && !elSum.checked) url += '&summary=0';
+      document.getElementById('apiUrlOutput').value = url;
+      return;
+    }
+
+    // ---- device_last_used（近期使用设备）：时间模式与窗口天数互斥 + 过滤/运行中/明细 ----
+    // 全部时间     → window_days=0（不限窗口，真正全量）
+    // 最近 N 天    → window_days=N（留空 = 用设置实体 number.ha_data_store_recent_days）
+    // 时间段/指定日/月/年 → multiTimeQuery()（不带 window_days，后端按 on_time 过滤）
+    if (qt === 'device_last_used') {
+      const tmode = (document.getElementById('apiMultiTimeMode') || { value: 'window' }).value;
+      if (tmode === 'all') {
+        url += '&window_days=0';
+      } else if (tmode === 'window') {
+        const elWinDays = document.getElementById('apiMultiTimeWindowDays');
+        const wd = elWinDays ? (elWinDays.value || '').trim() : '';
+        if (wd) url += '&window_days=' + encodeURIComponent(wd);
+      } else {
+        url += multiTimeQuery();
+      }
+      const elFilter = document.getElementById('apiRecentExcludeFilter');
+      if (elFilter && !elFilter.checked) url += '&filter=0';
+      const elRunning = document.getElementById('apiRecentRunning');
+      if (elRunning && elRunning.checked) url += '&running=1';
+      const elDetail = document.getElementById('apiRecentDetail');
+      if (elDetail && !elDetail.checked) url += '&detail=0';
+      const elDevLimit2 = document.getElementById('apiDevLimit');
+      if (elDevLimit2 && elDevLimit2.value.trim()) {
+        url += '&limit=' + encodeURIComponent(elDevLimit2.value.trim());
+      }
+      document.getElementById('apiUrlOutput').value = url;
+      return;
+    }
+
+    // ---- timeline / room_occupancy（家庭洞察）：时间模式 + 各自专属参数 ----
+    if (qt === 'timeline' || qt === 'room_occupancy') {
+      url += multiTimeQuery();
+      if (qt === 'timeline') {
+        const allSrc = ['device', 'user_action', 'automation', 'vacuum', 'xiaoai', 'health', 'printer'];
+        const srcs = Array.from(document.querySelectorAll('#apiTlSources input[type="checkbox"]:checked'))
+          .map(cb => cb.value);
+        if (srcs.length && srcs.length < allSrc.length) {
+          url += '&sources=' + encodeURIComponent(srcs.join(','));
+        }
+        const tlEv = document.getElementById('apiTlEvents').value;
+        if (tlEv) url += '&events=' + encodeURIComponent(tlEv);
+        const tlKw = document.getElementById('apiTlKeyword').value.trim();
+        if (tlKw) url += '&keyword=' + encodeURIComponent(tlKw);
+        const tlLimit = document.getElementById('apiTlLimit').value.trim();
+        if (tlLimit) url += '&limit=' + encodeURIComponent(tlLimit);
+      } else {
+        const roRooms = document.getElementById('apiRoRooms').value.trim();
+        if (roRooms) url += '&rooms=' + encodeURIComponent(roRooms);
+        const roBucket = document.getElementById('apiRoBucket').value;
+        if (roBucket && roBucket !== 'none') url += '&bucket=' + encodeURIComponent(roBucket);
+        if (document.getElementById('apiRoIncludeEmpty').checked) url += '&include_empty=1';
+        if (!document.getElementById('apiRoDoor').checked) url += '&door=0';
+      }
       document.getElementById('apiUrlOutput').value = url;
       return;
     }

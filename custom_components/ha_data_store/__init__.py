@@ -56,6 +56,7 @@ from .const import (
     TABLE_AUTOMATION_LOGS,
     TABLE_POWER_METER_CONFIGS,
     TABLE_POWER_ENERGY_DAILY,
+    TABLE_METRICS_CATALOG,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -250,16 +251,16 @@ def _migrate_legacy_songs_column(conn: sqlite3.Connection) -> None:
         local_logger.info("[HDS] media_playlists.songs 已迁移到子表(rows=%d)，旧列保留(SQlite版本不支持DROP)", migrated)
 
 
-def _lookup_user_action_icon(conn: sqlite3.Connection, entity_id: str) -> str:
-    """从 user_actions 查询该实体最近一次的 icon（无则返回空串）。
+def _lookup_report_entity_icon(conn: sqlite3.Connection, entity_id: str) -> str:
+    """从 report_entities 查询该实体最新上报的 icon（无记录则返回空串）。
 
-    device_history 新增记录时调用：取 user_actions 中 entity_id 相同、
-    icon 非空且 id 最大（最新）的一条。
+    device_history 新增记录时调用：取 report_entities 中 entity_id 相同、
+    id 最大（最新上报）的一条，原样返回其 icon（可能为空串）。
     """
     try:
         row = conn.execute(
-            f"SELECT icon FROM {TABLE_USER_ACTIONS} "
-            f"WHERE entity_id = ? AND icon != '' ORDER BY id DESC LIMIT 1",
+            f"SELECT icon FROM {TABLE_REPORT_ENTITIES} "
+            f"WHERE entity_id = ? ORDER BY id DESC LIMIT 1",
             (entity_id,),
         ).fetchone()
         return (row[0] or "") if row else ""
@@ -267,36 +268,55 @@ def _lookup_user_action_icon(conn: sqlite3.Connection, entity_id: str) -> str:
         return ""
 
 
-def _backfill_device_history_icon(conn: sqlite3.Connection) -> None:
-    """回填 device_history.icon（历史数据统一更新）。
+def _backfill_device_history_icon(conn: sqlite3.Connection) -> int:
+    """回填 device_history.icon（历史数据统一覆盖更新），返回实际写入行数。
 
-    按 entity_id 从 user_actions 取最近一条非空 icon，写入 device_history 中
-    icon 为空的行；只更新空值，幂等，每次启动执行一次（用于补齐加列前的历史
-    数据，以及此前 user_actions 尚无 icon 的行）。
+    按 entity_id 取 report_entities 中最新上报（id 最大）的 icon，**覆盖**写入
+    device_history 中该实体的所有记录 —— 不管原有 icon 是否有值都以本次结果为准
+    （含纠正此前误写其它来源/旧值的情况）；report_entities 中无记录的实体不动。
+
+    结果幂等（同一来源重复执行结果一致）；`icon IS NOT ?` 仅为跳过取值相同的行，
+    结果与无条件覆盖等价。
+
+    调用时机：**不再在 HA 启动时自动执行**，改由按钮
+    `button.ha_data_store_fill_device_icon`（或前端 SQL）按需触发。
     """
     try:
         rows = conn.execute(
-            f"SELECT entity_id, icon FROM {TABLE_USER_ACTIONS} WHERE icon != '' AND id IN ("
-            f"  SELECT MAX(id) FROM {TABLE_USER_ACTIONS} WHERE icon != '' GROUP BY entity_id"
+            f"SELECT entity_id, icon FROM {TABLE_REPORT_ENTITIES} WHERE id IN ("
+            f"  SELECT MAX(id) FROM {TABLE_REPORT_ENTITIES} GROUP BY entity_id"
             f")"
         ).fetchall()
     except Exception as exc:
-        _LOGGER.warning("[HDS] device_history.icon 回填：查询 user_actions 失败: %s", exc)
-        return
-    pairs = [(icon, eid) for eid, icon in rows if eid and icon]
-    if not pairs:
-        return
+        _LOGGER.warning("[HDS] device_history.icon 回填：查询 report_entities 失败: %s", exc)
+        return 0
+    params = [((icon or ""), eid, (icon or "")) for eid, icon in rows if eid]
+    if not params:
+        return 0
     try:
-        cur = conn.executemany(
+        before = conn.total_changes
+        conn.executemany(
             f"UPDATE {TABLE_DEVICE_HISTORY} SET icon = ? "
-            f"WHERE entity_id = ? AND (icon IS NULL OR icon = '')",
-            pairs,
+            f"WHERE entity_id = ? AND icon IS NOT ?",
+            params,
         )
         conn.commit()
-        _LOGGER.info("[HDS] device_history.icon 回填完成：涉及实体 %d 个，影响行数 %s",
-                     len(pairs), getattr(cur, "rowcount", -1))
+        changed = int(conn.total_changes - before)
+        _LOGGER.info("[HDS] device_history.icon 回填完成：来源 report_entities（覆盖更新），实体 %d 个，写入行数 %d",
+                     len(params), changed)
+        return changed
     except Exception as exc:
         _LOGGER.warning("[HDS] device_history.icon 回填失败: %s", exc)
+        return 0
+
+
+def _fill_device_icon_sync(db_path: str) -> int:
+    """打开数据库并回填 device_history.icon，返回写入行数（供按钮 executor 调用）。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        return _backfill_device_history_icon(conn)
+    finally:
+        conn.close()
 
 
 def _init_database(db_path: str) -> None:
@@ -377,7 +397,11 @@ def _init_database(db_path: str) -> None:
             conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN off_snapshot TEXT NOT NULL DEFAULT ''")
         if "icon" not in existing_cols:
             conn.execute(f"ALTER TABLE {TABLE_DEVICE_HISTORY} ADD COLUMN icon TEXT NOT NULL DEFAULT ''")
-            _LOGGER.info("已为 %s 表补充 icon 列", TABLE_DEVICE_HISTORY)
+            _LOGGER.info(
+                "已为 %s 表补充 icon 列；如需为历史数据回填图标，"
+                "请点击按钮 button.ha_data_store_fill_device_icon（不再随启动自动回填）",
+                TABLE_DEVICE_HISTORY,
+            )
 
         # 3) 传感器数据表：每种指标独立建表（统一结构 id, entity_id, name, datetime, value）
         #    sensor 类型 value 为 TEXT（支持非数值），其余为 REAL
@@ -653,6 +677,9 @@ def _init_database(db_path: str) -> None:
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_report_entities_eid ON {TABLE_REPORT_ENTITIES} (entity_id);"
         )
+        # 注：device_history.icon 的历史回填**不在启动时执行**（低频一次性操作，
+        #     避免每次启动全表扫描），改由按钮 button.ha_data_store_fill_device_icon 按需触发，
+        #     走 _backfill_device_history_icon（按 report_entities 覆盖更新，见 idx_report_entities_eid）。
         # 13.5) 用户操作记录表（前端埋点上报，供分析使用习惯 + 还原设备面板）
         conn.execute(
             f"""
@@ -692,9 +719,6 @@ def _init_database(db_path: str) -> None:
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_user_actions_ts ON {TABLE_USER_ACTIONS} (ts);"
         )
-        # 迁移：回填 device_history.icon（历史数据统一按 entity_id 取 user_actions 最近一条 icon）
-        # 注：user_actions 已有 idx_user_actions_eid（entity_id）索引，查询走索引
-        _backfill_device_history_icon(conn)
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_user_actions_eid ON {TABLE_USER_ACTIONS} (entity_id);"
         )
@@ -1196,6 +1220,18 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
             )
         except Exception as e:
             _LOGGER.warning("[HDS] power_energy_daily 回填 daily_entity_id 失败（可忽略）: %s", e)
+        # 17) 指标目录（元数据 + 通用指标引擎）
+        #     内置指标在此 seed（INSERT OR IGNORE，不覆盖用户改动）。注：attr_* 类型的指标
+        #     需对应数据表已创建才会生成，新建属性类型后可在 db_viewer「指标管理」点
+        #     「同步内置指标」补齐。
+        try:
+            from .metrics import METRICS_CATALOG_SCHEMA_SQL, sync_builtin_metrics
+            conn.execute(METRICS_CATALOG_SCHEMA_SQL)
+            added = sync_builtin_metrics(conn)
+            if added:
+                _LOGGER.info("[HDS] %s 已同步内置指标 %d 条", TABLE_METRICS_CATALOG, added)
+        except Exception as exc:
+            _LOGGER.warning("[HDS] 指标目录初始化失败（不影响主流程）: %s", exc)
         # 迁移旧表：补缺失列、补 token、修复 url 约束
         try:
             pt_columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_PUSH_TARGETS})")]
@@ -1392,8 +1428,8 @@ def _insert_device_on_record(
             except Exception:
                 pass
 
-        # 新增记录时同步 icon：从 user_actions 取该实体最近一次操作的 icon
-        icon = _lookup_user_action_icon(conn, entity_id)
+        # 新增记录时同步 icon：从 report_entities 取该实体上报的 icon
+        icon = _lookup_report_entity_icon(conn, entity_id)
         if icon:
             try:
                 conn.execute(
@@ -2285,8 +2321,8 @@ def _do_midnight_splits(db_path: str, items: list[dict], off_time_str: str,
             )
             new_record_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-            # 拆分出的新记录同样同步 icon（从 user_actions 取该实体最近一次操作的 icon）
-            icon = _lookup_user_action_icon(conn, entity_id)
+            # 拆分出的新记录同样同步 icon（从 report_entities 取该实体上报的 icon）
+            icon = _lookup_report_entity_icon(conn, entity_id)
             if icon:
                 try:
                     conn.execute(
@@ -4333,6 +4369,12 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         AutomationLogsView,
         AutomationLookupView,
         AutomationStatsView,
+        RecentExcludeView,
+        RecentEntitiesView,
+        MetricsListView,
+        MetricsSchemaView,
+        MetricsTestView,
+        MetricsSyncView,
     )
     hass.http.register_view(EntityConfigView(db_path))
     hass.http.register_view(EntityConfigListView(db_path))
@@ -4344,6 +4386,14 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(DBViewerDataView(db_path))
     hass.http.register_view(DBViewerUpdateView(db_path))
     hass.http.register_view(DBViewerSQLView(db_path))
+    # 近期使用设备：排除项配置（api_settings.recent_exclude_entities）+ 实体唯一值
+    hass.http.register_view(RecentExcludeView(db_path))
+    hass.http.register_view(RecentEntitiesView(db_path))
+    # 指标管理（元数据 + 通用指标引擎 metrics_catalog）
+    hass.http.register_view(MetricsListView(db_path))
+    hass.http.register_view(MetricsSchemaView(db_path))
+    hass.http.register_view(MetricsTestView(db_path))
+    hass.http.register_view(MetricsSyncView(db_path))
     hass.http.register_view(LogDataView(hass))
     hass.http.register_view(EntityMonitorView(db_path, hass))
     hass.http.register_view(EntityStateView(db_path, hass))
@@ -4498,6 +4548,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }),
     )
     hass.data.setdefault(DOMAIN, {})["async_generate_daily_summary"] = _async_generate_daily_summary
+
+    # ── 按钮：手动回填 device_history.icon（历史数据，按 report_entities 覆盖更新） ──
+    async def _async_fill_device_icon() -> int:
+        """供按钮 button.ha_data_store_fill_device_icon 调用，返回写入行数。
+
+        历史回填已从「HA 启动时自动执行」改为按钮按需触发（低频一次性操作）。
+        """
+        db_path = str(hass.data.get(DOMAIN, {}).get("db_path") or "")
+        if not db_path:
+            raise RuntimeError("db_path 缺失")
+        return await hass.async_add_executor_job(_fill_device_icon_sync, db_path)
+
+    hass.data.setdefault(DOMAIN, {})["async_fill_device_icon"] = _async_fill_device_icon
 
     # ── 媒体播放队列：后端自动切歌 ──
     import json as _json

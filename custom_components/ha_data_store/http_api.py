@@ -74,6 +74,22 @@ from .const import (
     COLLECT_MODE_POLL,
 )
 from .logger import get_logger as _log_local
+from .recent_devices import (
+    compute_device_last_used_sync,
+    get_exclude_entities,
+    get_window_days,
+    set_exclude_entities,
+)
+from .insights import build_timeline_sync, compute_room_occupancy_sync
+from .metrics import (
+    compute_metrics_query_sync,
+    delete_metric_sync,
+    get_schema_catalog_sync,
+    list_metrics_sync,
+    sync_builtin_metrics_sync,
+    test_metric_sync,
+    upsert_metric_sync,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -4314,7 +4330,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_entities, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, whole_house_usage, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail, power_energy_joined, power_energy_multi, device_usage_multi, device_usage_detail, device_usage_total, device_usage_history, device_usage_avg"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_entities, device_last_used, timeline, room_occupancy, metrics_query, metrics_catalog, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, whole_house_usage, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail, power_energy_joined, power_energy_multi, device_usage_multi, device_usage_detail, device_usage_total, device_usage_history, device_usage_avg"},
                 status_code=400,
             )
 
@@ -4328,6 +4344,16 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_device_history, db_path, request)
             elif query_type == "device_entities":
                 result = await self._exec_in_executor(hass, self._query_device_entities, db_path, request)
+            elif query_type == "device_last_used":
+                result = await self._exec_in_executor(hass, self._query_device_last_used, db_path, request)
+            elif query_type == "timeline":
+                result = await self._exec_in_executor(hass, self._query_timeline, db_path, request)
+            elif query_type == "room_occupancy":
+                result = await self._exec_in_executor(hass, self._query_room_occupancy, db_path, request)
+            elif query_type == "metrics_query":
+                result = await self._exec_in_executor(hass, self._query_metrics_query, db_path, request)
+            elif query_type == "metrics_catalog":
+                result = await self._exec_in_executor(hass, self._query_metrics_catalog, db_path, request)
             elif query_type == "power_energy_joined":
                 result = await self._exec_in_executor(hass, self._query_power_energy_joined, db_path, request)
             elif query_type == "power_energy_multi":
@@ -4732,6 +4758,237 @@ class QueryView(_BaseDBView):
                 "power_rating": rating,
             })
         return {"count": len(out), "rows": out}
+
+    # ------------------------------------------------------------------ #
+    #  device_last_used：近期使用设备（每实体最新使用情况，device_history）    #
+    # ------------------------------------------------------------------ #
+    def _query_device_last_used(self, db_path: str, request: web.Request) -> dict:
+        """【设备类】近期使用设备：每个 entity_id 的最新使用情况（device_history 来源）。
+
+        与传感器「近期使用设备」的 all 节点同源同口径（含自动化触发等非前端卡片操作），
+        返回按最近使用时间倒序；主体 `entities` 为去重后的 entity_id 列表。
+
+        参数：
+          entities     → 逗号分隔实体（空 = 全部）
+          start/end    → 时间段（作用 on_time）
+          date/month/year → 指定 日/月/年（优先级 start/end > date > month > year）
+          window_days  → 窗口天数（无时间过滤时生效；缺省读 number.ha_data_store_recent_days；
+                         传 0 = 不限窗口/全部历史）
+          filter       → 是否启用「排除项过滤」，默认 1（启用）；0 = 不应用排除项（别名 use_exclude）
+          exclude      → 逗号分隔排除实体；不传则用 db_viewer 保存的排除项，显式传空 = 不排除
+          running      → 1 只返回正在运行的设备
+          detail       → 0 不返回 items 明细（只要 entities 列表），默认 1
+          limit/offset → 分页（0 = 不限）
+
+        返回：{range, window_days, use_exclude, exclude_count, total, count, entities[], items[]}
+        """
+        q = request.query
+
+        def _csv(name: str) -> list[str]:
+            raw = (q.get(name, "") or "").replace("，", ",")
+            return [x.strip() for x in raw.split(",") if x.strip()]
+
+        entities = _csv("entities") or _csv("entity_id")
+
+        # filter（别名 use_exclude）：0/false/no/off = 关闭排除项过滤
+        raw_filter = (q.get("filter", q.get("use_exclude", "1")) or "1").strip().lower()
+        use_exclude = raw_filter not in ("0", "false", "no", "off")
+
+        # 未显式传 exclude → 用保存的排除项；传了（即使为空）→ 以传入为准
+        exclude = _csv("exclude") if "exclude" in q else None
+
+        # window_days：
+        #   未传 / 非法   → 读设置实体 number.ha_data_store_recent_days（缺失回退 30）
+        #   传 0          → 不限窗口（全部历史）
+        #   1~365         → 指定窗口天数
+        # 注：时间模式选了时间段/指定日/月/年时，本参数不生效（后端按 on_time 过滤优先）。
+        raw_days = (q.get("window_days", "") or "").strip()
+        window_days = self._to_int(raw_days, -1) if raw_days != "" else -1
+        if window_days < 0:
+            window_days = get_window_days(request.app.get("hass"))
+
+        return compute_device_last_used_sync(
+            db_path,
+            window_days=window_days,
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            date=(q.get("date", "") or "").strip(),
+            month=(q.get("month", "") or "").strip(),
+            year=(q.get("year", "") or "").strip(),
+            entities=entities,
+            exclude=exclude,
+            use_exclude=use_exclude,
+            running_only=(q.get("running", "") or "").strip() in ("1", "true", "yes"),
+            limit=self._to_int(q.get("limit", ""), 0),
+            offset=self._to_int(q.get("offset", ""), 0),
+            detail=(q.get("detail", "1") or "1").strip() not in ("0", "false", "no"),
+        )
+
+    # ------------------------------------------------------------------ #
+    #  metrics_query：通用指标查询（按 metrics_catalog 中的指标定义执行）    #
+    # ------------------------------------------------------------------ #
+    def _query_metrics_query(self, db_path: str, request: web.Request) -> dict:
+        """【通用指标】按指标目录中的定义执行查询（元数据驱动的通用引擎）。
+
+        参数：
+          metric_id → 指标 ID（必填；目录见 type=metrics_catalog 或管理页「📊 指标管理」）
+          start/end/date/month/year/days → 时间过滤（优先级同其它接口；days = 最近 N 天）
+          entities  → 逗号分隔实体过滤（别名 entity_id）
+          room      → 房间过滤
+          group_by  → 覆盖默认分组（none/entity/room/name/day/hour/month/year）
+          agg       → 覆盖聚合（avg/sum/max/min/count/count_distinct）
+          order     → asc/desc（默认 auto：时间维度 asc，其余按值 desc）
+          filters   → 附加等值过滤，JSON 对象字符串，如 {"room":"客厅"}
+          limit/offset → 分页（0 = 不限）
+          detail    → 1 额外返回原始记录（条数由 detail_limit 控制，默认 50）
+          sql       → 1 返回生成的 SQL（调试用）
+
+        返回：{metric_id, name, unit, range, group_by, agg, row_count, count,
+              summary{rows,samples,total_count,value,avg,min,max}, rows[], series{labels,values}}
+        """
+        q = request.query
+        metric_id = (q.get("metric_id", "") or "").strip()
+        if not metric_id:
+            raise ValueError("缺少 metric_id 参数")
+
+        def _csv(name: str) -> list[str]:
+            raw = (q.get(name, "") or "").replace("，", ",")
+            return [x.strip() for x in raw.split(",") if x.strip()]
+
+        filters = None
+        raw_filters = (q.get("filters", "") or "").strip()
+        if raw_filters:
+            try:
+                parsed = json.loads(raw_filters)
+            except Exception as exc:
+                raise ValueError(f"filters 需为 JSON 对象字符串，如 {{\"room\":\"客厅\"}}: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("filters 需为 JSON 对象字符串")
+            filters = {str(k): v for k, v in parsed.items()}
+
+        return compute_metrics_query_sync(
+            db_path,
+            metric_id,
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            date=(q.get("date", "") or "").strip(),
+            month=(q.get("month", "") or "").strip(),
+            year=(q.get("year", "") or "").strip(),
+            days=self._to_int(q.get("days", ""), 0),
+            entities=_csv("entities") or _csv("entity_id"),
+            room=(q.get("room", "") or "").strip(),
+            group_by=(q.get("group_by", "") or "").strip(),
+            agg=(q.get("agg", "") or "").strip(),
+            order=(q.get("order", "auto") or "auto").strip(),
+            limit=self._to_int(q.get("limit", ""), 0),
+            offset=self._to_int(q.get("offset", ""), 0),
+            filters=filters,
+            detail=(q.get("detail", "0") or "0").strip() in ("1", "true", "yes"),
+            detail_limit=self._to_int(q.get("detail_limit", ""), 50),
+            include_sql=(q.get("sql", "0") or "0").strip() in ("1", "true", "yes"),
+        )
+
+    def _query_metrics_catalog(self, db_path: str, request: web.Request) -> dict:
+        """【通用指标】指标目录（对外只读，配合 type=metrics_query 使用）。
+
+        参数：category（分类过滤）、keyword（模糊搜索）、enabled_only（默认 1，只看启用）
+        返回：{count, metrics: [{metric_id, name, category, source_table, agg, unit, ...}]}
+        """
+        q = request.query
+        items = list_metrics_sync(
+            db_path,
+            (q.get("category", "") or "").strip(),
+            (q.get("enabled_only", "1") or "1").strip() in ("1", "true", "yes"),
+            (q.get("keyword", "") or "").strip(),
+        )
+        return {"count": len(items), "metrics": items}
+
+    # ------------------------------------------------------------------ #
+    #  timeline：统一事件流（多来源合并，按天/日期/时间段，不分页）              #
+    # ------------------------------------------------------------------ #
+    def _query_timeline(self, db_path: str, request: web.Request) -> dict:
+        """【家庭洞察】统一事件流：设备开关 / 用户操作 / 自动化 / 扫地机 / 小爱 / 健康 / 打印机合并成一条时间线。
+
+        设备记录按 A 方案展开为 on / off 两个事件（运行中只有 on）；
+        时间为「天/日期/时间段/月/年」粒度（`device_history` 已在午夜拆分，无跨天记录），**不分页**。
+
+        参数：
+          date / start+end / month / year / today=1 → 时间窗（默认今日）
+          sources  → 来源过滤（默认全部）：
+                     device,user_action,automation,vacuum,xiaoai,health,printer
+          events   → 仅 device 有效：on / off（默认两者）
+          entities → 实体过滤（device / user_action / vacuum / xiaoai）
+          rooms    → 房间过滤（device.room / user_action.room_name）
+          users    → 用户过滤（device.on_user/off_user、user_action.user_name）
+          keyword  → 关键词（设备名 / 操作 / 自动化 / 小爱文本 / 健康名称·备注 / 打印机名）
+          limit    → 单次上限（默认 500，上限 5000；超出时 truncated=true）
+          detail   → 0 不返回 extra 明细（默认 1）
+
+        返回：{range, count, total, truncated, by_source{}, items[]}
+        """
+        q = request.query
+
+        def _flag(name: str, default: bool = False) -> bool:
+            raw = (q.get(name, "") or "").strip().lower()
+            return default if raw == "" else raw in ("1", "true", "yes", "on")
+
+        return build_timeline_sync(
+            db_path,
+            date=(q.get("date", "") or "").strip(),
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            month=(q.get("month", "") or "").strip(),
+            year=(q.get("year", "") or "").strip(),
+            today=_flag("today"),
+            sources=(q.get("sources", "") or ""),
+            events=(q.get("events", "") or ""),
+            entities=(q.get("entities", "") or "") or (q.get("entity_id", "") or ""),
+            rooms=(q.get("rooms", "") or ""),
+            users=(q.get("users", "") or ""),
+            keyword=(q.get("keyword", "") or ""),
+            limit=self._to_int(q.get("limit", ""), 500) or 500,
+            detail=_flag("detail", True),
+        )
+
+    # ------------------------------------------------------------------ #
+    #  room_occupancy：房间占用排行（严谨区间并集）+ 门户事件                   #
+    # ------------------------------------------------------------------ #
+    def _query_room_occupancy(self, db_path: str, request: web.Request) -> dict:
+        """【家庭洞察】房间占用排行：由 `device_history` 中 `name='人在'` 记录计算。
+
+        严谨口径：同一房间的重叠区间先做**区间并集**再累计时长（多个"人在"实体、
+        抖动重复上报都不会重复计时）；另附门户（`name='入户门'`）事件与日/小时分解。
+
+        参数：
+          date / start+end / month / year / today=1 → 时间窗（默认今日）
+          rooms         → 只统计这些房间
+          include_empty → 1 时无数据的房间也返回 0（房间清单取自 entity_configs.room）
+          bucket        → none | day（按日序列）| hour（24 小时分布，单日查询）
+          door          → 0 不返回门户事件（默认 1）
+          detail        → 0 不返回每房间合并区间明细（默认 1）
+
+        返回：{range, total_duration_hour, top_room, occupied_rooms, rooms[], series?, by_hour?, door?}
+        """
+        q = request.query
+
+        def _flag(name: str, default: bool = False) -> bool:
+            raw = (q.get(name, "") or "").strip().lower()
+            return default if raw == "" else raw in ("1", "true", "yes", "on")
+
+        return compute_room_occupancy_sync(
+            db_path,
+            date=(q.get("date", "") or "").strip(),
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            month=(q.get("month", "") or "").strip(),
+            year=(q.get("year", "") or "").strip(),
+            today=_flag("today"),
+            rooms=(q.get("rooms", "") or ""),
+            include_empty=_flag("include_empty"),
+            bucket=(q.get("bucket", "") or "none").strip(),
+            door=_flag("door", True),
+            detail=_flag("detail", True),
+        )
 
     # ------------------------------------------------------------------ #
     #  device_usage_detail / total / history / avg：设备类多实体扩展接口      #
@@ -8960,6 +9217,309 @@ class DBViewerSQLView(_BaseDBView):
 
 
 # ========================================================================== #
+#  10.5 ★ 近期使用设备 — 排除项配置 ★                                          #
+#     挂载路径: GET/POST /api/ha_data_store/recent/exclude                     #
+#     存储: api_settings.recent_exclude_entities（JSON 数组，无长度限制）        #
+# ========================================================================== #
+class RecentExcludeView(_BaseDBView):
+    """「近期使用设备」排除项配置（被排除的 entity_id 不进入 all 节点与 device_last_used）。
+
+    GET  /api/ha_data_store/recent/exclude
+      → {success, count, exclude: ["light.a", ...]}
+    POST /api/ha_data_store/recent/exclude
+      Body: {"exclude": ["light.a", "switch.b"]} 或 {"text": "light.a,switch.b\\nlight.c"}
+      → 去重去空后保存，返回保存后的列表（并立即刷新「近期使用设备」传感器）
+    """
+
+    url = "/api/ha_data_store/recent/exclude"
+    name = "api:ha_data_store:recent_exclude"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        items = await self._exec_in_executor(hass, get_exclude_entities, db_path)
+        return self.json({"success": True, "count": len(items), "exclude": items})
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        raw = body.get("exclude")
+        if raw is None:
+            raw = body.get("text") or ""
+        if isinstance(raw, str):
+            raw = raw.replace("，", ",").replace("\n", ",").split(",")
+        if not isinstance(raw, (list, tuple)):
+            return self.json(
+                {"success": False, "error": "exclude 需为数组，或逗号/换行分隔的文本"},
+                status_code=400,
+            )
+        items = await self._exec_in_executor(hass, set_exclude_entities, db_path, list(raw))
+
+        # 保存后立即刷新传感器（失败不影响保存结果）
+        try:
+            sensor = hass.data.get(DOMAIN, {}).get("user_actions_sensor")
+            if sensor is not None:
+                await sensor._async_refresh()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[recent] 排除项保存后刷新传感器失败: %s", exc)
+
+        _LOGGER.info("[recent] 近期使用设备排除项已保存: %d 个", len(items))
+        return self.json({"success": True, "count": len(items), "exclude": items})
+
+
+class RecentEntitiesView(_BaseDBView):
+    """近期使用设备：device_history 内实体唯一值（供 db_viewer 选择排除项用）。
+
+    GET /api/ha_data_store/recent/entities
+      → {success, count, rows: [{entity_id, name, room}]}
+    """
+
+    url = "/api/ha_data_store/recent/entities"
+    name = "api:ha_data_store:recent_entities"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+
+        def _load() -> list[dict]:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                try:
+                    rows = conn.execute(
+                        f"SELECT entity_id, MAX(name) AS name, MAX(room) AS room "
+                        f"FROM {TABLE_DEVICE_HISTORY} GROUP BY entity_id ORDER BY entity_id"
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = conn.execute(
+                        f"SELECT entity_id, MAX(name) AS name, '' AS room "
+                        f"FROM {TABLE_DEVICE_HISTORY} GROUP BY entity_id ORDER BY entity_id"
+                    ).fetchall()
+                return [
+                    {"entity_id": r["entity_id"] or "", "name": r["name"] or "", "room": r["room"] or ""}
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+
+        rows = await self._exec_in_executor(hass, _load)
+        return self.json({"success": True, "count": len(rows), "rows": rows})
+
+
+# ========================================================================== #
+#  10.6 ★ 指标管理（元数据 + 通用指标引擎）★                                   #
+#      GET/POST/DELETE /api/ha_data_store/metrics                            #
+#      GET  /api/ha_data_store/metrics_schema                                #
+#      POST /api/ha_data_store/metrics_test                                  #
+#      POST /api/ha_data_store/metrics_sync                                  #
+# ========================================================================== #
+class MetricsListView(_BaseDBView):
+    """指标目录（metrics_catalog）：列表 / 新增修改 / 删除。
+
+    GET    /api/ha_data_store/metrics?category=&keyword=&enabled_only=1
+      → {success, count, metrics: [{metric_id, name, category, source_table, ...}]}
+    POST   /api/ha_data_store/metrics
+      Body: 指标定义 JSON（metric_id 已存在则更新；内置指标允许改参数）
+      → {success, metric: {...}}
+    DELETE /api/ha_data_store/metrics?metric_id=xxx
+      → {success}（内置指标不可删除，只能停用）
+    """
+
+    url = "/api/ha_data_store/metrics"
+    name = "api:ha_data_store:metrics"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        q = request.query
+        items = await self._exec_in_executor(
+            hass, list_metrics_sync, db_path,
+            (q.get("category", "") or "").strip(),
+            (q.get("enabled_only", "") or "").strip() in ("1", "true", "yes"),
+            (q.get("keyword", "") or "").strip(),
+        )
+        return self.json({"success": True, "count": len(items), "metrics": items})
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return self.json({"success": False, "error": "请求体需为 JSON 对象"}, status_code=400)
+        # 兼容：{action: "delete", metric_id: "xxx"}
+        if str(body.get("action", "")).strip().lower() == "delete":
+            return await self._delete(db_path, hass, str(body.get("metric_id", "")).strip())
+        try:
+            metric = await self._exec_in_executor(hass, upsert_metric_sync, db_path, body)
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            _LOGGER.exception("保存指标失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+        return self.json({"success": True, "metric": metric})
+
+    async def delete(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        return await self._delete(db_path, hass, (request.query.get("metric_id", "") or "").strip())
+
+    async def _delete(self, db_path: str, hass: HomeAssistant, metric_id: str) -> web.Response:
+        if not metric_id:
+            return self.json({"success": False, "error": "缺少 metric_id"}, status_code=400)
+        try:
+            ok = await self._exec_in_executor(hass, delete_metric_sync, db_path, metric_id)
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        if not ok:
+            return self.json({"success": False, "error": f"指标不存在: {metric_id}"}, status_code=404)
+        return self.json({"success": True, "metric_id": metric_id})
+
+
+class MetricsSchemaView(_BaseDBView):
+    """指标管理：数据表 / 列元数据（供前端下拉选择，同时是引擎的列白名单）。
+
+    GET /api/ha_data_store/metrics_schema
+      → {success, groups: [{key, label, tables: [{table, label, time_col, entity_col,
+          value_col, columns: [{name, type}]}]}]}
+    """
+
+    url = "/api/ha_data_store/metrics_schema"
+    name = "api:ha_data_store:metrics_schema"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        groups = await self._exec_in_executor(hass, get_schema_catalog_sync, db_path)
+        return self.json({"success": True, "groups": groups})
+
+
+class MetricsTestView(_BaseDBView):
+    """指标「试运行」：不保存定义，按传入定义 + 参数直接执行并返回 SQL。
+
+    POST /api/ha_data_store/metrics_test
+      Body: {"metric": {...定义...}, "start": "2026-09-01", "group_by": "day", ...}
+      → {success, result: {rows, summary, series, sql}}
+    """
+
+    url = "/api/ha_data_store/metrics_test"
+    name = "api:ha_data_store:metrics_test"
+
+    _PARAM_KEYS = ("start", "end", "date", "month", "year", "room", "group_by", "agg", "order")
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return self.json({"success": False, "error": "请求体需为 JSON 对象"}, status_code=400)
+
+        defn = body.get("metric") if isinstance(body.get("metric"), dict) else body
+        kw = {k: str(body.get(k, "") or "").strip()
+              for k in self._PARAM_KEYS if str(body.get(k, "") or "").strip()}
+        try:
+            kw["days"] = int(body.get("days", 0) or 0)
+            kw["limit"] = int(body.get("limit", 0) or 0)
+            kw["detail_limit"] = int(body.get("detail_limit", 20) or 20)
+        except (TypeError, ValueError):
+            return self.json({"success": False, "error": "days/limit/detail_limit 需为整数"}, status_code=400)
+        kw["entities"] = [str(x).strip() for x in (body.get("entities") or []) if str(x).strip()]
+        kw["filters"] = body.get("filters") if isinstance(body.get("filters"), dict) else None
+        kw["detail"] = bool(body.get("detail"))
+
+        try:
+            # 注意：_exec_in_executor 只接受位置参数，关键字参数需包一层 lambda
+            result = await self._exec_in_executor(
+                hass, lambda: test_metric_sync(db_path, defn, **kw)
+            )
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            _LOGGER.exception("指标试运行失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+        return self.json({"success": True, "result": result})
+
+
+class MetricsSyncView(_BaseDBView):
+    """同步内置指标到 metrics_catalog（新建属性类型 / 结构变更后补齐指标）。
+
+    POST /api/ha_data_store/metrics_sync
+      Body: {"reset": false}
+        reset=false（默认）→ 只补齐缺失的内置指标，不覆盖已有改动
+        reset=true          → 按最新定义覆盖内置指标参数
+      → {success, changed: N, count: 总指标数}
+    """
+
+    url = "/api/ha_data_store/metrics_sync"
+    name = "api:ha_data_store:metrics_sync"
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+        reset = False
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                reset = str(body.get("reset", "")).strip().lower() in ("1", "true", "yes")
+        except Exception:
+            pass
+        changed = await self._exec_in_executor(hass, sync_builtin_metrics_sync, db_path, reset)
+        count = len(await self._exec_in_executor(hass, list_metrics_sync, db_path))
+        return self.json({"success": True, "changed": changed, "count": count})
+
+
+# ========================================================================== #
 #  9. ★ 数据库浏览器 — DBViewerView (HTML页面) ★                               #
 #     挂载路径: GET /api/device_energy/db_viewer                               #
 # ========================================================================== #
@@ -9613,11 +10173,68 @@ class EntityMonitorView(_BaseDBView):
                         else "warn",
             )
 
+            # -- 最近使用设备（device_history 全量；窗口天数读设置实体，排除项取自 api_settings）--
+            recent_info: dict = {"count": 0, "total": 0, "running": 0, "window_days": 0,
+                                 "range": "", "exclude_count": 0, "items": []}
+            try:
+                rdata = compute_device_last_used_sync(
+                    db_path, window_days=get_window_days(self._hass)
+                )
+                r_items = rdata.get("items") or []
+                recent_info = {
+                    "count": len(r_items),
+                    "total": rdata.get("total", len(r_items)),
+                    "running": sum(1 for i in r_items if i.get("running")),
+                    "window_days": rdata.get("window_days", 0),
+                    "range": rdata.get("range", ""),
+                    "exclude_count": rdata.get("exclude_count", 0),
+                    "items": r_items[:100],   # 监控页只取前 100 台，避免响应过大
+                }
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[monitor] 最近使用设备统计失败: %s", exc)
+            types["recent"] = dict(
+                count=recent_info["count"], ok=recent_info["count"], bad=0,
+                health="good", running=recent_info["running"],
+            )
+
+            # -- 指标管理（metrics_catalog：元数据 + 通用指标引擎）--
+            metrics_info: dict = {"total": 0, "enabled": 0, "disabled": 0, "builtin": 0,
+                                  "custom": 0, "categories": {}, "items": []}
+            try:
+                mrows = list_metrics_sync(db_path)
+                cats: dict[str, int] = {}
+                for m in mrows:
+                    cat = str(m.get("category") or "custom")
+                    cats[cat] = cats.get(cat, 0) + 1
+                metrics_info = {
+                    "total": len(mrows),
+                    "enabled": sum(1 for m in mrows if m.get("enabled")),
+                    "disabled": sum(1 for m in mrows if not m.get("enabled")),
+                    "builtin": sum(1 for m in mrows if m.get("builtin")),
+                    "custom": sum(1 for m in mrows if not m.get("builtin")),
+                    "categories": cats,
+                    # 监控页只取前 100 条，避免响应过大
+                    "items": [
+                        {k: m.get(k) for k in ("metric_id", "name", "category", "source_table",
+                                               "value_col", "value_expr", "agg", "unit",
+                                               "group_by", "enabled", "builtin", "remark")}
+                        for m in mrows[:100]
+                    ],
+                }
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[monitor] 指标管理统计失败: %s", exc)
+            types["metrics"] = dict(
+                count=metrics_info["total"], ok=metrics_info["enabled"],
+                bad=metrics_info["disabled"], health="good",
+            )
+
             return {"entities": entities, "summary": summary,
                     "exports": exports, "file_sources": file_sources, "api_sources": api_sources,
                     "push_targets": push_targets,
                     "xiaoai": xiaoai_info,
                     "printer": printer_info,
+                    "recent": recent_info,
+                    "metrics": metrics_info,
                     "types": types}
 
         try:

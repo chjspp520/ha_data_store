@@ -8,6 +8,10 @@ button.ha_data_store_automation_status_refresh：
   点击 → 立即调用 sensor.ha_data_store_automation 的 async_trigger_refresh
   手动刷新自动化状态传感器（automations / automation_logs / ha_automation 汇总）。
 
+button.ha_data_store_fill_device_icon：
+  点击 → 按 report_entities 覆盖更新 device_history.icon（历史数据回填），
+  状态属性记录本次写入行数与执行时间；新增记录时的 icon 同步不受影响。
+
 button.ha_data_store_db_compress：
   点击 → 对集成 SQLite 数据库执行 VACUUM 压缩，状态属性记录压缩前/压缩后大小与压缩时间。
 """
@@ -85,6 +89,52 @@ class AutomationStatusButton(ButtonEntity):
             _LOGGER.info("[HDS] 自动化状态已手动刷新")
         except Exception as e:
             _LOGGER.exception("[HDS] 手动刷新自动化状态失败: %s", e)
+
+
+class FillDeviceIconButton(ButtonEntity):
+    """回填设备图标按钮：按 report_entities 覆盖更新 device_history.icon。
+
+    强制实体ID：button.ha_data_store_fill_device_icon
+    状态属性：最近一次写入行数 / 执行时间。
+
+    背景：device_history.icon 的历史回填属低频一次性操作（首次升级补列、
+    前端批量改了图标需要纠正历史），不再随 HA 启动自动执行，改为本按钮按需触发。
+    新增记录时仍会自动同步 icon，不受影响。
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "fill_device_icon"
+    _attr_icon = "mdi:image-sync"
+
+    def __init__(self, hass: HomeAssistant, device_info: DeviceInfo):
+        self._hass = hass
+        self.entity_id = "button.ha_data_store_fill_device_icon"
+        self._attr_unique_id = f"{DOMAIN}_fill_device_icon"
+        self._attr_device_info = device_info
+        # 最近一次回填结果（写入行数 / 执行时间）
+        self._last: dict[str, object] = {}
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        return self._last or None
+
+    async def async_press(self) -> None:
+        """点击回填 device_history.icon。"""
+        fill = self._hass.data.get(DOMAIN, {}).get("async_fill_device_icon")
+        if fill is None:
+            _LOGGER.error("[HDS] 设备图标回填处理器未初始化，无法执行")
+            return
+        try:
+            changed = await fill()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 回填 device_history.icon 失败: %s", exc)
+            return
+        self._last = {
+            "写入行数": int(changed or 0),
+            "执行时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.async_write_ha_state()
+        _LOGGER.info("[HDS] device_history.icon 回填完成，写入 %s 行", self._last["写入行数"])
 
 
 class DatabaseCompressButton(ButtonEntity):
@@ -169,5 +219,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     async_add_entities([
         DailySummaryButton(hass, device_info),
         AutomationStatusButton(hass, device_info),
+        FillDeviceIconButton(hass, device_info),
         DatabaseCompressButton(hass, device_info),
     ])

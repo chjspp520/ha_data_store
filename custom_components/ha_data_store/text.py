@@ -4,6 +4,7 @@
   text.ha_data_store_ele_list —— 用电计量列表条数设置（状态值 "日,月,年"，如 "5,3,4"）
     默认值 "3,3,3"；仅后端校验格式（^\\d+,\\d+,\\d+$），非法输入拒绝写入；
     读取方（sensor.ha_data_store_all_power）遇到缺失/非法一律回退 "3,3,3"。
+    继承 RestoreEntity：重启 HA 后保持用户设置，不会回到默认 "3,3,3"。
 
 同时保留回调，供「辅助元素」动态创建 text 域实体使用。
 """
@@ -17,6 +18,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
 
@@ -28,11 +30,20 @@ _EL_LIST_DEFAULT = "3,3,3"
 _EL_LIST_RE = re.compile(r"^\s*\d{1,4}\s*,\s*\d{1,4}\s*,\s*\d{1,4}\s*$")
 
 
-class EleListSettingText(TextEntity):
+def _parse_restored_ele_list(raw) -> str | None:
+    """把持久化状态字符串解析为合法的列表条数设置；空值/非法返回 None。"""
+    txt = str(raw).strip() if raw is not None else ""
+    if not txt or txt in ("unknown", "unavailable"):
+        return None
+    return txt if _EL_LIST_RE.match(txt) else None
+
+
+class EleListSettingText(TextEntity, RestoreEntity):
     """用电计量列表条数设置。
 
     状态值格式 "日条数,月条数,年条数"，如 "5,3,4"；
     控制 sensor.ha_data_store_all_power 中每个实体的 daylist/monthlist/yearlist 显示条数。
+    设置值通过 RestoreEntity 持久化，重启 HA 后自动恢复。
     """
 
     _attr_has_entity_name = False
@@ -45,6 +56,18 @@ class EleListSettingText(TextEntity):
         self.entity_id = _EL_LIST_ENTITY_ID
         self._attr_unique_id = f"{DOMAIN}_ele_list_setting"
         self._attr_device_info = device_info
+
+    async def async_added_to_hass(self) -> None:
+        """恢复上次持久化的设置值（重启后保持，而非回到默认 "3,3,3"）。"""
+        await super().async_added_to_hass()
+        try:
+            last = await self.async_get_last_state()
+        except Exception:  # noqa: BLE001 - 恢复失败不影响实体可用
+            return
+        val = _parse_restored_ele_list(getattr(last, "state", None) if last else None)
+        if val is not None:
+            self._attr_native_value = val
+            _LOGGER.info("[HDS] 用电计量列表条数已恢复上次设置: %s", val)
 
     async def async_set_value(self, value: str) -> None:
         """后端校验后写值；格式非法直接拒绝（状态保持不变）。"""

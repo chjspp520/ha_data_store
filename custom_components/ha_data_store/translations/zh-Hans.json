@@ -195,6 +195,9 @@
       },
       "automation_status_refresh": {
         "name": "刷新自动化状态"
+      },
+      "fill_device_icon": {
+        "name": "回填设备图标"
       }
     }
   }

@@ -34,6 +34,7 @@ TABLE_AUTOMATIONS = "automations"
 TABLE_AUTOMATION_LOGS = "automation_logs"
 TABLE_POWER_METER_CONFIGS = "power_meter_configs"
 TABLE_POWER_ENERGY_DAILY = "power_energy_daily"
+TABLE_METRICS_CATALOG = "metrics_catalog"
 
 # 传感器类：每种指标独立建表，表名前缀
 ENV_TABLE_PREFIX = "env_"
@@ -107,5 +108,12 @@ AUTOMATION_TICK_SECONDS = 30        # 调度器 tick 间隔（秒）
 AUTOMATION_LOG_RETENTION_DAYS = 30  # 执行记录保留天数（自动清理）
 AUTOMATION_LOG_CLEANUP_EVERY = 60   # 每 N 次 tick 清理一次过期执行记录
 
+# ── 近期使用设备（传感器 all 节点 + API type=device_last_used）──
+RECENT_DAYS_ENTITY_ID = "number.ha_data_store_recent_days"  # 统计窗口天数设置实体
+RECENT_WINDOW_DAYS_DEFAULT = 30     # 默认窗口（天）：设置实体缺失/非法时回退
+RECENT_WINDOW_DAYS_MIN = 1
+RECENT_WINDOW_DAYS_MAX = 365
+RECENT_EXCLUDE_SETTING_KEY = "recent_exclude_entities"  # api_settings 中的排除项键（JSON 数组）
+
 # 系统版本号（与 manifest.json 同步）
-VERSION = "3.6.7"
+VERSION = "3.6.11"
