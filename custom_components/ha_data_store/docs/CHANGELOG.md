@@ -1,5 +1,344 @@
 # 更新日志
 
+## 2026-09-26 — v4.0.0 实体→网络「可控制」+ 整库备份 + API 工具整合
+
+> 本版为当日全部改动的汇总版（原 3.7.0 / 3.8.0 / 3.8.1 / 3.8.2 / 3.8.3 五个版本合并为 4.0.0）。
+> 每条小节末尾标注了它原本所属的版本号，便于对照历史讨论。
+
+### 一、实体→网络：从「只读映射」升级为「可控映射」（原 3.7.0）
+
+#### 1.1 背景
+
+「系统配置 → 🌐 实体→网络」原先只能把实体**读**出去（`GET /push_data/{token}` 返回
+state/attributes），可操作实体映射出去后无法控制。本版补上**写**通道，并保持
+「只读」与「可写」两条链路的凭证、开关、审计完全分离。
+
+#### 1.2 读写分离（安全模型）
+
+| 维度 | 读（原有） | 写（新增） |
+|---|---|---|
+| 地址 | `GET /api/ha_data_store/push_data/{push_token}` | `POST /api/ha_data_store/push_control/{control_token}` |
+| 凭证 | `push_token`（只读凭证） | `control_token`（写凭证，独立生成） |
+| HTTP 方法 | 仅 GET | 仅 POST（GET/POST 到读地址均给出明确 403/405 提示） |
+| 开关 | `api_enabled`（API 访问） | `api_enabled` **且** `push_control_enabled`（实体网络控制） |
+| 目标开关 | `enabled` | `enabled` **且** `control_enabled` |
+| 审计 | 无 | `control_logs` 表（保留 30 天） |
+
+新增 HA 开关实体：设备「HA数据统一存储系统」下的开关 **「实体网络控制」**
+（`switch.py` `HaDataStorePushControlSwitch`，唯一 id `ha_data_store_push_control_enabled`），
+**首次安装默认关闭**，状态跨重启保留。关闭时所有控制请求 403 ——
+这是一键掐断所有外部控制的「总闸」。
+
+> 写操作强制 POST 的原因：GET 会被浏览器预取、被代理/日志记录、被爬虫扫到，
+> 等于把「开锁」变成一个可被随机触发的动作。
+
+#### 1.3 动作白名单（`push_control.py` 新增）
+
+内置 **29 个域 / 97 个动作** 的目录 `ACTION_CATALOG`，每个动作映射到确定的 HA 服务与参数 schema，
+**不接受任意 `domain.service`**：
+
+| 域 | 动作（节选） |
+|---|---|
+| switch / input_boolean | turn_on / turn_off / toggle |
+| light | turn_on(brightness/color_temp_kelvin/rgb_color/effect/transition) / turn_off / toggle |
+| climate | set_hvac_mode / set_temperature / set_fan_mode / set_swing_mode / turn_on / turn_off |
+| cover | open / close / stop / set_cover_position / set_cover_tilt_position / tilt 系列 |
+| fan | turn_on(percentage/preset_mode) / set_percentage / set_preset_mode / oscillate / set_direction |
+| humidifier / water_heater / media_player / vacuum / valve / lawn_mower / todo | 各自服务集 |
+| number / input_number | set_value |
+| select / input_select | select_option |
+| text / input_text / counter / timer / button / input_button | 各自服务集 |
+| scene / script / automation | turn_on / turn_off / trigger |
+| **lock / alarm_control_panel / siren** | 标记 `high_risk`，UI 额外警告 |
+
+**参数 schema 动态展开**：范围与枚举从实体当前属性实时读取 ——
+`climate.temperature` 取 `min_temp/max_temp/target_temp_step`，
+`hvac_mode` 取 `hvac_modes`，`select.option` 取 `options`，`number.value` 取 `min/max/step`。
+动态枚举无值（实体不支持）时该参数直接从能力列表剔除，UI 不会显示不可用项。
+
+**能力过滤**：`cover` 按 `supported_features` 位掩码过滤动作
+（无 SET_POSITION 位就不出现 `set_cover_position`）。
+
+只读域（sensor / binary_sensor / camera / weather 等 18 个）显式返回「不支持控制」的原因。
+
+#### 1.4 参数控制两层设计
+
+**第一层 · 调用方可传参**（运行时）：
+
+```
+POST /api/ha_data_store/push_control/{control_token}
+{"action": "set_temperature", "params": {"temperature": 26}, "wait_state": true}
+```
+
+**第二层 · 配置端锁定**（设计时，`param_constraints` 字段）：
+
+- `lock=value`：固定值，调用方传参**被忽略**（永远执行指定值）
+- `lock=range`：限幅，超界自动裁剪（例如窗帘只允许 0~50，不能全开）
+
+于是外部系统拿到的是「受限能力」而非「实体控制权」，可做到
+「一个 token 只能关灯关空调」「一个 token 只能把空调设成 26 度」这类场景化授权。
+
+#### 1.5 授权清单（`allowed_actions`）
+
+- `["*"]` / 字段缺失 → 目录内全部动作
+- `[]` → **不允许任何动作**（控制实际不可用，最安全；UI 会黄字提示）
+- `["turn_on", "turn_off"]` → 仅这些动作，其余返回 403
+
+#### 1.6 raw 逃生口（默认关闭）
+
+针对自定义集成只有专有服务的场景，可对单个目标开启 `allow_raw_service`：
+
+```
+{"service": "climate.set_temperature", "data": {"temperature": 26}}
+```
+
+硬约束：**只允许调用实体自身域**（跨域 403）+ 禁止
+`shell_command / python_script / hassio / homeassistant / recorder / notify` 等系统域。
+
+#### 1.7 其他防护
+
+- **限流**：`rate_limit_per_min`（默认 60，0=不限），超限 429；内存滑窗 + 定期清理过期桶
+- **状态等待**：`wait_state: true` 时轮询最长 3 秒等 `last_updated` 变化，响应里给 `waited`
+- **审计**：每次控制（成功/失败）写 `control_logs`，含 target_id / 实体 / 动作 / 服务 /
+  实际参数 / 结果 / 错误 / 来源 IP
+- **能力发现**：`GET /push_capabilities/{control_token}` 返回该 token 实际被授权的动作与参数
+  schema，第三方无需硬编码
+
+#### 1.8 数据库（原 3.7.0）
+
+`push_targets` 新增列：`control_token` / `control_enabled` / `allowed_actions` /
+`param_constraints` / `rate_limit_per_min` / `allow_raw_service`。
+
+**放开 `entity_id` 唯一约束**（迁移 `_migrate_push_targets_drop_unique`）：
+SQLite 不支持 DROP CONSTRAINT，采用「建新表 → 拷数据 → 换名」重建，唯一性改由
+`push_token` / `control_token` 的**部分唯一索引**（`WHERE xxx != ''`，空串不参与）保证。
+迁移幂等，已用离线脚本验证：数据保留 / 约束放开 / 字段默认值正确 / 重复执行不丢数据。
+
+放开后同一实体可挂多套配置 —— 例如「A 系统只读」「B 系统只许关」「C 系统全控」三个 token 并存。
+
+新增表 `control_logs`（+ `created_at DESC` 索引）。
+
+### 二、子选项卡内嵌「📖 使用方法」（原 3.7.0）
+
+「🌐 实体→网络」顶部新增可折叠使用说明（**默认折叠**，收起时保留一行摘要）：
+
+| 区块 | 内容 |
+|---|---|
+| ⚡ 快速上手 | 4 步：开总闸 → 加载实体 → 选动作 → 调用 |
+| 一、两类地址与开关 | 读/控制/能力三个地址 + 各自放行条件 |
+| 二、调用示例 | 6 段可直接抄的 curl |
+| 三、两种请求体 | 动作模式 vs raw 模式 |
+| 四、参数两层控制 | 固定值 / 限幅 / 可传入对比 |
+| 五、动作清单语义 | 全选 / 部分 / 一个不勾 |
+| 六、返回与错误码 | 成功字段表 + 400/403/404/405/429/502 含义表 |
+| 七、动作目录 | 「📋 加载动作目录」按钮，从后端实时拉取域与动作一览 |
+| 八、安全与注意 | 高风险域、总闸、只认 POST 的原因、审计、限流、重启生效 |
+
+### 三、整库备份（原 3.8.0 + 3.8.2）
+
+#### 3.1 背景
+
+集成此前没有库级备份 —— 整个数据库是单个 SQLite 文件，跑一年就是全部家当
+（监控配置、历史记录、用电计量、操作记录、接口定义、实体→网络 token 都在里面）。
+已有的导出/导入只覆盖「虚拟设备」和「辅助元素」两类实体，不是整库。
+
+#### 3.2 备份方式
+
+优先 `VACUUM INTO`（产物紧凑、无空闲页），失败回退 SQLite 官方在线备份 API
+`Connection.backup()`。两者都能在数据库被 HA 正常读写时取得**一致快照**：
+不需停机、不会丢掉 `-wal` 里尚未合并的事务、不引入第三方依赖。
+
+#### 3.3 自动备份计划
+
+| 项 | 取值 |
+|---|---|
+| 周期 | 关闭 / 每小时 / 每天 / 每周 |
+| 执行时刻 | 小时 0-23（每天、每周用） |
+| 星期 | 周一~周日（每周用） |
+| 保留份数 | 1-100，默认 10（**只作用于自动备份**） |
+| 目录 | 默认 `storage/ha_data_store_backups`，可填挂载后的绝对路径 |
+
+调度实现：`__init__` 注册 **10 分钟**的 tick，每次按「<= now 的最近一个计划时刻」
+与 `backup_last_at` 比较决定是否到期。好处：运行期改计划**不需要重新注册定时器**；
+HA 在计划时刻没运行，启动后会自动补上当天那次（迟到补偿）；
+保存设置时会**现场验证目录可写**，避免保存后才在半夜备份时失败。
+
+#### 3.4 恢复：排队 + 启动时原子应用（本版最关键的设计）
+
+运行期直接覆盖正在被写入的库，存在「半写状态」和「在途写入打进新库」两类风险。
+因此恢复**不在运行期替换数据库**：
+
+1. 「恢复」→ 服务端校验备份文件（`PRAGMA quick_check` + 必需表存在性）→ 复制为
+   `ha_data_store.db.pending_restore` 并写下标记 `ha_data_store.db.restore_requested`
+2. 用户**手动重启 HA**
+3. 启动时、在任何连接打开数据库**之前**（`_init_database` 之前）：
+   先给现有库自动做一份「恢复前快照」放进备份目录 → 清理旧库的
+   `-wal` / `-shm` / `-journal`（避免旧日志被回放到新库）→ `os.replace()` 原子替换
+4. 万一备份文件校验失败：**直接取消恢复、保留现有库**，坏文件留存为 `*.invalid` 供排查
+
+即：恢复一定发生在「无人使用数据库」的时刻，且任何一步失败都能靠快照退回；
+恢复前快照会出现在列表里，随时可以再恢复回去。
+
+#### 3.5 网络共享（SMB / NFS）：拦截协议地址 + 本地暂存后搬移（原 3.8.2）
+
+**不能直接填 `smb://host/share` 这类协议地址** —— 程序只能读写已挂载的目录。
+更糟的是直接填会**静默出错**：
+
+| 输入 | 实际解析结果 | 后果 |
+|---|---|---|
+| `smb://192.168.1.102/media` | Linux：`/config/smb:/192.168.1.102/media` | 在 HA 配置目录里造出垃圾目录，写盘测试还**通过**，界面显示"备份成功"，实际根本没到 NAS |
+| `smb:\\192.168.1.102\media` | 同上 | 同上 |
+
+因此新增 `looks_like_url()` 识别协议地址，命中即**显式报错**并按协议给出挂载指引：
+
+- 命中：`smb://`、`smb:\\`、`nfs://`、`ftp://`、`webdav://` … 冒号后紧跟 `/` 或 `\` 的多字母协议名
+- 放行：`/media/ha_backups`、相对路径、`Z:\backups`（盘符）、
+  `\\192.168.1.102\media` 与 `//192.168.1.102/media`（Windows UNC，合法本机路径）、
+  `mnt:backup/x`（冒号后无分隔符，普通目录名，不误判）
+
+正确做法是先挂载再填挂载后的路径：
+
+| 环境 | 挂载方式 | 填写的路径示例 |
+|---|---|---|
+| HA OS / Supervised | 设置 → 系统 → 存储 → 添加网络存储（用途选 media / share） | `/media/ha_backups`、`/share/backups` |
+| HA Container / Core | 宿主机 `mount -t cifs //192.168.1.102/media /mnt/ha_backups -o username=用户,password=密码,uid=1000` | `/mnt/ha_backups` |
+
+面向共享的写入额外加固：**先在本地生成并校验，再搬到共享**。
+原因是把备份直接写到网络盘有两个问题：SQLite 会在目标旁边建 journal 并依赖文件锁
+（官方明确不建议把数据库文件放网络盘）；网络中断会在共享上留下**半个损坏文件**，
+而它会被当成"有效备份"列出来。
+
+- 目标在本地时 `shutil.move` 等价于 `rename`，**零额外开销**
+- 目标是挂载点时自动走 `copy2` 回退
+- 配合 `finally` 清理 + 6 小时年龄阈值的残留扫描（`_sweep_stale_staging()`），
+  进程被强杀留下的 `.ha_data_store_*.db.tmp` 会被清掉，且**绝不会误伤进行中的备份**
+- 状态卡片对「目录在配置目录之外」给出网络挂载警示（挂载晚于集成启动会导致计划备份失败）
+
+#### 3.6 其他
+
+- **完整性检查**：`PRAGMA integrity_check`（只读 URI，绝不修改数据）
+- **下载备份**：`web.FileResponse` 流式下载，不占内存
+- **删除备份**：严格文件名校验（拒绝 `../`、子目录、非 `.db`、pending 标记文件）
+- **设置存放**：复用 `api_settings` 键值表（`backup_*` 键），**不新增表** ——
+  备份模块本身要能在数据库损坏时继续工作；表缺失时自动补建
+- **不提供上传接口**：HA 的 aiohttp 默认请求体上限会让大库上传 413。
+  把外部拿到的备份直接拷进备份目录、刷新列表即可恢复
+
+### 四、「💾 数据备份」提升为顶层选项卡（原 3.8.0 内嵌 → 独立）
+
+原本作为「系统配置」的子选项卡，后提升为顶层主选项卡（位置在「数据库浏览」与「日志查看」之间），
+理由：它是运维操作、与数据库本体直接相关，放顶层更容易找到。
+
+> 技术必要性：`.tab-panel { display: none }` 是 `display` 级隐藏，
+> 面板若留在 `#tab-manage` 内，即使自身 `.active` 也不会显示，因此必须整体移出。
+
+界面内容：待恢复横幅 / 状态卡片（库大小含 WAL、表数、journal 模式、备份目录、份数占用、
+最近自动备份）/ 立即备份·完整性检查·清理旧备份 / 计划设置（周期联动字段）/
+备份列表（下载·恢复·删除）/ 📖 关于备份（默认折叠）。
+
+### 五、API 工具：新增 🌐 实体→网络 查询类型分组（原 3.8.1）
+
+`API工具 → 🔗 API 地址生成器` 的「查询类型」下拉新增独立分组
+`<optgroup label="🌐 实体→网络（token 鉴权）" id="apiPushGroup">`，
+内容由 `pushLoadIntoApi()` 从 `/push_targets` **动态生成**：
+
+- 每个已配置目标生成 1~2 个选项：`📥 读数据 · sensor.x（名称）`、`🎛 控制 · climate.y`
+  （没有 `control_token` 就不出现控制项；未开启控制的会标注）
+- 值为 `push:data:{id}` / `push:control:{id}`，与既有 `ext:{name}`、`custom:{path}` 前缀风格一致
+- 刷新时**保留当前选中项**（配置被删除/停用则回落默认）
+
+选中后生成地址，**刻意不附加 `?key=`** —— token 本身就是密钥、URL 自鉴权。
+
+URL 下方新增「🌐 实体→网络 调用方式」区块：读给出 `curl "URL"`；
+控制给出多行 `curl -X POST`（body 里的 `action` 取该目标**实际授权**的第一个动作），
+列出当前授权动作清单，未开启控制时黄字提示会 404，并给出 `push_capabilities/{token}` 能力清单地址。
+
+顺带收敛重复：`push` 与 `ext` 都不需要参数输入行，原 `ext` 分支内联写了 22 行隐藏代码，
+抽出 `apiHideAllParamRows()` 供两者共用（隐藏清单与原来**逐项一致**，恢复行为不变）。
+
+### 六、修复清单
+
+| 版本 | 问题 | 处理 |
+|---|---|---|
+| 3.8.3 | 「🌐 实体→网络」分组**没有任何子项**。根因：`pushLoadIntoApi()` 只挂在 `switchApiSubTab('gen')` 上，而 **gen 是默认激活的子选项卡**，页面打开时不会触发它，函数从未被调用 | 在 `DOMContentLoaded` 补上调用（与 `extLoadIntoApi()` 并列，加注释说明原因）；再在 `switchTab('api')` 里刷新一次，新增目标后无需重载页面 |
+| 3.8.2 | 备份同秒重复触发时追加的 `_2` 序号后缀不被文件名正则识别 → 这些备份**存在但列表里完全不可见**（无法下载/删除/清理） | 正则补 `(?:_(?P<seq>\d+))?` |
+| 3.8.2 | 启动早期 `load_settings_sync()` 对不存在的库调用 `sqlite3.connect()`，会**凭空创建空库** | 先判 `os.path.isfile` 再连接；恢复流程中原库不存在时明确跳过快照 |
+| 3.8.2 | 协议地址拦截的正则最初写作 `^scheme://?`，只覆盖 `smb://` 与 `smb:/`，**用户实际输入的 `smb:\\`（冒号后反斜杠）匹配不到**，仍会静默建垃圾目录 | 改为 `^scheme:[\\/]`，并补上「含冒号的普通目录名不得误判」的反向用例 |
+
+### 七、涉及文件
+
+| 文件 | 说明 |
+|---|---|
+| `push_control.py` | **新增** 约 1050 行：动作目录 + 参数校验/锁定 + 限流 + 审计 + 执行引擎 |
+| `backup.py` | **新增** 约 800 行：备份/校验/列表/保留/到期判断/排队恢复/启动应用 + 2 个 API 视图 + `register_api_views` |
+| `const.py` | 新增 `TABLE_CONTROL_LOGS` / `PUSH_CONTROL_SWITCH_KEY` / `PUSH_CONTROL_DEFAULT_RATE_LIMIT`；版本 3.6.11 → 4.0.0 |
+| `__init__.py` | `control_logs` 建表、`push_targets` 新列迁移与 `_migrate_push_targets_drop_unique`、部分唯一索引、控制总开关默认值、注册 8 个新视图、启动前应用待恢复、10 分钟备份 tick 与 unload 清理、启动打印控制动作目录规模 |
+| `http_api.py` | `PushTargetsView` 重写（id 更新 / 多 token / JSON 字段解析）、`PushControlView`、`PushCapabilitiesView`、`PushEntityCapabilitiesView`、`PushControlLogsView`、`_check_push_control_enabled`、monitor 输出控制字段 |
+| `switch.py` | 新增 `HaDataStorePushControlSwitch`（实体网络控制，默认关闭） |
+| `db_viewer.html` | 「🌐 实体→网络」4 步向导 + 动作/参数锁定 UI + 控制地址列 + 测试面板 + 控制日志面板 + 内嵌使用说明；新增顶层 `💾 数据备份` 选项卡；API 工具新增 push 查询类型分组与调用方式区块；修复子选项卡按钮/接线丢失 |
+| `manifest.json` | 版本 4.0.0 |
+| `README.md` | 结构整理（详见第十节）+ 功能总览补「实体→网络（读/控制）」「整库备份」「小爱对话」并修正过时的「推送目标」描述 + API 表、数据表、备份与网络共享说明 |
+
+### 八、验证
+
+三套离线自检全部通过，合计 **174 项**：
+
+| 自检 | 项数 | 覆盖 |
+|---|---|---|
+| 控制引擎（stub HA） | 47 | 目录规模 / 能力发现与清单过滤 / 动态范围与枚举 / cover 位掩码 / 未知参数 / 缺必填 / 枚举越界 / 越界数值 / 授权清单（含 `*` 与空清单 403）/ 参数锁定（固定值覆盖传参、限幅双向裁剪）/ raw 跨域与禁用域 403 / 限流 429 |
+| 备份模块（stub HA/aiohttp/http_api） | 91 | 文件名与路径安全 / 设置读写 / **启动早期不得凭空造库** / 校验（非数据库·过小·缺表·不存在）/ 保留策略（只清自动，手动与快照永不删）/ 到期判断 12 种组合 / 计划全链路 / 恢复（排队·回滚·陈旧 WAL 清理·快照·无残留）/ **原库不存在时的恢复** / **损坏备份不破坏现有库** / 取消排队 / 删除 |
+| 备份加固（含 `EXDEV` 打桩） | 36 | 协议地址识别（`smb://`·`smb:\\`·大写·`nfs://`·`ftp://`·`webdav://`）/ 普通路径放行（含两种 UNC 与含冒号目录名）/ 保存拦截且**不建垃圾目录** / 三段式备份无 `.tmp` 残留 / 跨文件系统 `copy2` 回退 / 暂存清理不误伤 / 恢复流程回归 |
+
+`db_viewer.html` 静态自检全通过：
+
+```
+OK   JS 语法 (505235 chars)
+OK   内联事件引用 244 个函数均有定义
+OK   HTML 标签全部配平
+OK   JS 引用的 507 个元素 id 全部存在
+OK   选项卡一致：顶层 8↔8，子 18↔18
+OK   3 个分组填充函数均已接线: loadCustomRoutesIntoApi, pushLoadIntoApi, extLoadIntoApi
+OK   动态分组容器齐全: apiCustomRoutesGroup, apiExtGroup, apiPushGroup
+```
+
+检查器随问题演进逐步加固，目前覆盖：JS 语法 / 内联事件函数定义 / HTML 标签配平 /
+JS 引用的元素 id 存在 / 顶层与子选项卡入口双向一致 / **分组填充函数必须被真正调用**。
+最后一条正是为「分组存在但永远为空」这类故障加的：此类 bug 语法检查与元素检查都抓不到。
+
+### 九、过程教训
+
+**并行编辑同一文件会互相覆盖。** 本次开发中出现 5 次「编辑报告成功但内容不在文件里」
+（漏掉子选项卡按钮、`switchTab` 接线、`switchTab` 勾子、optgroup 容器、`DOMContentLoaded` 调用），
+一度误判为编辑器覆盖。真实原因：把同一个文件的多个 `replace_in_file` 放在**同一批并行发出**，
+它们各自基于同一份原始内容写入、互相覆盖，**每批的第一个编辑必然丢失**。
+
+正确做法：**同一文件的多处修改必须串行**（一批只改一个文件的一处），或改用单次大范围替换。
+另外，凡是「加了一个 UI 入口 / 挂了一个新函数」的改动，都应有一条**能自动验证接线**的检查，
+否则"看起来加上了"和"真的生效"之间没有防线。
+
+### 十、README 结构整理
+
+README 累积了多次追加式修改，出现结构性问题，本次一并处理（**只调整位置与编号，不改技术内容**）：
+
+| 问题 | 处理 |
+|---|---|
+| `### 0.`~`### 10.` 是三级标题，但 `## 11.`~`## 16.` 却是**二级** —— 同一套编号跨了两个层级 | 11~16 统一降为 `###`，功能详解现为连续的 `### 0.`~`### 20.` |
+| **`16` 重复**（`## 16. 接口管理` 与 `## 16. 家庭洞察`） | 「家庭洞察」改为 17、「通用指标引擎」改为 18 |
+| 「家庭洞察」「通用指标引擎」被丢在「技术栈」之后、更新日志之前，离同类章节约 1000 行 | 移回「功能详解」，成为 17 / 18 |
+| `### 整库备份`、`### 实体→网络的地址生成` 被塞进 **「数据库表结构」**（它们不是表结构） | 移入「功能详解」成为 19 / 20，并补 `#### 20.1` 层级 |
+| 原二级章节的子标题降级后与编号章节**同级** | 相关 10 个子标题整体再降一级（`###`→`####`、`####`→`#####`） |
+| 目录漏项、锚点不全（缺 接口管理 / 通用指标 / 日志系统 / 技术栈 等） | **按最终标题树自动重建**，38 项锚点全部校验可解析 |
+| 「更新日志」是 `docs/CHANGELOG.md` 的重复副本，占 209 行 | 精简为最新一条 + 指向 CHANGELOG 的链接（历史条目已确认全部存在于 CHANGELOG） |
+| 开头一段 500+ 字单句，可读性差 | 改为一句提要 + 「环节 / 能力」表 |
+| 「功能总览」缺 实体→网络 / 整库备份 / 小爱对话，且有一行 `📤 推送目标` 描述为「推送到外部 HTTP 端点」（与实际**拉取式**读 + POST 控制的语义不符） | 补齐三行、改写该行为准确的「实体→网络（读 / 控制）」 |
+
+结果：1627 行 / 111866 字节 → **1489 行 / 90078 字节**（-19.5%），换行符保持 LF 未变。
+
+校验方式：脚本按**标题定位块**（不依赖行号）做搬迁与重编号，并逐项断言；整理后校验
+「二级标题无重复 / 功能详解编号连续 0~20 / 目录锚点全部可解析 / Markdown 结构体检 0 处问题」。
+另附一次结构体检，覆盖三类隐性问题：**普通文本行紧跟 `---` 会被渲染成 setext 二级标题**、
+标题前缺空行、表格列数不齐（后两类需排除围栏代码块与 `\|` 转义，否则全是误报）。
+
 ## 2026-09-19 — v3.6.11 元数据 + 通用指标引擎（`metrics_catalog`）
 
 ### 🧠 背景与目标

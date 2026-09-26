@@ -45,6 +45,7 @@ from .const import (
     TABLE_VACUUM_CONFIGS,
     TABLE_VACUUM_HISTORY,
     TABLE_PUSH_TARGETS,
+    TABLE_CONTROL_LOGS,
     TABLE_BRIDGE_CONNECTIONS,
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
@@ -72,8 +73,15 @@ from .const import (
     get_env_table_name,
     DEFAULT_TIMEZONE,
     COLLECT_MODE_POLL,
+    PUSH_CONTROL_DEFAULT_RATE_LIMIT,
 )
 from .logger import get_logger as _log_local
+from .push_control import (
+    build_capabilities,
+    catalog_overview,
+    execute_control,
+    truthy as _pc_truthy,
+)
 from .recent_devices import (
     compute_device_last_used_sync,
     get_exclude_entities,
@@ -2708,6 +2716,14 @@ class _BaseDBView(HomeAssistantView):
         """检查数据库修改开关，关闭时返回 403 JSON。"""
         if not hass.data.get(DOMAIN, {}).get("db_edit_enabled", True):
             return web.json_response({"success": False, "error": "数据库修改未启用"}, status=403)
+        return None
+
+    @staticmethod
+    def _check_push_control_enabled(hass: HomeAssistant) -> web.Response | None:
+        """检查「实体网络控制」总开关（默认关闭），关闭时返回 403 JSON。"""
+        if not hass.data.get(DOMAIN, {}).get("push_control_enabled", False):
+            return web.json_response(
+                {"success": False, "error": "「实体网络控制」总开关未开启"}, status=403)
         return None
 
 
@@ -10054,9 +10070,19 @@ class EntityMonitorView(_BaseDBView):
                     r = dict(row)
                     eid = r["entity_id"]
                     st = self._hass.states.get(eid)
+                    try:
+                        pt_actions = json.loads(r.get("allowed_actions") or "[]")
+                    except Exception:
+                        pt_actions = []
+                    if not isinstance(pt_actions, list):
+                        pt_actions = []
                     push_targets.append(dict(
                         entity_id=eid, name=r.get("name", eid), body_mode=r.get("body_mode", "full"),
                         push_token=r.get("push_token", ""),
+                        control_token=r.get("control_token", ""),
+                        control_enabled=1 if r.get("control_enabled") else 0,
+                        allowed_actions=pt_actions,
+                        allow_raw_service=1 if r.get("allow_raw_service") else 0,
                         status="在线" if (st and st.state not in ("unavailable","unknown")) else "不可用",
                         state=st.state if st else "N/A",
                         updated_at=r.get("updated_at",""),
@@ -11586,10 +11612,36 @@ def _sqlite_version_ge(major: int, minor: int, patch: int) -> bool:
 #  实体→网络：数据访问管理（自动生成唯一地址）                                     #
 # ========================================================================== #
 class PushTargetsView(_BaseDBView):
-    """管理数据访问目标，自动生成唯一 access token。"""
+    """管理数据访问目标（读 token + 控制 token）。
+
+    GET    列表（JSON 字段已解析为对象）
+    POST   新增（无 id）或更新（带 id）
+    DELETE 删除（按 id / entity_id / token）
+    """
 
     url = "/api/ha_data_store/push_targets"
     name = "api:ha_data_store:push_targets"
+
+    @staticmethod
+    def _normalize_row(row: dict) -> dict:
+        for key, fallback in (
+            ("field_mapping", {}), ("param_constraints", {}), ("allowed_actions", []),
+        ):
+            raw = row.get(key)
+            if isinstance(raw, str):
+                try:
+                    row[key] = json.loads(raw) if raw.strip() else fallback
+                except Exception:
+                    row[key] = fallback
+            elif raw is None:
+                row[key] = fallback
+        for key in ("control_enabled", "allow_raw_service", "enabled"):
+            row[key] = 1 if row.get(key) else 0
+        try:
+            row["rate_limit_per_min"] = int(row.get("rate_limit_per_min") or 0)
+        except (TypeError, ValueError):
+            row["rate_limit_per_min"] = 0
+        return row
 
     async def get(self, request: web.Request) -> web.Response:
         db_path = self._db_path
@@ -11601,11 +11653,12 @@ class PushTargetsView(_BaseDBView):
             conn = sqlite3.connect(db_path)
             try:
                 conn.row_factory = sqlite3.Row
-                return [dict(r) for r in conn.execute(
-                    f"SELECT * FROM {TABLE_PUSH_TARGETS} ORDER BY entity_id"
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {TABLE_PUSH_TARGETS} ORDER BY entity_id, id"
                 ).fetchall()]
             finally:
                 conn.close()
+            return [self._normalize_row(r) for r in rows]
 
         try:
             data = await self._exec_in_executor(hass, _query)
@@ -11624,53 +11677,127 @@ class PushTargetsView(_BaseDBView):
             body = await request.json()
         except Exception:
             return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return self.json({"success": False, "error": "请求体必须是 JSON 对象"}, status_code=400)
 
-        entity_id = body.get("entity_id", "").strip()
+        try:
+            target_id = int(body.get("id") or 0)
+        except (TypeError, ValueError):
+            target_id = 0
+
+        entity_id = str(body.get("entity_id") or "").strip()
         if not entity_id:
             return self.json({"success": False, "error": "entity_id 不能为空"}, status_code=400)
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*\.[a-z0-9_]+", entity_id):
+            return self.json(
+                {"success": False, "error": f"entity_id 格式非法: {entity_id}"},
+                status_code=400,
+            )
 
-        name = body.get("name", entity_id).strip()
-        body_mode = body.get("body_mode", "full").strip()
-        field_mapping = json.dumps(body.get("field_mapping", {}), ensure_ascii=False) if isinstance(body.get("field_mapping"), dict) else body.get("field_mapping", "{}")
-        interval_min = int(body.get("interval_min", 0))
+        name = str(body.get("name") or entity_id).strip() or entity_id
+        body_mode = str(body.get("body_mode") or "full").strip().lower()
+        if body_mode not in ("full", "compact", "custom"):
+            body_mode = "full"
+
+        field_mapping = body.get("field_mapping")
+        if isinstance(field_mapping, dict):
+            field_mapping = json.dumps(field_mapping, ensure_ascii=False)
+        elif not (isinstance(field_mapping, str) and field_mapping.strip()):
+            field_mapping = "{}"
+
+        try:
+            interval_min = max(0, int(body.get("interval_min") or 0))
+        except (TypeError, ValueError):
+            interval_min = 0
+
+        control_enabled = 1 if _pc_truthy(body.get("control_enabled")) else 0
+        allow_raw = 1 if _pc_truthy(body.get("allow_raw_service")) else 0
+
+        allowed = body.get("allowed_actions")
+        if isinstance(allowed, str):
+            try:
+                allowed = json.loads(allowed) if allowed.strip() else []
+            except Exception:
+                allowed = [x.strip() for x in allowed.split(",")]
+        if not isinstance(allowed, (list, tuple)):
+            allowed = []
+        allowed_actions = json.dumps(
+            [a for a in (str(x).strip() for x in allowed) if a], ensure_ascii=False)
+
+        constraints = body.get("param_constraints")
+        if isinstance(constraints, dict):
+            param_constraints = json.dumps(constraints, ensure_ascii=False)
+        elif isinstance(constraints, str) and constraints.strip():
+            param_constraints = constraints
+        else:
+            param_constraints = "{}"
+
+        try:
+            rate_limit = int(body.get("rate_limit_per_min", PUSH_CONTROL_DEFAULT_RATE_LIMIT))
+        except (TypeError, ValueError):
+            rate_limit = PUSH_CONTROL_DEFAULT_RATE_LIMIT
+        rate_limit = max(0, rate_limit)
+
         now = _get_local_iso(DEFAULT_TIMEZONE)
+        columns = (
+            entity_id, name, body_mode, field_mapping, interval_min,
+            control_enabled, allowed_actions, param_constraints, rate_limit, allow_raw,
+        )
 
-        def _upsert():
+        def _upsert() -> dict:
             conn = sqlite3.connect(db_path)
             try:
-                existing = conn.execute(
-                    f"SELECT push_token FROM {TABLE_PUSH_TARGETS} WHERE entity_id = ?",
-                    (entity_id,),
-                ).fetchone()
-                push_token = existing[0] if (existing and existing[0]) else secrets.token_hex(16)
-                conn.execute(
-                    f"""
-                    INSERT INTO {TABLE_PUSH_TARGETS}
-                        (entity_id, name, push_token, url, body_mode, field_mapping, interval_min, enabled, created_at, updated_at)
-                    VALUES (?, ?, ?, '', ?, ?, ?, 1, ?, ?)
-                    ON CONFLICT(entity_id) DO UPDATE SET
-                        name = excluded.name,
-                        push_token = excluded.push_token,
-                        body_mode = excluded.body_mode,
-                        field_mapping = excluded.field_mapping,
-                        interval_min = excluded.interval_min,
-                        enabled = 1,
-                        updated_at = excluded.updated_at
-                    """,
-                    (entity_id, name, push_token, body_mode, field_mapping, interval_min, now, now),
-                )
+                conn.row_factory = sqlite3.Row
+                if target_id:
+                    row = conn.execute(
+                        f"SELECT push_token, control_token FROM {TABLE_PUSH_TARGETS} WHERE id = ?",
+                        (target_id,),
+                    ).fetchone()
+                    if not row:
+                        raise LookupError(f"目标 id={target_id} 不存在")
+                    push_token = row["push_token"] or secrets.token_hex(16)
+                    control_token = row["control_token"] or secrets.token_hex(16)
+                    conn.execute(
+                        f"""
+                        UPDATE {TABLE_PUSH_TARGETS} SET
+                            entity_id = ?, name = ?, body_mode = ?, field_mapping = ?,
+                            interval_min = ?, control_enabled = ?, allowed_actions = ?,
+                            param_constraints = ?, rate_limit_per_min = ?, allow_raw_service = ?,
+                            push_token = ?, control_token = ?, enabled = 1, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (*columns, push_token, control_token, now, target_id),
+                    )
+                    new_id = target_id
+                else:
+                    push_token = secrets.token_hex(16)
+                    control_token = secrets.token_hex(16)
+                    cursor = conn.execute(
+                        f"""
+                        INSERT INTO {TABLE_PUSH_TARGETS}
+                            (entity_id, name, body_mode, field_mapping, interval_min,
+                             control_enabled, allowed_actions, param_constraints,
+                             rate_limit_per_min, allow_raw_service,
+                             push_token, control_token, url, enabled, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, ?, ?)
+                        """,
+                        (*columns, push_token, control_token, now, now),
+                    )
+                    new_id = cursor.lastrowid
                 conn.commit()
-                return push_token
+                return {"id": new_id, "push_token": push_token, "control_token": control_token}
             finally:
                 conn.close()
 
         try:
-            token = await self._exec_in_executor(hass, _upsert)
+            result = await self._exec_in_executor(hass, _upsert)
             return self.json({
                 "success": True,
                 "message": f"数据访问 {entity_id} 已保存",
-                "push_token": token,
+                **result,
             })
+        except LookupError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=404)
         except Exception as exc:
             _LOGGER.exception("保存数据访问目标失败")
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -11682,29 +11809,40 @@ class PushTargetsView(_BaseDBView):
             return resp
         if (resp := self._check_db_edit_enabled(hass)):
             return resp
-        entity_id = request.query.get("entity_id", "").strip()
-        if not entity_id:
-            try:
-                id_val = int(request.query.get("id", "0").strip())
-            except ValueError:
-                return self.json({"success": False, "error": "需要 entity_id 或 id 参数"}, status_code=400)
-            where = "id = ?"
-            param = id_val
-        else:
+
+        token = (request.query.get("token") or "").strip()
+        entity_id = (request.query.get("entity_id") or "").strip()
+        where, param = "", None
+        if token:
+            where = "push_token = ? OR control_token = ?"
+            param = (token, token)
+        elif entity_id:
             where = "entity_id = ?"
             param = entity_id
+        else:
+            try:
+                param = int((request.query.get("id") or "0").strip())
+            except ValueError:
+                return self.json(
+                    {"success": False, "error": "需要 id / entity_id / token 参数"},
+                    status_code=400,
+                )
+            where = "id = ?"
 
-        def _delete():
+        def _delete() -> int:
             conn = sqlite3.connect(db_path)
             try:
-                conn.execute(f"DELETE FROM {TABLE_PUSH_TARGETS} WHERE {where}", (param,))
+                cursor = conn.execute(f"DELETE FROM {TABLE_PUSH_TARGETS} WHERE {where}", param)
                 conn.commit()
+                return cursor.rowcount
             finally:
                 conn.close()
 
         try:
-            await self._exec_in_executor(hass, _delete)
-            return self.json({"success": True, "message": "数据访问目标已删除"})
+            removed = await self._exec_in_executor(hass, _delete)
+            if not removed:
+                return self.json({"success": False, "error": "未找到匹配的配置"}, status_code=404)
+            return self.json({"success": True, "message": f"已删除 {removed} 条数据访问配置"})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
 
@@ -11785,6 +11923,14 @@ class PushDataView(_BaseDBView):
             _LOGGER.exception("PushDataView 异常")
             return self.json({"success": False, "error": str(exc)}, status_code=500)
 
+    async def post(self, request: web.Request, push_token: str = "") -> web.Response:
+        """读地址不接受写入：给出明确指引，避免调用方误以为控制被静默忽略。"""
+        return self.json({
+            "success": False,
+            "error": "读数据地址仅支持 GET；控制请使用控制地址 "
+                     "POST /api/ha_data_store/push_control/{control_token}",
+        }, status_code=405)
+
 
 def _extract_nested_value_static(attrs: dict, path: str):
     """根据点号路径从字典中提取值。"""
@@ -11797,6 +11943,248 @@ def _extract_nested_value_static(attrs: dict, path: str):
         else:
             return None
     return val
+
+
+# ========================================================================== #
+#  实体→网络：控制端点（外部系统 POST 触发实体动作）                                #
+# ========================================================================== #
+def _load_push_target_by_token(db_path: str, column: str, token: str,
+                               need_control: bool = False) -> dict | None:
+    """按 token 查目标。need_control=True 时额外要求 control_enabled=1。"""
+    if column not in ("push_token", "control_token"):
+        return None
+    sql = f"SELECT * FROM {TABLE_PUSH_TARGETS} WHERE {column} = ? AND enabled = 1"
+    if need_control:
+        sql += " AND control_enabled = 1"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(sql, (token,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+class PushControlView(_BaseDBView):
+    """外部系统通过控制地址触发实体动作（仅 POST）。
+
+    POST /api/ha_data_store/push_control/{control_token}
+
+      Body（动作模式，推荐）:
+        {"action": "set_temperature", "params": {"temperature": 26}}
+        {"action": "set_cover_position", "params": {"position": 30}, "wait_state": true}
+
+      Body（raw 模式，需该目标开启 allow_raw_service）:
+        {"service": "climate.set_temperature", "data": {"temperature": 26}}
+        （raw 只允许调用实体自身域，且禁止 shell_command / homeassistant 等域）
+
+    鉴权：control_token 即密钥；同时受「API 访问」与「实体网络控制」两个总开关约束。
+    """
+
+    url = "/api/ha_data_store/push_control/{control_token}"
+    name = "api:ha_data_store:push_control"
+
+    async def post(self, request: web.Request, control_token: str = "") -> web.Response:
+        try:
+            db_path = self._db_path
+            hass: HomeAssistant = request.app["hass"]
+            control_token = (control_token or "").strip()
+            if not control_token:
+                return self.json({"success": False, "error": "缺少 control_token"}, status_code=400)
+            if (resp := self._check_master_switch(hass)):
+                return resp
+            if (resp := self._check_push_control_enabled(hass)):
+                return resp
+
+            target = await self._exec_in_executor(
+                hass, _load_push_target_by_token, db_path, "control_token", control_token, True)
+            if not target:
+                return self.json(
+                    {"success": False,
+                     "error": "无效的 control_token，或该目标未开启控制"},
+                    status_code=404,
+                )
+
+            try:
+                body = await request.json()
+            except Exception:
+                return self.json({"success": False, "error": "请求体不是合法的 JSON"},
+                                 status_code=400)
+            if not isinstance(body, dict):
+                return self.json({"success": False, "error": "请求体必须是 JSON 对象"},
+                                 status_code=400)
+
+            result = await execute_control(hass, target, body, _get_client_ip(request))
+            status = 200 if result.get("success") else int(result.get("code") or 400)
+            return self.json(result, status_code=status)
+        except Exception as exc:
+            _LOGGER.exception("PushControlView 异常")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+    async def get(self, request: web.Request, control_token: str = "") -> web.Response:
+        """控制接口不响应 GET：避免被浏览器预取 / 日志重放 / 爬虫误触发。"""
+        return self.json({
+            "success": False,
+            "error": "控制接口仅支持 POST（防止被预取、代理缓存或日志重放触发）",
+        }, status_code=405)
+
+
+class PushCapabilitiesView(_BaseDBView):
+    """能力发现：GET /api/ha_data_store/push_capabilities/{control_token}
+
+    返回该 token 实际被授权且实体支持的动作与参数 schema，
+    供第三方系统自动发现能力，无需硬编码动作名。
+    """
+
+    url = "/api/ha_data_store/push_capabilities/{control_token}"
+    name = "api:ha_data_store:push_capabilities"
+
+    async def get(self, request: web.Request, control_token: str = "") -> web.Response:
+        try:
+            db_path = self._db_path
+            hass: HomeAssistant = request.app["hass"]
+            control_token = (control_token or "").strip()
+            if not control_token:
+                return self.json({"success": False, "error": "缺少 control_token"}, status_code=400)
+            if (resp := self._check_master_switch(hass)):
+                return resp
+            if (resp := self._check_push_control_enabled(hass)):
+                return resp
+
+            target = await self._exec_in_executor(
+                hass, _load_push_target_by_token, db_path, "control_token", control_token, True)
+            if not target:
+                return self.json(
+                    {"success": False,
+                     "error": "无效的 control_token，或该目标未开启控制"},
+                    status_code=404,
+                )
+
+            caps = build_capabilities(hass, target["entity_id"], target.get("allowed_actions"))
+            caps["allow_raw_service"] = bool(target.get("allow_raw_service"))
+            try:
+                caps["rate_limit_per_min"] = int(target.get("rate_limit_per_min") or 0)
+            except (TypeError, ValueError):
+                caps["rate_limit_per_min"] = 0
+            caps["name"] = target.get("name") or target.get("entity_id")
+            return self.json({"success": True, "data": caps})
+        except Exception as exc:
+            _LOGGER.exception("PushCapabilitiesView 异常")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class PushEntityCapabilitiesView(_BaseDBView):
+    """db_viewer 用：GET /api/ha_data_store/push_entity_capabilities?entity_id=xxx
+
+    返回该实体的可控动作与参数 schema（用于配置向导渲染）；
+    不传 entity_id 时返回整个动作目录概览（哪些域支持控制）。
+    """
+
+    url = "/api/ha_data_store/push_entity_capabilities"
+    name = "api:ha_data_store:push_entity_capabilities"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+
+        entity_id = (request.query.get("entity_id") or "").strip()
+        if not entity_id:
+            return self.json({"success": True, "data": {"catalog": catalog_overview()}})
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*\.[a-z0-9_]+", entity_id):
+            return self.json({"success": False, "error": f"entity_id 格式非法: {entity_id}"},
+                             status_code=400)
+
+        try:
+            caps = build_capabilities(hass, entity_id, None)
+            return self.json({"success": True, "data": caps})
+        except Exception as exc:
+            _LOGGER.exception("PushEntityCapabilitiesView 异常")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+class PushControlLogsView(_BaseDBView):
+    """控制审计日志：GET /api/ha_data_store/push_control_logs
+
+    查询参数：limit(默认 100, 最大 500) / entity_id / success(1|0) / target_id
+    """
+
+    url = "/api/ha_data_store/push_control_logs"
+    name = "api:ha_data_store:push_control_logs"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+
+        try:
+            limit = int((request.query.get("limit") or "100").strip())
+        except ValueError:
+            limit = 100
+        limit = max(1, min(limit, 500))
+        entity_id = (request.query.get("entity_id") or "").strip()
+        success = (request.query.get("success") or "").strip()
+        try:
+            target_id = int((request.query.get("target_id") or "0").strip())
+        except ValueError:
+            target_id = 0
+
+        where, params = [], []
+        if entity_id:
+            where.append("entity_id = ?")
+            params.append(entity_id)
+        if success in ("0", "1"):
+            where.append("success = ?")
+            params.append(int(success))
+        if target_id:
+            where.append("target_id = ?")
+            params.append(target_id)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        params.append(limit)
+
+        def _query():
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                return [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {TABLE_CONTROL_LOGS}{clause} "
+                    f"ORDER BY id DESC LIMIT ?",
+                    tuple(params),
+                ).fetchall()]
+            finally:
+                conn.close()
+
+        def _clear():
+            conn = sqlite3.connect(db_path)
+            try:
+                cursor = conn.execute(f"DELETE FROM {TABLE_CONTROL_LOGS}")
+                conn.commit()
+                return cursor.rowcount
+            finally:
+                conn.close()
+
+        try:
+            if (request.query.get("clear") or "").strip() in ("1", "true"):
+                removed = await self._exec_in_executor(hass, _clear)
+                return self.json({"success": True, "message": f"已清空 {removed} 条控制日志"})
+            rows = await self._exec_in_executor(hass, _query)
+            for row in rows:
+                raw = row.get("params")
+                if isinstance(raw, str):
+                    try:
+                        row["params"] = json.loads(raw) if raw.strip() else {}
+                    except Exception:
+                        row["params"] = {}
+            return self.json({"success": True, "data": rows})
+        except Exception as exc:
+            _LOGGER.exception("PushControlLogsView 异常")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
 
 
 # ========================================================================== #

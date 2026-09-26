@@ -12,7 +12,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, PUSH_CONTROL_SWITCH_KEY
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +50,18 @@ class HaDataStoreRemoteAccessSwitch(HaDataStoreMasterSwitch):
         self._hass.data.setdefault(DOMAIN, {})[self._key] = False
         self.async_write_ha_state()
 
+class HaDataStorePushControlSwitch(HaDataStoreMasterSwitch):
+    """实体→网络 控制总开关。
+
+    首次安装默认关闭（无历史状态时生效），开启后状态跨重启保留。
+    关闭时 /api/ha_data_store/push_control/* 一律 403，是控制能力的总闸。
+    """
+    _key = PUSH_CONTROL_SWITCH_KEY; _attr_name = "实体网络控制"
+    def __init__(self, hass, device_info, key=None, translation_key=None):
+        super().__init__(hass, device_info, key, translation_key)
+        self._attr_is_on = False  # 默认关闭；有历史状态时 async_added_to_hass 会恢复
+
+
 class HaDataStoreDbSQLSwitch(HaDataStoreMasterSwitch):
     _key = "db_sql_enabled"; _attr_name = "前端执行SQL语句"
     async def async_added_to_hass(self):
@@ -74,6 +86,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         HaDataStoreDbEditSwitch(hass, device_info),
         HaDataStoreRemoteAccessSwitch(hass, device_info),
         HaDataStoreDbSQLSwitch(hass, device_info),
+        HaDataStorePushControlSwitch(hass, device_info),
     ]
 
     # 桥接开关

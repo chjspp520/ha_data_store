@@ -21,6 +21,7 @@ TABLE_VACUUM_TYPE_DEFS = "vacuum_type_defs"
 TABLE_VACUUM_CONFIGS = "vacuum_configs"
 TABLE_VACUUM_HISTORY = "vacuum_history"
 TABLE_PUSH_TARGETS = "push_targets"
+TABLE_CONTROL_LOGS = "control_logs"
 TABLE_BRIDGE_CONNECTIONS = "bridge_connections"
 TABLE_BRIDGE_ENTITIES = "bridge_entities"
 TABLE_HEALTH_RECORDS = "health_records"
@@ -115,5 +116,11 @@ RECENT_WINDOW_DAYS_MIN = 1
 RECENT_WINDOW_DAYS_MAX = 365
 RECENT_EXCLUDE_SETTING_KEY = "recent_exclude_entities"  # api_settings 中的排除项键（JSON 数组）
 
+# ── 实体→网络（push_targets / control_logs）──
+# 控制总开关在 hass.data 中的键（由 switch.py 的 HaDataStorePushControlSwitch 维护）
+PUSH_CONTROL_SWITCH_KEY = "push_control_enabled"
+# 每个控制 token 默认每分钟最大控制次数（0=不限）
+PUSH_CONTROL_DEFAULT_RATE_LIMIT = 60
+
 # 系统版本号（与 manifest.json 同步）
-VERSION = "3.6.11"
+VERSION = "4.0.0"

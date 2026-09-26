@@ -43,6 +43,8 @@ from .const import (
     TABLE_VACUUM_CONFIGS,
     TABLE_VACUUM_HISTORY,
     TABLE_PUSH_TARGETS,
+    TABLE_CONTROL_LOGS,
+    PUSH_CONTROL_SWITCH_KEY,
     TABLE_BRIDGE_CONNECTIONS,
     TABLE_BRIDGE_ENTITIES,
     TABLE_HEALTH_RECORDS,
@@ -317,6 +319,65 @@ def _fill_device_icon_sync(db_path: str) -> int:
         return _backfill_device_history_icon(conn)
     finally:
         conn.close()
+
+
+def _migrate_push_targets_drop_unique(conn: sqlite3.Connection) -> None:
+    """v4.0.0 迁移：去掉 push_targets.entity_id 的 UNIQUE 约束。
+
+    旧版本 entity_id 唯一，导致「同一实体只能有一套访问配置」，无法做到
+    「A 系统只读 / B 系统可控」或「同实体多个受限 token」。SQLite 不支持
+    DROP CONSTRAINT，只能重建表。唯一性改由 push_token / control_token 的
+    部分唯一索引保证（见 _init_database）。
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (TABLE_PUSH_TARGETS,),
+    ).fetchone()
+    table_sql = (row[0] or "") if row else ""
+    if not table_sql or "UNIQUE" not in table_sql.upper():
+        return  # 已是新结构（或无表，无表由 CREATE 负责）
+
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_PUSH_TARGETS})")]
+    keep = [c for c in cols if c != "id"]
+    col_list = ", ".join(f'"{c}"' for c in keep)
+
+    conn.execute("DROP TABLE IF EXISTS push_targets_mig_tmp")
+    conn.execute(
+        f"""
+        CREATE TABLE push_targets_mig_tmp (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id       TEXT NOT NULL,
+            name            TEXT NOT NULL DEFAULT '',
+            push_token      TEXT NOT NULL DEFAULT '',
+            control_token   TEXT NOT NULL DEFAULT '',
+            url             TEXT NOT NULL DEFAULT '',
+            body_mode       TEXT NOT NULL DEFAULT 'full',
+            field_mapping   TEXT NOT NULL DEFAULT '{{}}',
+            interval_min    INTEGER NOT NULL DEFAULT 0,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            control_enabled INTEGER NOT NULL DEFAULT 0,
+            allowed_actions TEXT NOT NULL DEFAULT '[]',
+            param_constraints TEXT NOT NULL DEFAULT '{{}}',
+            rate_limit_per_min INTEGER NOT NULL DEFAULT 60,
+            allow_raw_service INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL DEFAULT '',
+            updated_at      TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        f"INSERT INTO push_targets_mig_tmp ({col_list}) "
+        f"SELECT {col_list} FROM {TABLE_PUSH_TARGETS}"
+    )
+    conn.execute(f"DROP TABLE {TABLE_PUSH_TARGETS}")
+    conn.execute(f"ALTER TABLE push_targets_mig_tmp RENAME TO {TABLE_PUSH_TARGETS}")
+    conn.execute(
+        f"UPDATE {TABLE_PUSH_TARGETS} SET control_token = hex(randomblob(16)) "
+        f"WHERE control_token = ''"
+    )
+    rows = conn.execute(f"SELECT COUNT(*) FROM {TABLE_PUSH_TARGETS}").fetchone()
+    _LOGGER.info("[HDS] push_targets 已重建（放开 entity_id 唯一约束），保留 %d 行",
+                 int(rows[0]) if rows else 0)
 
 
 def _init_database(db_path: str) -> None:
@@ -1084,19 +1145,46 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
             """
         )
         # 实体→网络 访问目标表
+        # 注：entity_id 不再唯一 —— 同一实体可挂多套配置（读写可分离给不同调用方），
+        #     唯一性由 push_token / control_token 保证（见下方两处部分唯一索引）。
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_PUSH_TARGETS} (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_id       TEXT NOT NULL UNIQUE,
+                entity_id       TEXT NOT NULL,
                 name            TEXT NOT NULL DEFAULT '',
                 push_token      TEXT NOT NULL DEFAULT '',
+                control_token   TEXT NOT NULL DEFAULT '',
+                url             TEXT NOT NULL DEFAULT '',
                 body_mode       TEXT NOT NULL DEFAULT 'full',
                 field_mapping   TEXT NOT NULL DEFAULT '{{}}',
                 interval_min    INTEGER NOT NULL DEFAULT 0,
                 enabled         INTEGER NOT NULL DEFAULT 1,
+                control_enabled INTEGER NOT NULL DEFAULT 0,
+                allowed_actions TEXT NOT NULL DEFAULT '[]',
+                param_constraints TEXT NOT NULL DEFAULT '{{}}',
+                rate_limit_per_min INTEGER NOT NULL DEFAULT 60,
+                allow_raw_service INTEGER NOT NULL DEFAULT 0,
                 created_at      TEXT NOT NULL DEFAULT '',
                 updated_at      TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # 实体→网络 控制审计表
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_CONTROL_LOGS} (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id   INTEGER NOT NULL DEFAULT 0,
+                entity_id   TEXT NOT NULL DEFAULT '',
+                action      TEXT NOT NULL DEFAULT '',
+                service     TEXT NOT NULL DEFAULT '',
+                params      TEXT NOT NULL DEFAULT '{{}}',
+                success     INTEGER NOT NULL DEFAULT 0,
+                error       TEXT NOT NULL DEFAULT '',
+                client_ip   TEXT NOT NULL DEFAULT '',
+                source      TEXT NOT NULL DEFAULT 'api',
+                created_at  TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -1241,12 +1329,45 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 ("body_mode", "TEXT NOT NULL DEFAULT 'full'"),
                 ("field_mapping", "TEXT NOT NULL DEFAULT '{}'"),
                 ("url", "TEXT NOT NULL DEFAULT ''"),  # 旧表可能残留 NOT NULL 无默认值
+                # ── v4.0.0 控制相关列 ──
+                ("control_token", "TEXT NOT NULL DEFAULT ''"),
+                ("control_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                ("allowed_actions", "TEXT NOT NULL DEFAULT '[]'"),
+                ("param_constraints", "TEXT NOT NULL DEFAULT '{}'"),
+                ("rate_limit_per_min", "INTEGER NOT NULL DEFAULT 60"),
+                ("allow_raw_service", "INTEGER NOT NULL DEFAULT 0"),
             ]:
                 if col_name not in pt_columns:
                     conn.execute(f"ALTER TABLE {TABLE_PUSH_TARGETS} ADD COLUMN {col_name} {col_def}")
             conn.execute(f"UPDATE {TABLE_PUSH_TARGETS} SET push_token = hex(randomblob(16)) WHERE push_token = ''")
+            conn.execute(f"UPDATE {TABLE_PUSH_TARGETS} SET control_token = hex(randomblob(16)) WHERE control_token = ''")
         except Exception:
             pass
+        # 迁移 v4.0.0：旧表 entity_id 带 UNIQUE 约束 → 重建为「同实体可多份配置」
+        try:
+            _migrate_push_targets_drop_unique(conn)
+        except Exception as exc:
+            _LOGGER.warning("[HDS] push_targets 唯一约束迁移失败（不影响主流程）: %s", exc)
+        # token 部分唯一索引（空串不参与，避免多行空 token 冲突）
+        try:
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_push_targets_push_token "
+                f"ON {TABLE_PUSH_TARGETS}(push_token) WHERE push_token != ''"
+            )
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_push_targets_control_token "
+                f"ON {TABLE_PUSH_TARGETS}(control_token) WHERE control_token != ''"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_push_targets_entity "
+                f"ON {TABLE_PUSH_TARGETS}(entity_id)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_control_logs_created "
+                f"ON {TABLE_CONTROL_LOGS}(created_at DESC)"
+            )
+        except Exception as exc:
+            _LOGGER.warning("[HDS] push_targets 索引创建失败: %s", exc)
         conn.commit()
 
         # ── 数据清理：截断 on_time / off_time 中的毫秒后缀 ──
@@ -4328,6 +4449,10 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         BatchEntityStateView,
         PushTargetsView,
         PushDataView,
+        PushControlView,
+        PushCapabilitiesView,
+        PushEntityCapabilitiesView,
+        PushControlLogsView,
         BridgeConnectionsView,
         BridgeEntitiesView,
         BridgeReloadView,
@@ -4417,6 +4542,11 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(BatchEntityStateView(db_path))
     hass.http.register_view(PushTargetsView(db_path))
     hass.http.register_view(PushDataView(db_path))
+    # 实体→网络 控制（读写分离：control_token 专用写通道）
+    hass.http.register_view(PushControlView(db_path))
+    hass.http.register_view(PushCapabilitiesView(db_path))
+    hass.http.register_view(PushEntityCapabilitiesView(db_path))
+    hass.http.register_view(PushControlLogsView(db_path))
     # 设备桥接 API
     hass.http.register_view(BridgeConnectionsView(db_path))
     hass.http.register_view(BridgeEntitiesView(db_path))
@@ -4466,6 +4596,10 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     from .printer import register_api_views as _printer_register_api_views
     _printer_register_api_views(hass, db_path)
 
+    # 整库备份 API（独立模块）
+    from .backup import register_api_views as _backup_register_api_views
+    _backup_register_api_views(hass, db_path)
+
 
 # =========================================================================== #
 #  Config Entry 入口                                                           #
@@ -4484,6 +4618,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         local_logger.info, "[sys] 本地日志系统已启动 log_dir=%s keep_days=%d",
         log_dir, log_retention_days,
     )
+
+    # ── 整库备份：若上次排队了「恢复」，必须在任何连接打开数据库之前应用 ──
+    #    运行期直接覆盖正在写入的库有「半写状态」和「在途写入打进新库」两类风险，
+    #    因此恢复采用「排队 + 启动时原子替换」，替换前会自动留一份恢复前快照。
+    from .backup import apply_pending_restore_sync
+    restore_info = await hass.async_add_executor_job(
+        apply_pending_restore_sync, db_path, hass.config.config_dir)
+    if restore_info is not None:
+        await hass.async_add_executor_job(
+            local_logger.info,
+            "[backup] 启动恢复处理 applied=%s name=%s snapshot=%s reason=%s",
+            restore_info.get("applied"), restore_info.get("name"),
+            restore_info.get("snapshot"), restore_info.get("reason"),
+        )
 
     await hass.async_add_executor_job(_init_database, db_path)
 
@@ -4506,6 +4654,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].setdefault("db_viewer_enabled", True)
     hass.data[DOMAIN].setdefault("db_edit_enabled", True)
     hass.data[DOMAIN].setdefault("allow_remote_access", False)
+    # 实体→网络 控制总开关：默认关闭（由 switch 实体在 async_added_to_hass 中恢复/覆盖）
+    hass.data[DOMAIN].setdefault(PUSH_CONTROL_SWITCH_KEY, False)
 
     # ── 用户操作记录"收件箱"：POST /action_log 先落 JSON 临时文件，后台迁入 SQLite，
     #    防止 SQLite 瞬时锁库/写入失败导致前端上报（含 sendBeacon 无响应投递）丢数据 ──
@@ -4513,6 +4663,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     action_inbox = ActionLogInbox(hass, db_path)
     hass.data[DOMAIN]["action_log_inbox"] = action_inbox
     await action_inbox.start()
+
+    # 实体→网络 控制：启动时打印动作目录规模，便于排查"动作不存在"类问题
+    try:
+        from .push_control import log_catalog_summary
+        log_catalog_summary()
+    except Exception as exc:
+        _LOGGER.warning("[HDS] 控制动作目录加载失败: %s", exc)
 
     _register_api_views(hass, db_path)
 
@@ -4953,7 +5110,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     hass.data[DOMAIN]["cancel_api_src"] = cancel_api_src
 
-    _LOGGER.warning("[HDS] 监听已注册（白名单+环境轮询+属性轮询+文件源+API源+午夜拆分）")
+    # 整库备份：每 10 分钟检查一次是否到期（改计划无需重注册；HA 中途重启也能补上当天备份）
+    from .backup import TICK_MINUTES as _backup_tick_minutes
+
+    async def _backup_tick_callback(now=None) -> None:
+        try:
+            from .backup import async_maybe_scheduled_backup
+            await async_maybe_scheduled_backup(hass, db_path, hass.config.config_dir)
+        except Exception:
+            local_logger = get_logger()
+            if local_logger:
+                local_logger.exception("[backup] 定时备份检查异常")
+
+    cancel_backup_tick = async_track_time_interval(
+        hass, _backup_tick_callback, timedelta(minutes=_backup_tick_minutes),
+    )
+    hass.data[DOMAIN]["cancel_backup_tick"] = cancel_backup_tick
+
+    _LOGGER.warning("[HDS] 监听已注册（白名单+环境轮询+属性轮询+文件源+API源+午夜拆分+整库备份）")
 
     if local_logger:
         await hass.async_add_executor_job(
@@ -5054,7 +5228,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception:
             _LOGGER.exception("[power] 用电计量停止异常")
 
-    for key in ("cancel_bus_listener", "cancel_env_poll", "cancel_attr_poll", "cancel_file_src", "cancel_api_src", "cancel_midnight_split", "cancel_correction_scan", "cancel_daily_summary"):
+    for key in ("cancel_bus_listener", "cancel_env_poll", "cancel_attr_poll", "cancel_file_src", "cancel_api_src", "cancel_midnight_split", "cancel_correction_scan", "cancel_daily_summary", "cancel_backup_tick"):
         cancel = hass.data.get(DOMAIN, {}).get(key)
         if cancel:
             cancel()

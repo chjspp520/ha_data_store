@@ -227,6 +227,12 @@
   .field-mapping-table input[type="checkbox"] { transform: scale(1.1); accent-color: var(--accent); }
   .field-mapping-table input[type="text"] { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 12px; width: 120px; }
   .field-mapping-table input[type="text"]:focus { outline: 2px solid var(--accent); }
+  /* 实体→网络 使用说明：代码块 */
+  .push-guide-code { background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+                     padding: 10px 12px; margin: 0; font-family: 'Consolas', 'Courier New', monospace;
+                     font-size: 12px; line-height: 1.65; color: #7ec699; white-space: pre-wrap;
+                     word-break: break-all; overflow-x: auto; }
+  .push-guide-code .cmt { color: var(--text2); }
   .attr-config .radio-group { display: flex; gap: 16px; flex-wrap: wrap; }
   .attr-config .radio-group label { color: var(--text); font-size: 13px; cursor: pointer; }
   .attr-config .radio-group input[type="radio"] { accent-color: var(--accent); }
@@ -277,6 +283,7 @@
   <button class="tab-btn" onclick="switchTab('manage')">系统配置</button>
   <button class="tab-btn" onclick="switchTab('api')">API工具</button>
   <button class="tab-btn" onclick="switchTab('db')">数据库浏览</button>
+  <button class="tab-btn" onclick="switchTab('backup')">数据备份</button>
   <button class="tab-btn" onclick="switchTab('log')">日志查看</button>
   <button class="tab-btn" onclick="switchTab('user')">用户管理</button>
   <button class="tab-btn" onclick="switchTab('automation')">自动化</button>
@@ -709,10 +716,178 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
 
   <!-- 子面板: 实体→网络 -->
   <div id="sub-push" class="sub-panel">
+
+    <!-- 📖 使用方法（默认折叠） -->
+    <div class="section" id="pushGuideSection">
+      <h3>📖 使用方法
+        <button class="btn-accent" style="float:right;padding:3px 12px;font-weight:400" onclick="togglePushGuide()" id="pushGuideToggle">展开 ▼</button>
+      </h3>
+      <div class="hint" id="pushGuideSummary" style="margin:-4px 0 0">
+        <b>读</b>与<b>写</b>分离：读地址 GET 取数据，控制地址 POST 发操作（需开关「实体网络控制」开启）。
+        点右上角展开可看：快速上手 / curl 示例 / 参数锁定（固定值·限幅）/ 动作清单 / 错误码 / 动作目录。
+        不展开也可直接在下方列表与向导里配置。
+      </div>
+      <div id="pushGuideBody" style="display:none;line-height:1.9;font-size:13px">
+
+        <!-- 快速上手 -->
+        <div style="background:var(--card);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:12px 16px;margin-bottom:6px">
+          <div style="color:var(--accent);font-weight:600;margin-bottom:8px">⚡ 快速上手（4 步）</div>
+          <div><b>① 打开总闸</b> — 在 HA 中找到设备「HA数据统一存储系统」，把开关 <b>「实体网络控制」</b>打开（默认关闭，重启后保留状态）。它关闭时任何控制请求都返回 403。</div>
+          <div><b>② 加载实体</b> — 在下方「添加数据访问」步骤 1 填实体 ID（如 <code>climate.keting_kong_tiao</code>、<code>cover.ke_ting_chuang_lian</code>），点「加载属性」。不支持控制的实体（如 <code>sensor.*</code>）会自动跳过步骤 3，只能当只读数据源。</div>
+          <div><b>③ 选动作</b> — 步骤 3「允许的控制」勾选「启用控制」，再勾选允许的动作；需要限制参数时把参数从「可传入」改成「固定值」或「限幅」。步骤 4 保存。</div>
+          <div><b>④ 调用</b> — 回到上方列表，点「测试」可直接在本页面验证；或复制<b>控制地址</b>用 POST 调用（见下方示例）。</div>
+        </div>
+
+        <!-- 一、两类地址 -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">一、两类地址与开关</div>
+        <div class="table-wrap">
+          <table style="font-size:12px;line-height:1.7">
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">用途</td><td style="padding-right:14px">地址</td><td style="padding-right:14px">方法</td><td>放行条件</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px">读数据</td><td style="padding-right:14px"><code>GET /api/ha_data_store/push_data/&lt;push_token&gt;</code></td><td>GET</td><td>开关「API 访问」开 + 配置启用</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px">发控制</td><td style="padding-right:14px"><code>POST /api/ha_data_store/push_control/&lt;control_token&gt;</code></td><td>POST</td><td>开关「API 访问」开 <b>+</b> 开关「实体网络控制」开 <b>+</b> 配置的「启用控制」开 <b>+</b> 动作在允许清单里</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px">查能力</td><td style="padding-right:14px"><code>GET /api/ha_data_store/push_capabilities/&lt;control_token&gt;</code></td><td>GET</td><td>同「发控制」（拿不到就说明控制没开）</td></tr>
+          </table>
+        </div>
+        <div class="hint" style="margin-top:6px">
+          两个 token 相互独立：<b>只读凭证可以随便给</b>（大屏、Grafana、第三方看板），
+          <b>写凭证只给需要控制的系统</b>。token 本身就是密钥，地址泄漏等于权限泄漏。
+        </div>
+
+        <!-- 二、调用示例 -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">二、调用示例</div>
+        <div class="hint" style="margin-bottom:6px">把 <code>&lt;HA&gt;</code> 换成本机地址，<code>&lt;control_token&gt;</code> 换成列表里复制的控制地址中的 token 部分。</div>
+
+        <div style="font-size:12px;color:var(--text2);margin:8px 0 4px">① 读数据（无需 body）</div>
+        <div class="push-guide-code">curl "http://&lt;HA&gt;:8123/api/ha_data_store/push_data/&lt;push_token&gt;"</div>
+
+        <div style="font-size:12px;color:var(--text2);margin:10px 0 4px">② 关空调（枚举参数）</div>
+        <div class="push-guide-code">curl -X POST "http://&lt;HA&gt;:8123/api/ha_data_store/push_control/&lt;control_token&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"set_hvac_mode","params":{"hvac_mode":"off"}}'</div>
+
+        <div style="font-size:12px;color:var(--text2);margin:10px 0 4px">③ 设空调温度 26℃ 并等待状态刷新</div>
+        <div class="push-guide-code">curl -X POST "http://&lt;HA&gt;:8123/api/ha_data_store/push_control/&lt;control_token&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"set_temperature","params":{"temperature":26},"wait_state":true}'</div>
+
+        <div style="font-size:12px;color:var(--text2);margin:10px 0 4px">④ 窗帘开到 30%（若配置端限幅 ≤50，传 80 会被自动裁到 50）</div>
+        <div class="push-guide-code">curl -X POST "http://&lt;HA&gt;:8123/api/ha_data_store/push_control/&lt;control_token&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"set_cover_position","params":{"position":80}}'</div>
+
+        <div style="font-size:12px;color:var(--text2);margin:10px 0 4px">⑤ 灯打开 + 亮度 + 色温</div>
+        <div class="push-guide-code">curl -X POST "http://&lt;HA&gt;:8123/api/ha_data_store/push_control/&lt;control_token&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"turn_on","params":{"brightness":180,"color_temp_kelvin":4000}}'</div>
+
+        <div style="font-size:12px;color:var(--text2);margin:10px 0 4px">⑥ 先问「我能做什么」再决定调用（能力发现）</div>
+        <div class="push-guide-code">curl "http://&lt;HA&gt;:8123/api/ha_data_store/push_capabilities/&lt;control_token&gt;"
+# 返回 data.actions[] = 该 token 实际被授权的动作 + 每个动作的参数字段名/类型/范围/枚举</div>
+
+        <!-- 三、动作模式 vs raw -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">三、两种请求体：动作模式 与 raw 模式</div>
+        <div style="margin-bottom:4px"><b>动作模式（推荐）</b> —— <code>{"action": "...", "params": {...}}</code></div>
+        <div class="hint" style="margin:0 0 8px">
+          动作名是<b>白名单枚举</b>（下方「查看支持的动作」可列全部）。服务端会校验：动作是否被授权、
+          参数名是否存在、类型/范围/枚举是否合法。写错会直接报错，不会静默下发。
+        </div>
+        <div style="margin-bottom:4px"><b>raw 模式（高级，需单独开启）</b> —— <code>{"service": "climate.set_temperature", "data": {...}}</code></div>
+        <div class="hint" style="margin:0">
+          用于自定义集成只有专有服务的场景。硬约束：<b>只能调用实体自身的域</b>（拿 <code>climate.x</code> 的控制地址去调
+          <code>switch.*</code> 会被 403），且永久禁止 <code>shell_command / python_script / hassio / homeassistant / recorder / notify</code> 等系统域。
+        </div>
+
+        <!-- 四、参数控制 -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">四、参数控制（两层，这是本功能最有用的部分）</div>
+        <div><b>第一层 · 调用方可传参</b>：<code>params</code> 里的值随每次请求变化，服务端按 schema 校验。</div>
+        <div style="margin-top:6px"><b>第二层 · 配置端锁定</b>：在步骤 3 把某个参数的「可传入」改成——</div>
+        <div class="table-wrap" style="margin-top:6px">
+          <table style="font-size:12px;line-height:1.7">
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">固定值</td><td>调用方传什么都<b>被忽略</b>，永远下发你设的那个值。</td><td style="color:var(--text2)">例：空调只允许设 26℃</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">限幅</td><td>超出你设的范围<b>自动裁剪</b>到边界，不报错。</td><td style="color:var(--text2)">例：窗帘只能 0~50%，传 80 → 50</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">可传入</td><td>默认，按实体属性给定的 min/max/枚举校验。</td><td style="color:var(--text2)">例：温度 16~30 由实体决定</td></tr>
+          </table>
+        </div>
+        <div class="hint" style="margin-top:6px">
+          配好之后，外部系统拿到的是「<b>受限能力</b>」而不是「实体控制权」。例如给家人手机的 token 只勾「关灯 / 关空调」，
+          给运维系统的 token 勾全部 —— 同一个实体可以建多条配置，各自一套 token 与动作清单。
+        </div>
+
+        <!-- 五、动作清单语义 -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">五、动作清单（允许的动作）怎么算</div>
+        <div class="table-wrap">
+          <table style="font-size:12px;line-height:1.7">
+            <tr><td style="padding-right:14px">勾选「全选动作」</td><td>存为 <code>["*"]</code>，目录内全部动作都放行</td></tr>
+            <tr><td style="padding-right:14px">只勾一部分</td><td>存为具体列表，例如 <code>["turn_off","set_temperature"]</code></td></tr>
+            <tr><td style="padding-right:14px">一个都不勾</td><td>存为空清单，<b>拒绝所有控制请求</b>（列表里显示黄色「无动作」，等价于控制不可用）</td></tr>
+          </table>
+        </div>
+        <div class="hint" style="margin-top:6px">没勾选「启用控制」时，该配置的 control_token 直接无效（404），等于只读。</div>
+
+        <!-- 六、响应 -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">六、返回内容与错误码</div>
+        <div class="table-wrap">
+          <table style="font-size:12px;line-height:1.7">
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">success</td><td>是否成功</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">entity_id / action / service</td><td>实际执行的实体、动作、HA 服务（如 <code>climate.set_temperature</code>）</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">applied_params</td><td><b>实际下发</b>的参数（已应用固定值 / 限幅的结果），便于核对</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">state / attributes_changed</td><td>执行后读到的实体状态；状态是否已刷新</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">waited</td><td>配合 <code>wait_state:true</code>，表示是否观察到状态刷新（空调等设备刷新较慢，最长等 3 秒）</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">rate_limit_remaining</td><td>本分钟剩余配额（<code>-1</code> = 未限流）</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">error / code</td><td>失败原因与 HTTP 码</td></tr>
+          </table>
+        </div>
+        <div class="table-wrap" style="margin-top:8px">
+          <table style="font-size:12px;line-height:1.7">
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">400</td><td>参数问题：未知动作 / 未知参数 / 缺必填 / 类型或取值非法 / 服务不存在</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">403</td><td>未授权：动作不在清单、清单为空、raw 跨域或禁用域、「API 访问」或「实体网络控制」总开关关闭</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">404</td><td>control_token 无效，或该配置被删除 / 停用 / 未开启控制</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">405</td><td>方法不对：控制地址只能用 POST，读地址只能用 GET</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">429</td><td>超过该配置的「限流」设置（次/分钟）</td></tr>
+            <tr><td style="color:var(--text2);padding-right:14px;white-space:nowrap">502</td><td>HA 服务调用失败（设备离线、集成报错等）</td></tr>
+          </table>
+        </div>
+
+        <!-- 七、动作一览 -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">七、支持控制的域与动作一览</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn-accent" style="padding:5px 14px" onclick="loadPushGuideCatalog()">📋 加载动作目录</button>
+          <span class="hint" style="margin:0">从后端实时读取，新增域时这里自动跟随，无需改前端。</span>
+        </div>
+        <div id="pushGuideCatalog" style="margin-top:8px"></div>
+
+        <!-- 八、安全与注意 -->
+        <div style="color:var(--accent);font-weight:600;margin:16px 0 6px">八、安全建议与注意事项</div>
+        <div style="line-height:1.9">
+          <div>• <b>门锁 / 报警器 / 警报器</b>属于高风险域，界面上会额外黄字警告。映射出去等于交出该设备的控制权，请只在必要时开启，并严格限制动作与参数。</div>
+          <div>• <b>用不到就关总闸</b>：把「实体网络控制」开关关掉，所有控制请求立即 403，读数据不受影响。</div>
+          <div>• 控制接口<b>只认 POST</b>，这是刻意的 —— GET 会被浏览器预取、被代理和日志记录、被爬虫扫到，等于把「开锁」变成可被随机触发的动作。</div>
+          <div>• 每次控制（成功与失败）都会写一条<b>审计日志</b>（见下方「📜 控制日志」），含实际参数与来源 IP，保留 30 天。</div>
+          <div>• <b>限流</b>默认 60 次/分钟，防止脚本异常循环把设备打爆；0 表示不限流。</div>
+          <div>• 更改实体能力（如换设备）后，若步骤 3 的动作清单看起来不对，重新点「加载属性」刷新即可 —— 枚举与范围是从实体属性实时读取的。</div>
+          <div>• 本功能需要后端调用 HA 服务，<b>升级后需重启 HA 生效</b>（与「接口管理」免重启机制不同）。</div>
+        </div>
+
+      </div>
+    </div>
+
     <div id="pushTargetList"></div>
 
+    <div id="pushTestSection" class="section" style="display:none">
+      <h3>🧪 控制测试 <span id="pushTestTarget" class="hint" style="margin-left:8px"></span></h3>
+      <div id="pushTestBody"></div>
+    </div>
+
+    <div id="pushControlLogsWrap" style="display:none"></div>
+
     <div class="attr-config">
-      <h3 style="color: var(--accent); margin-bottom: 12px;">添加数据访问</h3>
+      <h3 style="color: var(--accent); margin-bottom: 12px;" id="ptFormTitle">添加数据访问</h3>
+      <div class="hint" style="margin-bottom:10px">
+        <b>读</b>与<b>写</b>分离：<b>访问地址</b>（push_token）只读，GET 即取数据；
+        <b>控制地址</b>（control_token）只接受 <code>POST</code>，用于开关 / 空调 / 窗帘等操作。
+        控制总闸是开关「实体网络控制」（默认<b>关闭</b>，未开启时所有控制请求返回 403），
+        详细用法见本页顶部「📖 使用方法」。
+      </div>
 
       <!-- Step 1: 加载实体 -->
       <div class="step">
@@ -720,16 +895,17 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <div class="form-row">
           <div>
             <label>实体 ID</label>
-            <input type="text" id="ptEntityId" placeholder="sensor.temperature" style="width:280px">
+            <input type="text" id="ptEntityId" placeholder="sensor.temperature / climate.ac" style="width:280px">
           </div>
           <button class="btn-accent" onclick="loadPushEntityState()">加载属性</button>
+          <button class="btn-accent" onclick="ptResetForm()">重置表单</button>
         </div>
         <div class="hint" id="ptEntityMeta"></div>
       </div>
 
       <!-- Step 2: Payload 模式（紧跟步骤1） -->
       <div class="step" id="ptBodyStep" style="display:none">
-        <h4>步骤 2：返回数据范围</h4>
+        <h4>步骤 2：返回数据范围（读）</h4>
         <div class="radio-group">
           <label><input type="radio" name="ptBodyMode" value="full" checked onchange="onPtBodyModeChange()"> 完整模式（state + 所有 attributes）</label>
           <label><input type="radio" name="ptBodyMode" value="compact" onchange="onPtBodyModeChange()"> 紧凑模式（仅 state）</label>
@@ -741,9 +917,42 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </div>
       </div>
 
-      <!-- Step 3: 保存 -->
+      <!-- Step 3: 允许的控制 -->
+      <div class="step" id="ptControlStep" style="display:none">
+        <h4>步骤 3：允许的控制</h4>
+        <div class="hint" id="ptControlMeta"></div>
+        <div class="hint" id="ptControlUnsupported" style="display:none"></div>
+        <div id="ptControlBody" style="display:none">
+          <label style="display:flex;align-items:center;gap:8px;margin:10px 0;cursor:pointer">
+            <input type="checkbox" id="ptControlEnabled" style="width:auto" onchange="onPtControlToggle()">
+            <b>启用控制</b><span class="hint" style="margin:0">（不勾选时 control_token 无效，等于只读）</span>
+          </label>
+          <div class="hint" id="ptHighRiskWarn" style="display:none;color:#e6a23c"></div>
+          <div style="margin:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn-accent" style="padding:4px 10px" onclick="ptSelectAllActions(true)">全选动作</button>
+            <button class="btn-accent" style="padding:4px 10px" onclick="ptSelectAllActions(false)">全不选</button>
+            <span class="hint" style="margin:0">全选会以通配 <code>*</code> 保存；一个都不勾表示该 token 不能控制任何动作</span>
+          </div>
+          <div class="attr-tree" id="ptActionList" style="max-height:420px;overflow-y:auto"></div>
+          <div class="form-row" style="margin-top:12px;align-items:flex-end;flex-wrap:wrap">
+            <div>
+              <label>限流（次/分钟，0=不限）</label>
+              <input type="number" id="ptRateLimit" value="60" min="0" max="6000" style="width:110px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
+            </div>
+            <div>
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="ptAllowRaw" style="width:auto">
+                允许 raw 服务直传（高级）
+              </label>
+              <div class="hint" style="margin:2px 0 0">仅放行该实体自身的服务域，禁止 shell_command / homeassistant 等系统域。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 4: 保存 -->
       <div class="step" id="ptSaveStep" style="display:none">
-        <h4>步骤 3：命名 & 保存</h4>
+        <h4>步骤 4：命名 & 保存</h4>
         <div class="form-row">
           <div>
             <label>名称（选填）</label>
@@ -754,7 +963,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
             <input type="number" id="ptInterval" value="0" min="0" max="1440" style="width:100px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
           </div>
         </div>
-        <div class="hint">保存后自动生成唯一访问地址，token 即密钥，直接访问即可。受「API 访问」开关控制。</div>
+        <div class="hint">保存后自动生成读 / 写两个地址，token 即密钥。读受「API 访问」开关控制；写还需「实体网络控制」总开关。</div>
+        <div class="hint" id="ptSaveHint" style="display:none;color:#e6a23c"></div>
         <div class="row" style="margin-top:12px">
           <button class="btn-green" onclick="savePushTarget()">💾 保存配置</button>
         </div>
@@ -1503,6 +1713,135 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
 </div>
 
 <!-- ================================================ -->
+<!--  Tab: 数据备份（整库备份 / 恢复）                      -->
+<!-- ================================================ -->
+<div id="tab-backup" class="tab-panel">
+  <!-- 待恢复横幅 -->
+  <div id="bkPendingBanner" class="section" style="display:none;border-left:3px solid var(--orange)">
+    <h3 style="color:var(--orange)">⏳ 已排队等待恢复</h3>
+    <div id="bkPendingText" class="hint" style="font-size:12px"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn-accent" onclick="bkCancelRestore()">取消排队</button>
+      <span class="hint" style="margin:0">重启 Home Assistant 后，恢复会在数据库被打开之前自动应用。</span>
+    </div>
+  </div>
+
+  <!-- 状态 -->
+  <div class="section">
+    <h3>💾 整库备份
+      <button class="btn-accent" style="float:right;padding:3px 10px;margin-left:6px" onclick="bkLoad()">刷新</button>
+      <button class="btn-green" style="float:right;padding:3px 12px" onclick="bkCreate()">立即备份</button>
+    </h3>
+    <div id="bkStatus" class="hint" style="font-size:12px">加载中…</div>
+    <div id="bkWarnings" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:10px;flex-wrap:wrap">
+      <button class="btn-accent" onclick="bkIntegrity()">🔍 完整性检查</button>
+      <button class="btn-accent" onclick="bkPrune()">🧹 清理旧自动备份</button>
+    </div>
+    <div id="bkIntegrityResult" class="hint" style="margin-top:8px"></div>
+  </div>
+
+  <!-- 自动备份设置 -->
+  <div class="section">
+    <h3>⏰ 自动备份计划</h3>
+    <div class="form-row" style="flex-wrap:wrap;align-items:flex-end">
+      <div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="bkEnabled" style="width:auto">
+          启用自动备份
+        </label>
+      </div>
+      <div>
+        <label>周期</label>
+        <select id="bkSchedule" onchange="bkOnScheduleChange()" style="width:120px">
+          <option value="off">关闭</option>
+          <option value="hourly">每小时</option>
+          <option value="daily">每天</option>
+          <option value="weekly">每周</option>
+        </select>
+      </div>
+      <div id="bkHourWrap">
+        <label>执行时间（时）</label>
+        <input type="number" id="bkHour" min="0" max="23" value="3" style="width:90px">
+      </div>
+      <div id="bkWeekdayWrap">
+        <label>星期</label>
+        <select id="bkWeekday" style="width:100px">
+          <option value="0">周一</option>
+          <option value="1">周二</option>
+          <option value="2">周三</option>
+          <option value="3">周四</option>
+          <option value="4">周五</option>
+          <option value="5">周六</option>
+          <option value="6">周日</option>
+        </select>
+      </div>
+      <div>
+        <label>自动备份保留份数</label>
+        <input type="number" id="bkKeep" min="1" max="100" value="10" style="width:100px">
+      </div>
+      <div style="flex:1;min-width:260px">
+        <label>备份目录（相对路径按 HA 配置目录算；NAS 请填<b>挂载后</b>的绝对路径）</label>
+        <input type="text" id="bkDir" placeholder="/media/ha_backups 或 storage/ha_data_store_backups" style="width:100%">
+      </div>
+    </div>
+    <div class="hint" style="margin-top:8px;color:#e6a23c">
+      ⚠ 不能直接填 <code>smb://192.168.1.102/media</code> 这类共享地址 —— 程序只能读写文件系统路径，
+      填了会在配置目录里造出一个同名垃圾目录（备份看起来"成功"，其实没到 NAS）。
+      请先把它挂载成普通目录再填挂载后的路径：
+      <b>HA OS / Supervised</b> → 「设置 → 系统 → 存储 → 添加网络存储」，挂载后用途选 media 或 share，路径即 <code>/media/&lt;名字&gt;</code>；
+      <b>HA Container / Core</b> → 宿主机执行 <code>mount -t cifs //192.168.1.102/media /mnt/ha_backups -o username=用户,password=密码,uid=1000</code>。
+      挂载点请确保在 HA 启动时就已就绪。
+    </div>
+    <div class="hint" id="bkScheduleHint" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn-green" onclick="bkSaveSettings()">💾 保存设置</button>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      检查周期 <b id="bkTick"></b> 分钟：到点才真正备份，HA 中途重启不会漏掉当天那次。
+      <b>手动备份与恢复前快照永不自动删除</b>，只有「自动」备份按上面的份数滚动清理。
+    </div>
+  </div>
+
+  <!-- 备份列表 -->
+  <div id="bkListWrap"></div>
+
+  <!-- 说明 -->
+  <div class="section">
+    <h3>📖 关于备份
+      <button class="btn-accent" style="float:right;padding:3px 12px;font-weight:400" onclick="bkToggleGuide()" id="bkGuideToggle">展开 ▼</button>
+    </h3>
+    <div class="hint" id="bkGuideSummary" style="margin:-4px 0 0">
+      备份整库（单个 SQLite 文件），不备份 <code>export_entities/</code> 等集成外文件。
+      点右上角展开可看：备份方式 / 恢复流程 / 注意事项。
+    </div>
+    <div id="bkGuideBody" style="display:none;line-height:1.9;font-size:13px">
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">备份方式</div>
+      <div>优先使用 <code>VACUUM INTO</code>（产物紧凑、无空闲页），不支持或失败时回退 SQLite 官方在线备份 API。
+      两者都能在数据库被正常读写时取得<b>一致快照</b>，不需要停机，也不会丢掉 <code>-wal</code> 里尚未合并的数据。</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">恢复流程（重点）</div>
+      <div>恢复<b>不会在运行期直接覆盖数据库</b> —— 那会有「半写状态」和「在途写入打进新库」两类风险。实际流程是：</div>
+      <div>① 点「恢复」后，服务端先校验备份文件（完整性 + 必需表），复制为待恢复文件并写下标记；</div>
+      <div>② 你<b>手动重启 HA</b>；</div>
+      <div>③ 启动时、数据库被任何连接打开<b>之前</b>，先给现有库自动做一份「恢复前快照」，再用原子操作替换；</div>
+      <div>④ 如果备份文件校验失败，会直接取消恢复并保留现有库，坏文件留存为 <code>*.invalid</code> 供排查。</div>
+      <div class="hint" style="margin-top:6px">
+        也就是说：恢复一定发生在「无人使用数据库」的时刻，且任何一步失败都能靠快照退回。
+        恢复前快照在「恢复前快照」列表里可以看到，随时可以再恢复回去。
+      </div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">注意事项</div>
+      <div>• 备份的是<b>整个数据库</b>，包含：监控实体配置、历史记录、用电计量、属性提取、操作记录、接口定义、自动化、备份设置本身、以及「实体→网络」的 token。请妥善保存备份文件。</div>
+      <div>• 不包含：<code>storage/export_entities/</code> 下的导出文件、集成目录里的 <code>logs/</code> 日志、以及 HA 自己的实体/设备注册表。</div>
+      <div>• 备份文件放在本机时，能防误操作和逻辑损坏，<b>防不了磁盘故障</b>。建议把目录改到 NAS 挂载路径，并另外开启 HA 自带备份。</div>
+      <div>• 把外部拿到的备份文件直接拷进备份目录，刷新本页即可看到并恢复（无需上传接口）。</div>
+      <div>• 大的库做完整性检查需要几秒到几十秒，属正常现象。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================ -->
 <!--  Tab 4: 日志查看                                     -->
 <!-- ================================================ -->
 <div id="tab-log" class="tab-panel">
@@ -1684,6 +2023,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <optgroup label="自定义路由" id="apiCustomRoutesGroup">
         </optgroup>
         <optgroup label="🧩 新接口（ext·免重启）" id="apiExtGroup">
+        </optgroup>
+        <optgroup label="🌐 实体→网络（token 鉴权）" id="apiPushGroup">
         </optgroup>
       </select>
     </div>
@@ -2247,6 +2588,12 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 实体→网络（push）：调用方式与 curl 示例 -->
+  <div class="section" id="apiPushHintWrap" style="display:none">
+    <h3>🌐 实体→网络 调用方式</h3>
+    <div id="apiPushHint"></div>
+  </div>
+
   <div class="section" style="margin-top:16px">
     <h3>📖 API 使用说明</h3>
     <div class="attr-tree" style="max-height:none;line-height:1.8;padding:14px 18px">
@@ -2307,6 +2654,18 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">user_actions_user_summary</td><td>用户动作·按用户汇总 · 返回各用户操作次数/实体数</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">user_actions_entity_last_today</td><td>用户动作·实体当日最后一条 · entity_id（必填）· 返回该实体当天最后一条操作记录</td></tr>
       </table>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">🌐 实体→网络（token 鉴权，不走 type 参数）</div>
+      <table style="font-size:12px;line-height:1.6">
+        <tr><td style="color:var(--green);padding-right:16px">GET /push_data/{push_token}</td><td>只读取数 · 返回内容由该配置的「返回数据范围」决定（完整 / 紧凑 / 自选字段）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /push_control/{control_token}</td><td>控制实体 · body <code>{"action":"...","params":{...}}</code>，可选 <code>wait_state</code> 等状态刷新</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">GET /push_capabilities/{control_token}</td><td>能力清单 · 该 token 被授权的动作与参数 schema（含取值范围 / 枚举）</td></tr>
+      </table>
+      <div style="color:var(--text2);margin-top:6px">
+        在「查询类型」下拉的 <b>🌐 实体→网络</b> 分组里选一条，即可直接生成带真实 token 的地址
+        （token 即密钥，地址<b>不需要</b>再带 <code>key</code>）。
+        控制还需 HA 开关「实体网络控制」开启 + 该配置勾选「启用控制」，且动作必须在配置里授权过。
+      </div>
 
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">rooms_multi_metric 参数（新增）</div>
       <div><code style="color:var(--green)">date=2025-01-15</code> <span style="color:var(--text2)">— 查询日期（必填）</span></div>
@@ -2726,6 +3085,9 @@ function switchTab(name) {
   if (name === 'log' && logDates.length === 0) initLogViewer();
   if (name === 'monitor' && !monitorLoaded) loadMonitor();
   if (name === 'manage' && !manageLoaded) loadEntities();
+  if (name === 'backup') bkLoad();
+  // 打开 API 工具时刷新「实体→网络」分组（新增/删除目标后无需重载页面）
+  if (name === 'api' && typeof pushLoadIntoApi === 'function') pushLoadIntoApi();
 }
 
 // ==============================
@@ -3227,6 +3589,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof loadCustomRoutesIntoApi === 'function') loadCustomRoutesIntoApi();
     // 新接口（ext）：填充地址生成器的 ext 分组
     if (typeof extLoadIntoApi === 'function') extLoadIntoApi();
+    // 实体→网络：填充地址生成器的 push 分组
+    // 注意：gen 是默认激活的子选项卡，不会触发 switchApiSubTab，
+    // 因此这里必须主动调用一次，否则该分组永远是空的。
+    if (typeof pushLoadIntoApi === 'function') pushLoadIntoApi();
   }, 500);
   // 静态表格也做一次增强（动态表格由 MutationObserver 兜底）
   if (typeof enhanceTableWrapTables === 'function') enhanceTableWrapTables(document);
@@ -4334,6 +4700,7 @@ const MONITOR_SEC_LABELS = {
   push_target: '🌐 实体→网络', xiaoai: '💬 小爱对话', bridge: '🌉 桥接设备',
   virtual: '🔮 虚拟设备', helper: '🧩 辅助元素',   power: '⚡ 用电计量', printer: '🖨️ 打印机',
   media: '🎵 媒体播放列表', recent: '🕘 最近使用设备', metrics: '📊 指标管理',
+  automation: '🤖 自动化',
 };
 
 // 给区块标题标注 data-sec（按标题文字匹配，忽略图标/角标/统计数字的差异）
@@ -4525,7 +4892,8 @@ async function loadMonitor() {
       makeCard('printer','🖨️ 打印机','printerCard') +
       makeCard('recent','🕘 最近使用设备','recentCard') +
       makeCard('metrics','📊 指标管理','metricsCard') +
-      '<div class="summary-card c-online" id="mediaCard" data-target="media" title="点击展开下方对应内容" onclick="expandMonitorSection(\'media\')"><div class="num">--</div><div class="lbl">🎵 媒体播放列表</div><div class="card-sub"></div></div>';
+      '<div class="summary-card c-online" id="mediaCard" data-target="media" title="点击展开下方对应内容" onclick="expandMonitorSection(\'media\')"><div class="num">--</div><div class="lbl">🎵 媒体播放列表</div><div class="card-sub"></div></div>' +
+      '<div class="summary-card c-online" id="automationCard" data-target="automation" title="点击展开下方对应内容" onclick="expandMonitorSection(\'automation\')"><div class="num">--</div><div class="lbl">🤖 自动化</div><div class="card-sub"></div></div>';
 
     // 更新 sub-tab 角标
     setSubTabBadge('device', (types.device||{}).count||0);
@@ -4638,15 +5006,21 @@ async function loadMonitor() {
     html += '<div class="section-content collapsed">';
     if (pushTargets.length === 0) { html += '<div class="empty" style="padding:8px">暂无</div>'; }
     else {
-      html += '<div class="table-wrap"><table><thead><tr><th style="width:18%">实体ID</th><th style="width:14%">名称</th><th style="width:10%">实体状态</th><th style="width:8%">模式</th><th style="width:26%">访问Token</th><th style="width:8%">操作</th><th style="width:16%">上次更新</th></tr></thead><tbody>';
+      html += '<div class="table-wrap"><table><thead><tr><th style="width:16%">实体ID</th><th style="width:12%">名称</th><th style="width:9%">实体状态</th><th style="width:7%">模式</th><th style="width:10%">控制</th><th style="width:22%">访问Token</th><th style="width:8%">操作</th><th style="width:16%">上次更新</th></tr></thead><tbody>';
       pushTargets.forEach((p, i) => {
         let scls = p.status==='在线'?'badge-online':'badge-unavail';
         let shown = window._shownPushTokens && window._shownPushTokens[i];
         let displayToken = shown ? '<code style="font-size:10px;color:var(--green);word-break:break-all">' + escHtml(p.push_token||'') + '</code>'
           : '<code style="font-size:10px;color:var(--text2)">' + (p.push_token ? p.push_token.substring(0,8) + 'xxxxxxxxxxxxxxxxxxxxxxxx' : '') + '</code>';
+        const acts = Array.isArray(p.allowed_actions) ? p.allowed_actions : [];
+        let ctrlCell;
+        if (!p.control_enabled) ctrlCell = '<span class="badge" style="opacity:.55">未开启</span>';
+        else if (!acts.length) ctrlCell = '<span class="badge" style="color:#e6a23c">无动作</span>';
+        else ctrlCell = '<span class="badge" style="color:var(--green)">' + (acts.indexOf('*')>=0 ? '全部' : acts.length+' 动作') + '</span>';
         html += '<tr><td>' + escHtml(p.entity_id) + '</td><td>' + escHtml(p.name||p.entity_id) + '</td>';
         html += '<td><span class="badge ' + scls + '">' + escHtml(p.state||'N/A') + '</span></td>';
         html += '<td>' + escHtml(p.body_mode||'full') + '</td>';
+        html += '<td>' + ctrlCell + '</td>';
         html += '<td>' + displayToken + '</td>';
         html += '<td><button class="btn-del" onclick="togglePushTokenShow(' + i + ')">' + (shown ? '隐藏' : '显示') + '</button></td>';
         html += '<td style="font-size:12px;color:var(--text2)">' + fmtTime(p.updated_at) + '</td></tr>';
@@ -4808,6 +5182,10 @@ async function loadMonitor() {
     }
     html += '</div>';
 
+    // -- 自动化（ha_data_store 自建自动化；数据取自「自动化」选项卡接口）--
+    html += '<h4 class="section-head title-good">🤖 自动化 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="autoMonitorStat">加载中...</span></h4>';
+    html += '<div class="section-content collapsed"><div id="autoMonitorTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
+
     content.innerHTML = html;
 
     // 绑定 section-head 点击展开/折叠（同时标注 data-sec，供 summary 卡片定位）
@@ -4824,12 +5202,13 @@ async function loadMonitor() {
       });
     });
 
-    // 异步加载桥接/虚拟设备/辅助元素/用电计量/媒体播放列表数据
+    // 异步加载桥接/虚拟设备/辅助元素/用电计量/媒体播放列表/自动化数据
     loadMonitorBridge();
     loadMonitorVirtual();
     loadMonitorHelper();
     loadMonitorPower();
     loadMonitorMedia();
+    loadMonitorAutomation();
   } catch(e) {
     content.innerHTML = '<div class="empty">请求失败: ' + e + '</div>';
     document.getElementById('pagination').style.display = 'none';
@@ -5132,6 +5511,61 @@ async function loadMonitorMedia() {
     html += '</tbody></table></div>';
     tbl.innerHTML = html;
   } catch(e) { /* silent */ }
+}
+
+// 「🤖 自动化」监控区块：数据取自「自动化」选项卡接口 /api/ha_data_store/automations
+async function loadMonitorAutomation() {
+  try {
+    var resp = await fetch('/api/ha_data_store/automations?page=1&size=200');
+    var json = await resp.json();
+    var items = (json.success && json.items) ? json.items : [];
+    var total = json.total || items.length;
+    var on = items.filter(function(a) { return a.enabled; }).length;
+    var off = items.length - on;
+
+    var card = document.getElementById('automationCard');
+    if (card) card.querySelector('.num').textContent = total;
+
+    var stat = document.getElementById('autoMonitorStat');
+    if (stat) stat.textContent = total + ' 条 · 启用 ' + on + ' · 停用 ' + off;
+    syncSummarySub('automation');   // 同步到卡片第三行
+
+    var tbl = document.getElementById('autoMonitorTbl');
+    if (!tbl) return;
+
+    var cnt = function(arr) { return Array.isArray(arr) ? arr.length : 0; };
+    var head = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">'
+      + '<button class="btn-accent" onclick="gotoAutoManage()">⚙️ 前往「自动化」选项卡</button>'
+      + '<span class="hint">ha_data_store 自建自动化（定时/条件/动作），执行记录见「自动化 → 📋 执行记录」</span></div>';
+    if (!items.length) { tbl.innerHTML = head + '<div class="empty">暂无自动化</div>'; return; }
+
+    var html = head + '<div class="table-wrap"><table><thead><tr>'
+      + '<th style="width:6%">ID</th><th style="width:26%">名称</th><th style="width:18%">触发</th>'
+      + '<th style="width:10%">条件/动作</th><th style="width:9%">启用</th>'
+      + '<th style="width:16%">上次运行</th><th style="width:15%">上次结果</th></tr></thead><tbody>';
+    items.forEach(function(a) {
+      html += '<tr><td>' + a.id + '</td>'
+        + '<td>' + escHtml(String(a.name || '')) + '</td>'
+        + '<td style="font-size:12px">' + escHtml(describeAutoTrigger(a)) + '</td>'
+        + '<td style="font-size:12px">' + cnt(a.conditions) + ' / ' + cnt(a.actions) + '</td>'
+        + '<td><span class="badge ' + (a.enabled ? 'badge-online' : 'badge-offline') + '">'
+        + (a.enabled ? '启用' : '停用') + '</span></td>'
+        + '<td style="font-size:12px;color:var(--text2)">' + escHtml(a.last_run || '-') + '</td>'
+        + '<td style="font-size:12px">' + (a.last_result ? escHtml(AUTO_STAT_MAP[a.last_result] || a.last_result) : '-') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    if (total > items.length) {
+      html += '<div class="hint" style="padding:6px 8px">仅显示前 ' + items.length +
+              ' 条（共 ' + total + ' 条，完整列表见「自动化」选项卡）</div>';
+    }
+    tbl.innerHTML = html;
+  } catch(e) { /* silent */ }
+}
+
+// 从监控页「🤖 自动化」区块跳转到「自动化」选项卡（自动化列表）
+function gotoAutoManage() {
+  if (typeof switchTab === 'function') switchTab('automation');
+  if (typeof switchAutoSubTab === 'function') switchAutoSubTab('list');
 }
 
 async function scanEmptyDevices() {
@@ -6130,6 +6564,10 @@ function switchApiSubTab(name) {
   if (name === 'routes' && typeof loadCustomRoutes === 'function') {
     loadCustomRoutes();
   }
+  // 切回地址生成器时刷新「实体→网络」分组（新增/删除目标后无需重载页面）
+  if (name === 'gen' && typeof pushLoadIntoApi === 'function') {
+    pushLoadIntoApi();
+  }
   if (name === 'builder' && typeof builderTabOpen === 'function') {
     builderTabOpen();
   }
@@ -6936,7 +7374,7 @@ switchSubTab = function(name) {
   if (name === 'filesrc') loadFileSources();
   if (name === 'apisrc') loadApiSources();
   if (name === 'vacuum') loadVacuumData();
-  if (name === 'push') loadPushTargets();
+  if (name === 'push') { loadPushTargets(); loadPushControlLogs(); }
   if (name === 'bridge') loadBridgeData();
   if (name === 'virtual') loadVirtualDevices();
   if (name === 'helper') loadHelpers();
@@ -6944,10 +7382,281 @@ switchSubTab = function(name) {
 };
 
 // ==============================
+//  数据备份
+// ==============================
+const BACKUP_API = '/api/ha_data_store/backup';
+const BACKUP_DL_API = '/api/ha_data_store/backup/download';
+let bkData = null;
+
+async function bkLoad() {
+  const status = document.getElementById('bkStatus');
+  status.textContent = '加载中…';
+  try {
+    const resp = await fetch(BACKUP_API);
+    const json = await resp.json();
+    if (!json.success) {
+      status.innerHTML = '<span style="color:#e56">加载失败: ' + escHtml(json.error) + '</span>';
+      return;
+    }
+    bkData = json.data;
+    bkRenderStatus();
+    bkRenderForm();
+    bkRenderPending();
+    bkRenderList();
+  } catch(e) {
+    status.innerHTML = '<span style="color:#e56">请求失败: ' + escHtml(String(e)) + '</span>';
+  }
+}
+
+async function bkPost(body) {
+  try {
+    const resp = await fetch(BACKUP_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await resp.json();
+    showToast(json.message || (json.success ? '完成' : ('失败: ' + json.error)), !!json.success);
+    if (json.success) await bkLoad();
+    return json;
+  } catch(e) {
+    showToast('请求失败: ' + e, false);
+    return null;
+  }
+}
+
+function bkRenderStatus() {
+  const d = bkData;
+  const db = d.database || {};
+  const bits = [];
+  bits.push('<b>数据库</b> <code>' + escHtml(db.path || '-') + '</code>');
+  bits.push('<b>大小</b> ' + escHtml(db.total_size_h || '-') +
+    (db.extra_size ? '（含 WAL/SHM ' + escHtml(db.extra_size_h) + '）' : ''));
+  if (db.table_count !== undefined) bits.push('<b>表数</b> ' + db.table_count);
+  if (db.journal_mode) bits.push('journal=' + escHtml(db.journal_mode));
+  bits.push('<b>备份目录</b> <code>' + escHtml(d.settings.dir) + '</code>' +
+    (d.settings.dir_is_default ? ' <span class="hint">默认</span>' : ''));
+  bits.push('<b>备份</b> ' + d.count + ' 份 / ' + escHtml(d.total_size_h) +
+    '（其中自动 ' + d.auto_count + ' 份）');
+  bits.push('<b>最近自动备份</b> ' + (d.settings.last_at ? escHtml(d.settings.last_at) : '从未'));
+  document.getElementById('bkStatus').innerHTML = bits.join(' ｜ ');
+  document.getElementById('bkTick').textContent = d.tick_minutes;
+
+  const warns = d.warnings || [];
+  document.getElementById('bkWarnings').innerHTML = warns.length
+    ? warns.map(t => '<div class="hint" style="color:#e6a23c;margin:2px 0">⚠ ' + escHtml(t) + '</div>').join('')
+    : '<div class="hint" style="color:var(--green);margin:2px 0">✔ 目录可写，计划备份配置正常</div>';
+}
+
+function bkRenderForm() {
+  const s = bkData.settings;
+  document.getElementById('bkEnabled').checked = !!s.enabled;
+  document.getElementById('bkSchedule').value = s.schedule || 'daily';
+  document.getElementById('bkHour').value = s.hour;
+  document.getElementById('bkWeekday').value = s.weekday;
+  document.getElementById('bkKeep').value = s.keep;
+  document.getElementById('bkDir').value = s.dir || '';
+  bkOnScheduleChange();
+}
+
+function bkOnScheduleChange() {
+  const v = document.getElementById('bkSchedule').value;
+  document.getElementById('bkHourWrap').style.display =
+    (v === 'daily' || v === 'weekly') ? '' : 'none';
+  document.getElementById('bkWeekdayWrap').style.display = (v === 'weekly') ? '' : 'none';
+  const hint = document.getElementById('bkScheduleHint');
+  if (v === 'off') hint.textContent = '已关闭计划备份，只能手动点「立即备份」。';
+  else if (v === 'hourly') hint.textContent = '每小时整点后检查一次，距上次备份满 1 小时才执行。';
+  else if (v === 'daily') hint.textContent = '每天到点后执行一次；若到点时 HA 没运行，启动后会自动补上当天那次。';
+  else hint.textContent = '每周指定星期几到点后执行一次；错过也会在下次检查时补上。';
+}
+
+function bkRenderPending() {
+  const p = (bkData && bkData.pending) || {};
+  const banner = document.getElementById('bkPendingBanner');
+  if (!p.queued) { banner.style.display = 'none'; return; }
+  banner.style.display = 'block';
+  document.getElementById('bkPendingText').innerHTML =
+    '排队时间 ' + escHtml(p.queued_at || '-') +
+    ' ｜ 来源备份 <code>' + escHtml(p.name || '-') + '</code>' +
+    ' ｜ 大小 ' + escHtml(p.size_h || '-') +
+    (p.pending_exists ? '' : ' <span style="color:#e56">（待恢复文件缺失，重启时会自动取消）</span>');
+}
+
+function bkRenderList() {
+  const wrap = document.getElementById('bkListWrap');
+  const items = bkData.backups || [];
+  let html = '<div class="section"><h3>📦 备份列表 <span class="hint" style="margin-left:8px">共 ' +
+    items.length + ' 份 / ' + escHtml(bkData.total_size_h) + '</span></h3>';
+  if (!items.length) {
+    wrap.innerHTML = html +
+      '<div class="empty" style="padding:8px">还没有备份，点上方「立即备份」生成第一份。</div></div>';
+    return;
+  }
+  const colors = { auto: 'var(--text2)', manual: 'var(--green)', prerestore: '#e6a23c', uploaded: 'var(--accent)' };
+  html += '<div class="table-wrap"><table><thead><tr>'
+    + '<th style="width:150px">时间</th><th style="width:110px">类型</th><th style="width:90px">大小</th>'
+    + '<th>文件名</th><th style="width:210px">操作</th></tr></thead><tbody>';
+  items.forEach(function(b) {
+    html += '<tr>';
+    html += '<td style="font-size:12px;white-space:nowrap">' + escHtml(b.created_at) + '</td>';
+    html += '<td><span class="badge" style="color:' + (colors[b.tag] || 'var(--text2)') + '">' +
+      escHtml(b.tag_label) + '</span></td>';
+    html += '<td style="font-size:12px">' + escHtml(b.size_h) + '</td>';
+    html += '<td style="font-size:11px;word-break:break-all"><code>' + escHtml(b.name) + '</code></td>';
+    html += '<td style="white-space:nowrap">';
+    html += '<button class="btn-accent" style="padding:3px 8px" onclick="bkDownload(\'' + escAttr(b.name) + '\')">下载</button> ';
+    html += '<button class="btn-accent" style="padding:3px 8px" onclick="bkRestore(\'' + escAttr(b.name) +
+      '\',\'' + escAttr(b.created_at) + '\')">恢复</button> ';
+    html += '<button class="btn-del" onclick="bkDelete(\'' + escAttr(b.name) + '\')">删除</button>';
+    html += '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<div class="hint" style="margin-top:8px">「恢复前快照」是每次应用恢复前自动留下的退路；'
+    + '手动备份与快照类备份不会被自动清理，只有「自动」备份按保留份数滚动删除。</div>';
+  wrap.innerHTML = html + '</div>';
+}
+
+async function bkCreate() {
+  await bkPost({ action: 'create' });
+}
+
+async function bkSaveSettings() {
+  await bkPost({
+    action: 'save_settings',
+    enabled: document.getElementById('bkEnabled').checked,
+    schedule: document.getElementById('bkSchedule').value,
+    hour: parseInt(document.getElementById('bkHour').value),
+    weekday: parseInt(document.getElementById('bkWeekday').value),
+    keep: parseInt(document.getElementById('bkKeep').value),
+    dir: document.getElementById('bkDir').value.trim(),
+  });
+}
+
+async function bkIntegrity() {
+  if (!confirm('对运行中的数据库做完整性检查？\n\n检查是只读的，不会修改数据；较大的库可能需要几十秒。')) return;
+  const box = document.getElementById('bkIntegrityResult');
+  box.style.color = '';
+  box.textContent = '检查中，请稍候…';
+  const json = await bkPost({ action: 'integrity' });
+  if (!json) { box.style.color = '#e56'; box.textContent = '请求失败'; return; }
+  if (!json.success) { box.style.color = '#e56'; box.textContent = '失败: ' + json.error; return; }
+  const ok = json.data && json.data.ok;
+  box.style.color = ok ? 'var(--green)' : '#e56';
+  box.textContent = (ok ? '✔ ' : '✘ ') + ((json.data && json.data.message) || '');
+}
+
+async function bkPrune() {
+  const s = (bkData && bkData.settings) || {};
+  if (!confirm('清理多余的「自动」备份，保留最近 ' + s.keep + ' 份？\n\n手动备份与恢复前快照不会被删除。')) return;
+  await bkPost({ action: 'prune' });
+}
+
+function bkDownload(name) {
+  window.open(BACKUP_DL_API + '?name=' + encodeURIComponent(name), '_blank');
+}
+
+async function bkDelete(name) {
+  if (!confirm('确定删除这份备份？\n\n' + name + '\n\n删除后无法恢复。')) return;
+  try {
+    const resp = await fetch(BACKUP_API + '?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    const json = await resp.json();
+    showToast(json.success ? json.message : ('失败: ' + json.error), json.success);
+    if (json.success) bkLoad();
+  } catch(e) { showToast('请求失败: ' + e, false); }
+}
+
+async function bkRestore(name, createdAt) {
+  if (!confirm('确定恢复这份备份？\n\n' + name + '\n创建时间：' + createdAt + '\n\n' +
+    '· 会用这份备份覆盖当前整个数据库（含全部历史记录、配置、接口定义、实体→网络 token）\n' +
+    '· 服务端会先自动留一份「恢复前快照」作为退路\n' +
+    '· 恢复需要你手动重启 Home Assistant 后才会真正应用')) return;
+  await bkPost({ action: 'queue_restore', name: name, confirm: 'RESTORE' });
+}
+
+async function bkCancelRestore() {
+  if (!confirm('取消排队中的恢复？当前数据库不会发生任何变化。')) return;
+  await bkPost({ action: 'cancel_restore' });
+}
+
+function bkToggleGuide() {
+  const body = document.getElementById('bkGuideBody');
+  const btn = document.getElementById('bkGuideToggle');
+  const summary = document.getElementById('bkGuideSummary');
+  if (!body || !btn) return;
+  const hidden = body.style.display === 'none';
+  body.style.display = hidden ? 'block' : 'none';
+  if (summary) summary.style.display = hidden ? 'none' : 'block';
+  btn.textContent = hidden ? '收起 ▲' : '展开 ▼';
+}
+
+// ==============================
 //  实体→网络 推送管理
 // ==============================
 const PUSH_API = '/api/ha_data_store/push_targets';
+const PUSH_CONTROL_API = '/api/ha_data_store/push_control/';
+const PUSH_CAP_API = '/api/ha_data_store/push_entity_capabilities';
+const PUSH_LOGS_API = '/api/ha_data_store/push_control_logs';
 let pushEntityAttrs = null;
+let pushTargetsCache = [];
+let ptCapabilities = null;   // 当前加载实体的可控能力
+let ptEditingId = 0;         // 0 = 新增，非 0 = 编辑中的目标 id
+let ptTestTarget = null;
+let ptTestCaps = null;
+let ptTestActions = [];
+
+// ── 使用说明：折叠 / 动作目录懒加载 ──────────────────────────
+function togglePushGuide() {
+  const body = document.getElementById('pushGuideBody');
+  const btn = document.getElementById('pushGuideToggle');
+  const summary = document.getElementById('pushGuideSummary');
+  if (!body || !btn) return;
+  const hidden = body.style.display === 'none';
+  body.style.display = hidden ? 'block' : 'none';
+  if (summary) summary.style.display = hidden ? 'none' : 'block';
+  btn.textContent = hidden ? '收起 ▲' : '展开 ▼';
+}
+
+async function loadPushGuideCatalog() {
+  const box = document.getElementById('pushGuideCatalog');
+  box.innerHTML = '<div class="hint" style="margin:0">加载中…</div>';
+  try {
+    const resp = await fetch(PUSH_CAP_API);
+    const json = await resp.json();
+    if (!json.success) {
+      box.innerHTML = '<div class="hint" style="margin:0">加载失败: ' + escHtml(json.error) + '</div>';
+      return;
+    }
+    const catalog = (json.data && json.data.catalog) || [];
+    if (!catalog.length) {
+      box.innerHTML = '<div class="hint" style="margin:0">后端未返回动作目录</div>';
+      return;
+    }
+    let total = 0;
+    let html = '<div class="table-wrap" style="max-height:360px;overflow-y:auto"><table style="font-size:12px">';
+    html += '<thead><tr><th style="width:130px">域</th><th style="width:70px">风险</th><th>可用动作（点击可展开该域的参数字段）</th></tr></thead><tbody>';
+    catalog.forEach(function(d) {
+      const acts = d.actions || [];
+      total += acts.length;
+      const names = acts.map(function(a) {
+        return '<code>' + escHtml(a.action) + '</code>';
+      }).join(' ');
+      html += '<tr>';
+      html += '<td><code>' + escHtml(d.domain) + '</code></td>';
+      html += '<td>' + (d.high_risk
+        ? '<span class="badge" style="color:#e6a23c">高风险</span>'
+        : '<span class="hint" style="margin:0">普通</span>') + '</td>';
+      html += '<td style="line-height:2">' + names + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<div class="hint" style="margin-top:6px">共 <b>' + catalog.length + '</b> 个域 / <b>' + total +
+      '</b> 个动作。具体某个实体能用哪些动作、参数范围多少，以「加载属性」后步骤 3 的清单为准（枚举与范围从实体属性实时读取）。</div>';
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<div class="hint" style="margin:0">加载失败: ' + escHtml(String(e)) + '</div>';
+  }
+}
 
 async function loadPushTargets() {
   const div = document.getElementById('pushTargetList');
@@ -6956,27 +7665,48 @@ async function loadPushTargets() {
     const json = await resp.json();
     if (!json.success) { div.innerHTML = '<div class="empty">加载失败</div>'; return; }
     const items = json.data || [];
+    pushTargetsCache = items;
     if (items.length === 0) {
       div.innerHTML = '<div class="empty" style="padding:8px">暂无数据访问配置</div>';
       return;
     }
-    const baseUrl = window.location.origin + '/api/ha_data_store/push_data/';
+    const readBase = window.location.origin + '/api/ha_data_store/push_data/';
+    const ctrlBase = window.location.origin + PUSH_CONTROL_API;
     let html = '<div class="section"><h3>已有数据访问</h3><div class="table-wrap"><table><thead><tr>';
-    html += '<th>实体ID</th><th>名称</th><th>访问地址（点击复制）</th><th>上次更新</th><th>操作</th>';
+    html += '<th>实体ID</th><th>名称</th><th>访问地址（只读）</th><th>控制地址（POST）</th><th>控制</th><th>更新时间</th><th>操作</th>';
     html += '</tr></thead><tbody>';
     items.forEach(t => {
-      const pushUrl = baseUrl + (t.push_token || '');
+      const readUrl = readBase + (t.push_token || '');
+      const ctrlUrl = ctrlBase + (t.control_token || '');
+      const acts = Array.isArray(t.allowed_actions) ? t.allowed_actions : [];
+      const isAll = acts.indexOf('*') >= 0;
+      let ctrlCell;
+      if (!t.control_enabled) ctrlCell = '<span class="badge" style="opacity:.55">未开启</span>';
+      else if (!acts.length) ctrlCell = '<span class="badge" style="color:#e6a23c">无动作</span>';
+      else ctrlCell = '<span class="badge" style="color:var(--green)">' + (isAll ? '全部动作' : acts.length + ' 个动作') + '</span>';
+
       html += '<tr>';
-      html += '<td><strong>' + escHtml(t.entity_id) + '</strong></td>';
+      html += '<td><strong>' + escHtml(t.entity_id) + '</strong><div class="hint" style="margin:0">#' + t.id + '</div></td>';
       html += '<td>' + escHtml(t.name || t.entity_id) + '</td>';
-      html += '<td><a href="' + escAttr(pushUrl) + '" target="_blank" style="font-size:11px;color:var(--green);text-decoration:none" title="点击访问">' + escHtml(pushUrl) + '</a> <span style="cursor:pointer;color:var(--accent);font-size:11px" onclick="event.stopPropagation();copyPushUrl(\'' + escAttr(pushUrl) + '\')" title="复制地址">📋</span></td>';
+      html += '<td>' + pushUrlCell(readUrl, t.push_token) + '</td>';
+      html += '<td>' + pushUrlCell(ctrlUrl, t.control_token) + '</td>';
+      html += '<td>' + ctrlCell + '</td>';
       html += '<td style="font-size:12px;color:var(--text2)">' + fmtTime(t.updated_at) + '</td>';
-      html += '<td><button class="btn-del" onclick="delPushTarget(\'' + escAttr(t.entity_id) + '\')">删除</button></td>';
-      html += '</tr>';
+      html += '<td style="white-space:nowrap">';
+      html += '<button class="btn-accent" style="padding:3px 8px" onclick="editPushTarget(' + t.id + ')">编辑</button> ';
+      if (t.control_enabled) html += '<button class="btn-accent" style="padding:3px 8px" onclick="openPushTest(' + t.id + ')">测试</button> ';
+      html += '<button class="btn-del" onclick="delPushTarget(' + t.id + ')">删除</button>';
+      html += '</td></tr>';
     });
     html += '</tbody></table></div></div>';
     div.innerHTML = html;
   } catch(e) { div.innerHTML = '<div class="empty">请求失败</div>'; }
+}
+
+function pushUrlCell(url, token) {
+  if (!token) return '<span class="hint">-</span>';
+  return '<a href="' + escAttr(url) + '" target="_blank" style="font-size:11px;color:var(--green);text-decoration:none" title="点击访问">' + escHtml(url) + '</a> '
+    + '<span style="cursor:pointer;color:var(--accent);font-size:11px" onclick="event.stopPropagation();copyPushUrl(\'' + escAttr(url) + '\')" title="复制地址">📋</span>';
 }
 
 async function loadPushEntityState() {
@@ -6985,12 +7715,17 @@ async function loadPushEntityState() {
 
     document.getElementById('ptEntityMeta').textContent = '加载中...';
   document.getElementById('ptBodyStep').style.display = 'none';
+  document.getElementById('ptControlStep').style.display = 'none';
   document.getElementById('ptSaveStep').style.display = 'none';
   pushEntityAttrs = null;
+  ptCapabilities = null;
 
   try {
-    const resp = await fetch('/api/ha_data_store/entity_state?entity_id=' + encodeURIComponent(entityId));
-    const json = await resp.json();
+    const [stateResp, capResp] = await Promise.all([
+      fetch('/api/ha_data_store/entity_state?entity_id=' + encodeURIComponent(entityId)),
+      fetch(PUSH_CAP_API + '?entity_id=' + encodeURIComponent(entityId)),
+    ]);
+    const json = await stateResp.json();
     if (!json.success) {
       document.getElementById('ptEntityMeta').textContent = '错误: ' + json.error; return;
     }
@@ -7006,9 +7741,312 @@ async function loadPushEntityState() {
     // 填充属性树
     const tree = d.attribute_tree || [];
     renderPtAttrTree(tree);
+
+    // 控制能力探测（失败不阻塞读取配置）
+    try {
+      const capJson = await capResp.json();
+      if (capJson.success) ptCapabilities = capJson.data;
+    } catch(e) { ptCapabilities = null; }
+    renderPtControlStep(entityId);
   } catch(e) {
     document.getElementById('ptEntityMeta').textContent = '请求失败: ' + e;
   }
+}
+
+// ── 步骤 3：控制能力与动作清单 ──────────────────────────────
+function renderPtControlStep(entityId) {
+  const step = document.getElementById('ptControlStep');
+  const meta = document.getElementById('ptControlMeta');
+  const unsup = document.getElementById('ptControlUnsupported');
+  const body = document.getElementById('ptControlBody');
+  step.style.display = 'block';
+
+  const caps = ptCapabilities;
+  const domain = (caps && caps.domain) || entityId.split('.')[0];
+  if (!caps || !caps.controllable) {
+    body.style.display = 'none';
+    unsup.style.display = 'block';
+    unsup.innerHTML = '该实体不支持控制：' + escHtml((caps && caps.error) || '能力探测失败') +
+      ' — 仍可保存为只读数据访问。';
+    meta.innerHTML = '<b>域:</b> ' + escHtml(domain);
+    return;
+  }
+  unsup.style.display = 'none';
+  body.style.display = 'block';
+  meta.innerHTML = '<b>域:</b> ' + escHtml(domain) +
+    ' | <b>可用动作:</b> ' + caps.actions.length +
+    ' | <b>当前状态:</b> ' + escHtml(String(caps.state));
+
+  const warn = document.getElementById('ptHighRiskWarn');
+  if (caps.high_risk) {
+    warn.style.display = 'block';
+    warn.innerHTML = '⚠ 该实体属于<b>高风险域</b>（门锁 / 报警器 / 警报器等）。映射出去等于交出该设备的控制权，请只在必要时开启，并严格限制允许动作与参数。';
+  } else {
+    warn.style.display = 'none';
+  }
+  renderPtActionList(caps.actions || []);
+  onPtControlToggle();
+}
+
+function renderPtActionList(actions) {
+  const box = document.getElementById('ptActionList');
+  if (!actions.length) { box.innerHTML = '<div class="hint">该实体当前没有可用动作</div>'; return; }
+  let html = '';
+  actions.forEach(function(a, idx) {
+    const params = a.params || {};
+    const pkeys = Object.keys(params);
+    html += '<div style="border-bottom:1px solid var(--border);padding:6px 2px">';
+    html += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex-wrap:wrap">';
+    html += '<input type="checkbox" class="pt-act-cb" data-action="' + escAttr(a.action) + '" style="width:auto" onchange="onPtActionToggle()">';
+    html += '<b>' + escHtml(a.label || a.action) + '</b>';
+    html += '<code style="font-size:11px;color:var(--text2)">' + escHtml(a.action) + '</code>';
+    html += '<span class="hint" style="margin:0">' + escHtml(a.service) + '</span>';
+    if (a.high_risk) html += '<span class="badge" style="color:#e6a23c">高风险</span>';
+    if (pkeys.length) {
+      html += '<span style="cursor:pointer;color:var(--accent);font-size:11px" onclick="event.preventDefault();togglePtActParams(' + idx + ')">参数 ▾</span>';
+    }
+    html += '</label>';
+    if (pkeys.length) {
+      html += '<div id="pt-act-' + idx + '" style="display:none;margin:6px 0 4px 24px">';
+      pkeys.forEach(function(pk) {
+        const spec = params[pk] || {};
+        html += '<div style="display:flex;align-items:center;gap:8px;margin:4px 0;flex-wrap:wrap">';
+        html += '<span style="min-width:140px;font-size:12px">' + escHtml(spec.label || pk) + '</span>';
+        html += '<code style="font-size:11px;color:var(--text2)">' + escHtml(pk) + '</code>';
+        html += '<span class="hint" style="margin:0">' + escHtml(ptParamDesc(spec)) + '</span>';
+        html += '<select class="pt-lock-sel" data-action="' + escAttr(a.action) + '" data-param="' + escAttr(pk) +
+          '" onchange="onPtLockChange(this)" style="width:96px;font-size:12px">';
+        html += '<option value="free">可传入</option><option value="value">固定值</option><option value="range">限幅</option>';
+        html += '</select>';
+        html += '<span class="pt-lock-val" data-action="' + escAttr(a.action) + '" data-param="' + escAttr(pk) +
+          '" style="display:none;align-items:center;gap:4px"></span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  });
+  box.innerHTML = html;
+}
+
+function ptParamDesc(spec) {
+  if (!spec) return '';
+  if (spec.type === 'enum') return '枚举: ' + ((spec.options || []).join(' / ') || '无') + (spec.required ? ' · 必填' : '');
+  if (spec.type === 'rgb') return 'RGB 0-255 · 形如 255,0,0';
+  if (spec.type === 'bool') return '是 / 否' + (spec.required ? ' · 必填' : '');
+  if (spec.type === 'str') return '文本' + (spec.max_len ? '（≤' + spec.max_len + '）' : '') + (spec.required ? ' · 必填' : '');
+  const parts = [];
+  if (spec.min !== undefined && spec.min !== null) parts.push('min ' + spec.min);
+  if (spec.max !== undefined && spec.max !== null) parts.push('max ' + spec.max);
+  if (spec.step) parts.push('step ' + spec.step);
+  return (spec.type || '') + (parts.length ? '（' + parts.join(', ') + '）' : '') + (spec.required ? ' · 必填' : '');
+}
+
+function ptValueInputHtml(cls, spec, val, param) {
+  const v = (val === undefined || val === null) ? '' : String(val);
+  const dataAttr = param ? ' data-param="' + escAttr(param) + '"' : '';
+  const base = 'class="' + cls + '"' + dataAttr;
+  if (spec && spec.type === 'enum') {
+    let h = '<select ' + base + ' style="width:150px;font-size:12px">';
+    (spec.options || []).forEach(function(o) {
+      h += '<option value="' + escAttr(o) + '"' + (String(o) === v ? ' selected' : '') + '>' + escHtml(o) + '</option>';
+    });
+    return h + '</select>';
+  }
+  if (spec && spec.type === 'bool') {
+    return '<select ' + base + ' style="width:90px;font-size:12px">' +
+      '<option value="true"' + (v === 'true' ? ' selected' : '') + '>是</option>' +
+      '<option value="false"' + (v === 'false' ? ' selected' : '') + '>否</option></select>';
+  }
+  if (spec && spec.type === 'str') {
+    return '<input ' + base + ' style="width:150px;font-size:12px" value="' + escAttr(v) + '">';
+  }
+  if (spec && spec.type === 'rgb') {
+    return '<input ' + base + ' placeholder="255,0,0" style="width:110px;font-size:12px" value="' + escAttr(v) + '">';
+  }
+  return '<input type="number" step="any" ' + base + ' style="width:110px;font-size:12px" value="' + escAttr(v) + '">';
+}
+
+function ptFindParamSpec(action, param) {
+  if (!ptCapabilities || !ptCapabilities.actions) return null;
+  for (let i = 0; i < ptCapabilities.actions.length; i++) {
+    const a = ptCapabilities.actions[i];
+    if (a.action === action) return (a.params || {})[param] || null;
+  }
+  return null;
+}
+
+function togglePtActParams(idx) {
+  const el = document.getElementById('pt-act-' + idx);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function onPtActionToggle() {
+  // 勾选动作时自动展开其参数区，便于发现可锁定项
+  document.querySelectorAll('#ptActionList .pt-act-cb').forEach(function(cb) {
+    if (!cb.checked) return;
+    const label = cb.closest('label');
+    const box = label && label.nextElementSibling;
+    if (box && box.id && box.id.indexOf('pt-act-') === 0 && box.style.display === 'none') {
+      box.style.display = 'block';
+    }
+  });
+}
+
+function ptSelectAllActions(on) {
+  document.querySelectorAll('#ptActionList .pt-act-cb').forEach(function(cb) { cb.checked = !!on; });
+}
+
+function onPtControlToggle() {
+  const on = document.getElementById('ptControlEnabled').checked;
+  const warn = document.getElementById('ptSaveHint');
+  const acts = document.querySelectorAll('#ptActionList .pt-act-cb:checked').length;
+  if (on && acts === 0) {
+    warn.style.display = 'block';
+    warn.textContent = '已启用控制但未勾选任何动作：该控制地址会拒绝所有控制请求（等价于不可用）。';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+function onPtLockChange(sel) {
+  const wrap = sel.parentElement.querySelector('.pt-lock-val');
+  const mode = sel.value;
+  if (!wrap) return;
+  const spec = ptFindParamSpec(sel.dataset.action, sel.dataset.param);
+  if (mode === 'free') { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  wrap.style.display = 'inline-flex';
+  if (mode === 'value') {
+    wrap.innerHTML = '<span class="hint" style="margin:0">=</span>' + ptValueInputHtml('pt-cst-val', spec, '', '');
+    const el = wrap.querySelector('.pt-cst-val');
+    if (spec && spec.type === 'bool') el.value = 'true';
+  } else {
+    const lo = (spec && spec.min !== undefined) ? spec.min : '';
+    const hi = (spec && spec.max !== undefined) ? spec.max : '';
+    wrap.innerHTML = '下限 <input class="pt-cst-min" style="width:70px;font-size:12px" value="' + escAttr(lo) + '">'
+      + ' 上限 <input class="pt-cst-max" style="width:70px;font-size:12px" value="' + escAttr(hi) + '">';
+  }
+}
+
+function collectPtConstraints() {
+  const out = {};
+  document.querySelectorAll('#ptActionList .pt-lock-sel').forEach(function(sel) {
+    const mode = sel.value;
+    if (mode === 'free') return;
+    const action = sel.dataset.action;
+    const param = sel.dataset.param;
+    const wrap = sel.parentElement.querySelector('.pt-lock-val');
+    if (!wrap) return;
+    out[action] = out[action] || {};
+    if (mode === 'value') {
+      const el = wrap.querySelector('.pt-cst-val');
+      if (!el) return;
+      const spec = ptFindParamSpec(action, param);
+      let val = el.value;
+      if (val === '' || val === null) return;
+      if (spec && spec.type === 'bool') val = (val === 'true');
+      else if (spec && spec.type !== 'str' && spec.type !== 'enum' && spec.type !== 'rgb') {
+        const num = Number(val);
+        if (isNaN(num)) return;
+        val = num;
+      }
+      out[action][param] = { lock: 'value', value: val };
+    } else {
+      const rule = { lock: 'range' };
+      const lo = wrap.querySelector('.pt-cst-min');
+      const hi = wrap.querySelector('.pt-cst-max');
+      if (lo && lo.value !== '') rule.min = Number(lo.value);
+      if (hi && hi.value !== '') rule.max = Number(hi.value);
+      if (rule.min === undefined && rule.max === undefined) return;
+      out[action][param] = rule;
+    }
+  });
+  return out;
+}
+
+function ptApplyConstraints(constraints) {
+  if (!constraints) return;
+  document.querySelectorAll('#ptActionList .pt-lock-sel').forEach(function(sel) {
+    const action = sel.dataset.action;
+    const param = sel.dataset.param;
+    const rule = (constraints[action] || {})[param];
+    if (!rule || !rule.lock) return;
+    sel.value = rule.lock;
+    onPtLockChange(sel);
+    const wrap = sel.parentElement.querySelector('.pt-lock-val');
+    if (rule.lock === 'value') {
+      const el = wrap.querySelector('.pt-cst-val');
+      if (el) el.value = (rule.value === null || rule.value === undefined) ? '' : String(rule.value);
+    } else {
+      const lo = wrap.querySelector('.pt-cst-min');
+      const hi = wrap.querySelector('.pt-cst-max');
+      if (lo && rule.min !== undefined) lo.value = rule.min;
+      if (hi && rule.max !== undefined) hi.value = rule.max;
+    }
+  });
+}
+
+function ptApplyFieldMapping(fm) {
+  if (!fm) return;
+  const keys = Object.keys(fm);
+  if (!keys.length) return;
+  document.querySelectorAll('#ptAttrTreeContent .pt-tree-cb').forEach(function(cb) {
+    if (keys.indexOf(cb.dataset.path) >= 0) cb.checked = true;
+  });
+}
+
+function ptResetForm() {
+  ptEditingId = 0;
+  ptCapabilities = null;
+  document.getElementById('ptFormTitle').textContent = '添加数据访问';
+  document.getElementById('ptEntityId').value = '';
+  document.getElementById('ptEntityMeta').textContent = '';
+  document.getElementById('ptName').value = '';
+  document.getElementById('ptInterval').value = '0';
+  document.getElementById('ptRateLimit').value = '60';
+  document.getElementById('ptAllowRaw').checked = false;
+  document.getElementById('ptControlEnabled').checked = false;
+  document.getElementById('ptBodyStep').style.display = 'none';
+  document.getElementById('ptControlStep').style.display = 'none';
+  document.getElementById('ptSaveStep').style.display = 'none';
+  document.querySelector('input[name="ptBodyMode"][value="full"]').checked = true;
+  onPtBodyModeChange();
+  closePushTest();
+}
+
+async function ptLoadIntoForm(t) {
+  ptEditingId = t.id;
+  document.getElementById('ptFormTitle').textContent = '编辑数据访问 #' + t.id + '（' + t.entity_id + '）';
+  document.getElementById('ptEntityId').value = t.entity_id;
+  document.getElementById('ptName').value = t.name || '';
+  document.getElementById('ptInterval').value = t.interval_min || 0;
+  document.getElementById('ptRateLimit').value = (t.rate_limit_per_min === undefined ? 60 : t.rate_limit_per_min);
+  document.getElementById('ptAllowRaw').checked = !!t.allow_raw_service;
+
+  const mode = t.body_mode || 'full';
+  const radio = document.querySelector('input[name="ptBodyMode"][value="' + mode + '"]');
+  if (radio) radio.checked = true;
+  onPtBodyModeChange();
+
+  await loadPushEntityState();
+
+  const acts = Array.isArray(t.allowed_actions) ? t.allowed_actions : [];
+  const isAll = acts.indexOf('*') >= 0;
+  document.querySelectorAll('#ptActionList .pt-act-cb').forEach(function(cb) {
+    cb.checked = isAll || acts.indexOf(cb.dataset.action) >= 0;
+  });
+  ptApplyConstraints(t.param_constraints || {});
+  ptApplyFieldMapping(t.field_mapping || {});
+  document.getElementById('ptControlEnabled').checked = !!t.control_enabled;
+  onPtControlToggle();
+}
+
+async function editPushTarget(id) {
+  const t = pushTargetsCache.find(function(x) { return x.id === id; });
+  if (!t) { showToast('未找到该配置，请先刷新列表', false); return; }
+  await ptLoadIntoForm(t);
+  document.getElementById('sub-push').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  showToast('已载入 #' + id + '，修改后点保存生效', true);
 }
 
 function renderPtAttrTree(tree) {
@@ -7123,24 +8161,43 @@ async function savePushTarget() {
     });
   }
 
+  // 控制配置
+  const controlEnabled = document.getElementById('ptControlEnabled').checked;
+  const allowedActions = [];
+  const cbs = document.querySelectorAll('#ptActionList .pt-act-cb');
+  const checkedCbs = document.querySelectorAll('#ptActionList .pt-act-cb:checked');
+  const allSelected = cbs.length > 0 && cbs.length === checkedCbs.length;
+  if (allSelected) {
+    allowedActions.push('*');
+  } else {
+    checkedCbs.forEach(cb => allowedActions.push(cb.dataset.action));
+  }
+  const paramConstraints = collectPtConstraints();
+  const rateRaw = parseInt(document.getElementById('ptRateLimit').value);
+  const payload = {
+    entity_id: entityId, name,
+    body_mode: bodyMode, field_mapping: fieldMapping,
+    interval_min: intervalMin,
+    control_enabled: controlEnabled,
+    allowed_actions: allowedActions,
+    param_constraints: paramConstraints,
+    rate_limit_per_min: isNaN(rateRaw) ? 60 : rateRaw,
+    allow_raw_service: document.getElementById('ptAllowRaw').checked,
+  };
+  if (ptEditingId) payload.id = ptEditingId;
+
   try {
     const resp = await fetch(PUSH_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        entity_id: entityId, name,
-        body_mode: bodyMode, field_mapping: fieldMapping,
-        interval_min: intervalMin,
-      }),
+      body: JSON.stringify(payload),
     });
     const json = await resp.json();
     if (json.success) {
-      showToast(json.message + ' · 地址已生成', true);
-      document.getElementById('ptEntityId').value = '';
-      document.getElementById('ptEntityMeta').textContent = '';
-      document.getElementById('ptBodyStep').style.display = 'none';
-      document.getElementById('ptSaveStep').style.display = 'none';
+      showToast(json.message + (ptEditingId ? ' · 已更新' : ' · 读/写地址已生成'), true);
+      ptResetForm();
       loadPushTargets();
+      loadPushControlLogs();
     } else {
       showToast('失败: ' + json.error, false);
     }
@@ -7151,13 +8208,198 @@ function copyPushUrl(url) {
   navigator.clipboard.writeText(url).then(() => showToast('地址已复制', true)).catch(() => showToast('复制失败', false));
 }
 
-async function delPushTarget(entityId) {
-  if (!confirm('确定删除数据访问 "' + entityId + '"？')) return;
+async function delPushTarget(id) {
+  const t = pushTargetsCache.find(function(x) { return x.id === id; });
+  const label = t ? (t.entity_id + ' #' + id) : ('#' + id);
+  if (!confirm('确定删除数据访问 "' + label + '"？\n对应的读地址与控制地址将同时失效。')) return;
   try {
-    const resp = await fetch(PUSH_API + '?entity_id=' + encodeURIComponent(entityId), { method: 'DELETE' });
+    const resp = await fetch(PUSH_API + '?id=' + id, { method: 'DELETE' });
     const json = await resp.json();
     showToast(json.success ? json.message : ('失败: ' + json.error), json.success);
-    if (json.success) loadPushTargets();
+    if (json.success) {
+      if (ptEditingId === id) ptResetForm();
+      loadPushTargets();
+      loadPushControlLogs();
+    }
+  } catch(e) { showToast('请求失败', false); }
+}
+
+// ── 控制测试 ────────────────────────────────────────────────
+async function openPushTest(id) {
+  const t = pushTargetsCache.find(function(x) { return x.id === id; });
+  if (!t) { showToast('未找到该配置，请先刷新列表', false); return; }
+  ptTestTarget = t;
+  ptTestCaps = null;
+  ptTestActions = [];
+  document.getElementById('pushTestSection').style.display = 'block';
+  document.getElementById('pushTestTarget').textContent = t.entity_id + ' （#' + id + '）';
+  document.getElementById('pushTestBody').innerHTML = '<div class="hint">正在加载可用动作…</div>';
+  try {
+    const resp = await fetch(PUSH_CAP_API + '?entity_id=' + encodeURIComponent(t.entity_id));
+    const json = await resp.json();
+    if (!json.success) {
+      document.getElementById('pushTestBody').innerHTML = '<div class="hint">加载失败: ' + escHtml(json.error) + '</div>';
+      return;
+    }
+    ptTestCaps = json.data;
+    renderPushTest();
+  } catch(e) {
+    document.getElementById('pushTestBody').innerHTML = '<div class="hint">加载失败: ' + escHtml(String(e)) + '</div>';
+  }
+}
+
+function closePushTest() {
+  ptTestTarget = null;
+  ptTestCaps = null;
+  ptTestActions = [];
+  document.getElementById('pushTestSection').style.display = 'none';
+  document.getElementById('pushTestBody').innerHTML = '';
+}
+
+function renderPushTest() {
+  const t = ptTestTarget;
+  const caps = ptTestCaps;
+  const allowed = (t && Array.isArray(t.allowed_actions)) ? t.allowed_actions : [];
+  const isAll = allowed.indexOf('*') >= 0;
+  const acts = ((caps && caps.actions) || []).filter(function(a) {
+    return isAll || allowed.indexOf(a.action) >= 0;
+  });
+  if (!acts.length) {
+    document.getElementById('pushTestBody').innerHTML =
+      '<div class="hint">该控制地址未授权任何动作（或实体当前无可用动作）。</div>' +
+      '<button class="btn-accent" style="margin-top:6px;padding:3px 10px" onclick="closePushTest()">关闭</button>';
+    return;
+  }
+  ptTestActions = acts;
+  let html = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+  html += '<label style="width:auto">动作:</label>';
+  html += '<select id="pushTestAction" onchange="renderPushTestParams()" style="width:280px">';
+  acts.forEach(function(a) {
+    html += '<option value="' + escAttr(a.action) + '">' + escHtml((a.label || a.action) + ' · ' + a.action) + '</option>';
+  });
+  html += '</select>';
+  html += '<label style="display:flex;align-items:center;gap:4px;width:auto"><input type="checkbox" id="pushTestWait" style="width:auto">等待状态刷新</label>';
+  html += '<button class="btn-green" style="padding:4px 12px" onclick="sendPushTest()">发送</button>';
+  html += '<button class="btn-accent" style="padding:4px 12px" onclick="closePushTest()">关闭</button>';
+  html += '</div><div id="pushTestParams" style="margin-top:8px"></div>';
+  html += '<div id="pushTestResult" class="hint" style="margin-top:8px"></div>';
+  document.getElementById('pushTestBody').innerHTML = html;
+  renderPushTestParams();
+}
+
+function renderPushTestParams() {
+  const action = document.getElementById('pushTestAction').value;
+  const def = ptTestActions.find(function(a) { return a.action === action; });
+  const box = document.getElementById('pushTestParams');
+  const params = (def && def.params) || {};
+  const keys = Object.keys(params);
+  if (!keys.length) { box.innerHTML = '<div class="hint" style="margin:0">该动作无需参数</div>'; return; }
+  const constraints = (ptTestTarget && ptTestTarget.param_constraints) || {};
+  const actRules = constraints[action] || {};
+  let html = '';
+  keys.forEach(function(pk) {
+    const spec = params[pk] || {};
+    const rule = actRules[pk] || {};
+    let note = '';
+    if (rule.lock === 'value') note = '已锁定为固定值 ' + JSON.stringify(rule.value) + '（传参会被忽略）';
+    else if (rule.lock === 'range') note = '已限幅 ' + (rule.min === undefined ? '' : rule.min) + ' ~ ' + (rule.max === undefined ? '' : rule.max);
+    else if (spec.required) note = '必填';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin:4px 0;flex-wrap:wrap">';
+    html += '<span style="min-width:130px;font-size:12px">' + escHtml(spec.label || pk) + '</span>';
+    html += ptValueInputHtml('pt-test-val', spec, '', pk);
+    html += '<span class="hint" style="margin:0">' + escHtml(note || ptParamDesc(spec)) + '</span>';
+    html += '</div>';
+  });
+  box.innerHTML = html;
+}
+
+async function sendPushTest() {
+  const t = ptTestTarget;
+  const resBox = document.getElementById('pushTestResult');
+  const action = document.getElementById('pushTestAction').value;
+  const params = {};
+  document.querySelectorAll('#pushTestParams .pt-test-val').forEach(function(el) {
+    const pk = el.dataset.param;
+    const v = el.value;
+    if (pk && v !== '') params[pk] = v;
+  });
+  resBox.textContent = '发送中…';
+  try {
+    const resp = await fetch(PUSH_CONTROL_API + encodeURIComponent(t.control_token), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: action,
+        params: params,
+        wait_state: document.getElementById('pushTestWait').checked,
+      }),
+    });
+    const json = await resp.json();
+    if (json.success) {
+      resBox.innerHTML = '<span style="color:var(--green)">✔ 下发成功</span> · service=' + escHtml(json.service) +
+        ' · params=' + escHtml(JSON.stringify(json.applied_params || {})) +
+        ' · 当前状态=' + escHtml(String(json.state)) +
+        (json.waited ? '（已观察到状态刷新）' : '') +
+        (json.rate_limit_remaining !== undefined ? ' · 剩余配额=' + json.rate_limit_remaining : '');
+    } else {
+      resBox.innerHTML = '<span style="color:#e56">✘ 失败 [' + escHtml(String(json.code || '')) + '] ' + escHtml(json.error) + '</span>';
+    }
+    loadPushControlLogs();
+  } catch(e) {
+    resBox.textContent = '请求失败: ' + e;
+  }
+}
+
+// ── 控制审计日志 ────────────────────────────────────────────
+async function loadPushControlLogs() {
+  const wrap = document.getElementById('pushControlLogsWrap');
+  wrap.style.display = 'block';
+  try {
+    const resp = await fetch(PUSH_LOGS_API + '?limit=50');
+    const json = await resp.json();
+    if (!json.success) {
+      wrap.innerHTML = '<div class="empty">控制日志加载失败: ' + escHtml(json.error) + '</div>';
+      return;
+    }
+    const rows = json.data || [];
+    let html = '<div class="section"><h3>📜 控制日志'
+      + '<button class="btn-del" style="float:right;padding:3px 10px;margin-left:6px" onclick="clearPushControlLogs()">清空</button>'
+      + '<button class="btn-accent" style="float:right;padding:3px 10px" onclick="loadPushControlLogs()">刷新</button>'
+      + '<span class="hint" style="margin-left:8px">最近 ' + rows.length + ' 条 · 保留 30 天</span></h3>';
+    if (!rows.length) {
+      wrap.innerHTML = html + '<div class="empty" style="padding:8px">暂无控制记录</div></div>';
+      return;
+    }
+    html += '<div class="table-wrap"><table><thead><tr><th>时间</th><th>实体</th><th>动作</th><th>服务</th><th>参数</th><th>结果</th><th>来源IP</th></tr></thead><tbody>';
+    rows.forEach(function(r) {
+      const ok = r.success
+        ? '<span class="badge" style="color:var(--green)">成功</span>'
+        : '<span class="badge" style="color:#e56">失败</span>';
+      const err = r.error ? '<div class="hint" style="margin:0;color:#e56">' + escHtml(r.error) + '</div>' : '';
+      html += '<tr>';
+      html += '<td style="font-size:12px;white-space:nowrap">' + fmtTime(r.created_at) + '</td>';
+      html += '<td style="font-size:12px">' + escHtml(r.entity_id) + '</td>';
+      html += '<td style="font-size:12px">' + escHtml(r.action) + '</td>';
+      html += '<td style="font-size:12px">' + escHtml(r.service) + '</td>';
+      html += '<td style="font-size:11px;max-width:260px;word-break:break-all">' + escHtml(JSON.stringify(r.params || {})) + '</td>';
+      html += '<td>' + ok + err + '</td>';
+      html += '<td style="font-size:12px">' + escHtml(r.client_ip || '-') + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+    wrap.innerHTML = html;
+  } catch(e) {
+    wrap.innerHTML = '<div class="empty">控制日志请求失败</div>';
+  }
+}
+
+async function clearPushControlLogs() {
+  if (!confirm('确定清空全部控制日志？该操作不可撤销。')) return;
+  try {
+    const resp = await fetch(PUSH_LOGS_API + '?clear=1');
+    const json = await resp.json();
+    showToast(json.success ? json.message : ('失败: ' + json.error), json.success);
+    loadPushControlLogs();
   } catch(e) { showToast('请求失败', false); }
 }
 
@@ -9148,6 +10390,26 @@ function onDevScopeChange() {
   generateApiUrl();
 }
 
+// 隐藏地址生成器里所有常规参数行。
+// 供「不需要任何参数输入」的接口类型复用（新接口 ext、实体→网络 push）；
+// 正常查询类型的分支会各自把自己需要的行 display='' 显式恢复出来。
+function apiHideAllParamRows() {
+  const rows = [
+    ['apiEntityId', 1], ['apiRoom', 1], ['apiTableRow', 0], ['apiLimit', 1],
+    ['apiOffset', 1], ['apiOrderBy', 1], ['apiFields', 1], ['apiCategoryRow', 0],
+    ['apiMetricsRow', 0], ['apiDateMode', 1], ['apiDateFieldRow', 0],
+    ['apiDateSingle', 0], ['apiDateRange', 0], ['apiMonthRow', 0], ['apiYearRow', 0],
+    ['apiHealthNameRow', 0], ['apiHealthTypeRow', 0], ['apiMediaUserRow', 0],
+    ['apiMediaIdRow', 0], ['apiMediaNameRow', 0], ['apiDeviceUserNameRow', 0],
+    ['apiDeviceUserDirRow', 0],
+  ];
+  rows.forEach(function (item) {
+    const el = document.getElementById(item[0]);
+    if (!el) return;
+    (item[1] ? el.parentNode : el).style.display = 'none';
+  });
+}
+
 function onApiTypeChange() {
   const qt = document.getElementById('apiQueryType').value;
   // 自定义路由：value 格式 "custom:{route_path}"
@@ -9156,8 +10418,13 @@ function onApiTypeChange() {
   // 新接口（ext）：value 格式 "ext:{name}"，定义存库、免重启
   const isExt = qt.startsWith('ext:');
   const isExtPath = isExt ? qt.slice('ext:'.length) : '';
+  // 实体→网络（push）：value 格式 "push:data:{id}" / "push:control:{id}"，token 即密钥
+  const isPush = qt.startsWith('push:');
   // 默认隐藏自定义参数区；仅自定义路由分支会重新显示
   document.getElementById('apiCustomParamsRow').style.display = 'none';
+  // 默认隐藏实体→网络的调用方式区；仅 push 分支会重新显示
+  const elPushHintWrap = document.getElementById('apiPushHintWrap');
+  if (elPushHintWrap) elPushHintWrap.style.display = 'none';
   // 默认隐藏全屋用电/用时范围行；仅 whole_house_usage 分支显示
   const elWhScopeRow = document.getElementById('apiWhScopeRow');
   if (elWhScopeRow) elWhScopeRow.style.display = 'none';
@@ -9322,30 +10589,16 @@ function onApiTypeChange() {
     document.getElementById('apiDateFieldRow').style.display = 'none';
   }
 
+  // 实体→网络（push）：token 即密钥、URL 自鉴权，不需要任何参数输入行
+  if (isPush) {
+    apiHideAllParamRows();
+    generateApiUrl();
+    return;
+  }
+
   if (isExtPath) {
     // 新接口（ext）：隐藏所有常规输入行，只显示参数区（复用自定义参数区）
-    document.getElementById('apiEntityId').parentNode.style.display = 'none';
-    document.getElementById('apiRoom').parentNode.style.display = 'none';
-    document.getElementById('apiTableRow').style.display = 'none';
-    document.getElementById('apiLimit').parentNode.style.display = 'none';
-    document.getElementById('apiOffset').parentNode.style.display = 'none';
-    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
-    document.getElementById('apiFields').parentNode.style.display = 'none';
-    document.getElementById('apiCategoryRow').style.display = 'none';
-    document.getElementById('apiMetricsRow').style.display = 'none';
-    document.getElementById('apiDateMode').parentNode.style.display = 'none';
-    document.getElementById('apiDateFieldRow').style.display = 'none';
-    document.getElementById('apiDateSingle').style.display = 'none';
-    document.getElementById('apiDateRange').style.display = 'none';
-    document.getElementById('apiMonthRow').style.display = 'none';
-    document.getElementById('apiYearRow').style.display = 'none';
-    document.getElementById('apiHealthNameRow').style.display = 'none';
-    document.getElementById('apiHealthTypeRow').style.display = 'none';
-    document.getElementById('apiMediaUserRow').style.display = 'none';
-    document.getElementById('apiMediaIdRow').style.display = 'none';
-    document.getElementById('apiMediaNameRow').style.display = 'none';
-    document.getElementById('apiDeviceUserNameRow').style.display = 'none';
-    document.getElementById('apiDeviceUserDirRow').style.display = 'none';
+    apiHideAllParamRows();
     document.getElementById('apiCustomParamsRow').style.display = 'block';
     renderExtParams(isExtPath);
     return;
@@ -10263,6 +11516,23 @@ function generateApiUrl() {
     }
     if (limit) peUrl += '&limit=' + encodeURIComponent(limit);
     document.getElementById('apiUrlOutput').value = peUrl;
+    return;
+  }
+
+  // 实体→网络（push）：独立 RESTful 路径 /push_data/{token} 与 /push_control/{token}。
+  // token 本身就是密钥，URL 自鉴权，因此这里刻意不附加 ?key= 参数。
+  if (qt.startsWith('push:')) {
+    const seg = qt.split(':');
+    const kind = seg[1] === 'control' ? 'control' : 'data';
+    const id = seg[2];
+    const target = (window.__pushCache || []).find(function (x) { return String(x.id) === String(id); });
+    const token = target ? (kind === 'control' ? target.control_token : target.push_token) : '';
+    const url = token
+      ? BASE_PATH + '/api/ha_data_store/push_' + (kind === 'control' ? 'control' : 'data')
+        + '/' + encodeURIComponent(token)
+      : '';
+    document.getElementById('apiUrlOutput').value = url;
+    renderPushApiHint(kind, target, url);
     return;
   }
 
@@ -12477,6 +13747,109 @@ async function extEdit(name) {
     document.getElementById('extFormWrap').style.display = '';
     extStatus('编辑接口「' + name + '」，保存后立即生效', true);
   } catch (e) { alert('读取接口失败：' + e); }
+}
+
+// 把「实体→网络」的读 / 控制地址填充到「API 地址生成器」的查询类型下拉（push 分组）。
+// 每个已配置目标生成 1~2 个选项（有 control_token 才有控制项），选中后地址里直接带真实 token。
+// 会尽量保留当前选中项，因此可以安全地反复刷新。
+async function pushLoadIntoApi() {
+  const group = document.getElementById('apiPushGroup');
+  if (!group) return;
+  const prev = document.getElementById('apiQueryType').value;
+  try {
+    const resp = await fetch(PUSH_API);
+    const json = await resp.json();
+    const list = (json && json.success) ? (json.data || []) : [];
+    window.__pushCache = list;
+    group.innerHTML = '';
+    if (!list.length) {
+      group.innerHTML = '<option value="" disabled>暂无「实体→网络」配置</option>';
+      return;
+    }
+    list.forEach(function (t) {
+      const label = t.entity_id +
+        (t.name && t.name !== t.entity_id ? '（' + t.name + '）' : '');
+      if (t.push_token) {
+        const opt = document.createElement('option');
+        opt.value = 'push:data:' + t.id;
+        opt.textContent = '📥 读数据 · ' + label;
+        group.appendChild(opt);
+      }
+      if (t.control_token) {
+        const opt = document.createElement('option');
+        opt.value = 'push:control:' + t.id;
+        opt.textContent = '🎛 控制 · ' + label + (t.control_enabled ? '' : '（未开启控制）');
+        group.appendChild(opt);
+      }
+    });
+    if (!group.children.length) {
+      group.innerHTML = '<option value="" disabled>没有可用的 token</option>';
+    }
+  } catch (e) {
+    group.innerHTML = '<option value="" disabled>加载失败</option>';
+    return;
+  }
+  // 保留原选中项（若仍存在）
+  if (prev && prev.indexOf('push:') === 0) {
+    document.getElementById('apiQueryType').value = prev;
+    if (document.getElementById('apiQueryType').value !== prev) {
+      // 选中项已不存在（配置被删/停用），回到默认
+      document.getElementById('apiQueryType').selectedIndex = 0;
+      onApiTypeChange();
+    } else {
+      generateApiUrl();
+    }
+  }
+}
+
+// 渲染「实体→网络」调用方式：curl 示例 + 放行条件 + 当前授权动作
+function renderPushApiHint(kind, target, url) {
+  const wrap = document.getElementById('apiPushHintWrap');
+  const box = document.getElementById('apiPushHint');
+  if (!wrap || !box) return;
+  wrap.style.display = 'block';
+
+  if (!target || !url) {
+    box.innerHTML = '<div class="hint" style="margin:0">未找到该配置（可能已被删除或停用），'
+      + '请刷新页面后重试。</div>';
+    return;
+  }
+
+  let html = '<div class="hint" style="margin:0 0 8px">实体 <code>' + escHtml(target.entity_id) + '</code>'
+    + (target.name && target.name !== target.entity_id ? '（' + escHtml(target.name) + '）' : '')
+    + ' ｜ 配置 #' + target.id
+    + ' ｜ 类型 <b>' + (kind === 'control' ? '控制（POST）' : '只读（GET）') + '</b></div>';
+
+  if (kind === 'data') {
+    html += '<div class="push-guide-code">curl "' + escHtml(url) + '"</div>';
+    html += '<div class="hint" style="margin-top:8px">GET 即可取数，返回内容取决于该配置的'
+      + '「返回数据范围」（完整 / 紧凑 / 自选字段）。'
+      + 'token 就是密钥，地址不要外传；受 HA 开关「API 访问」控制。</div>';
+  } else {
+    const acts = Array.isArray(target.allowed_actions) ? target.allowed_actions : [];
+    const isAll = acts.indexOf('*') >= 0;
+    const sample = isAll ? 'turn_on' : (acts[0] || 'turn_on');
+    html += '<div class="push-guide-code">curl -X POST "'
+      + escHtml(url) + '" \\\n  -H "Content-Type: application/json" \\\n'
+      + "  -d '{\"action\":\"" + escHtml(sample) + "\",\"params\":{}}'</div>";
+    html += '<div class="hint" style="margin-top:8px">控制接口<b>只接受 POST</b>'
+      + '（GET 会被浏览器预取/日志重放触发，故刻意不支持）。当前授权动作：'
+      + (isAll
+        ? '<b>全部</b>'
+        : (acts.length
+          ? acts.map(function (a) { return '<code>' + escHtml(a) + '</code>'; }).join(' ')
+          : '<b style="color:#e6a23c">无 —— 该 token 不能控制任何动作</b>'))
+      + '</div>';
+    if (!target.control_enabled) {
+      html += '<div class="hint" style="margin:8px 0 0;color:#e6a23c">⚠ 该配置当前'
+        + '<b>未开启控制</b>，此地址会返回 404。请到「系统配置 → 🌐 实体→网络」勾选「启用控制」。</div>';
+    }
+    html += '<div class="hint" style="margin:8px 0 0">还需 HA 开关「<b>实体网络控制</b>」处于打开状态，'
+      + '否则一律 403。可先拉能力清单确认可用动作与参数：</div>';
+    html += '<div class="push-guide-code" style="margin-top:6px">curl "' + escHtml(BASE_PATH)
+      + '/api/ha_data_store/push_capabilities/' + escHtml(target.control_token || '') + '"</div>';
+  }
+  box.innerHTML = html;
 }
 
 // 把新接口填充到「API 地址生成器」的查询类型下拉（ext 分组）
