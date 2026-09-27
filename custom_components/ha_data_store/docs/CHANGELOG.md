@@ -1,5 +1,343 @@
 # 更新日志
 
+## 2026-09-26 — v4.1.0 定时精灵并入本集成（domain: timer_backend → ha_data_store）
+
+> 目标：减少一个集成。原 `timer_backend`（定时精灵）的引擎、传感器、接口全部并入
+> `ha_data_store`，持久化从 JSON 文件换成集成自有 SQLite。
+
+### 一、引擎（`timer_elves.py`）
+
+沿用此前已移植但**从未接线**的 `TimerElvesCoordinator`（与 `timer_backend/coordinator.py`
+逐方法对等，61 个关键方法无缺失），本版把它真正装进集成，并补齐/修复：
+
+| 项 | 说明 |
+|---|---|
+| 装配 | `__init__.py::async_setup_entry` 创建并 `async_setup()`；`hass.data["ha_data_store"]["timer_elves"]`；`async_unload_entry` 卸载 |
+| 持久化 | 只用 `timer_tasks` 表（不再有 JSON 文件）。表在 `task_data`(JSON) 之外增加 12 个冗余查询列（entity_id/entity_name/task_type/status/action_desc/duration/repeat_type/created_at/end_time/next_execution/executed_at/execution_result）+ 2 个索引，便于历史查询与 db_viewer 直接查看；旧三列结构用 PRAGMA + ALTER 就地补列 |
+| 强制落盘 | `save_tasks(force=True)` 绕开 5 秒节流；`async_unload` 用它，避免卸载丢最后 5 秒的变更 |
+| 重启恢复修复 | 原移植版对未来任务一律注册 `execute_timer`，导致空调/窗帘定时器重启后丢 `restore_previous`；现按 `is_climate`/`is_cover` 分派对应执行器 |
+| 兜底调度 | 新增每小时 `check_recurring_schedules()`（原 `timer_backend` 靠 __init__ 里 1 天间隔；本版收紧到 1 小时，防止睡死/漏触发后周期任务不再自愈） |
+| 句柄回收 | bus 监听（`ha_data_store_timer_event`、`state_changed`）与兜底 tick 的取消句柄统一存 `_unsubs` / `_housekeeping_unsub`，卸载时全部回收 |
+| 新增能力 | `create_task()`（API 创建入口，按调用前后任务差集判定成败）、`update_task()`（原地改时长/动作/周期并重排句柄）、`get_summary()`、`get_task()`、`get_history()`（SQL 分页 + 实体/状态/时间区间过滤） |
+
+### 二、实体（`sensor.py`）
+
+新增 **`sensor.ha_data_store_timer`**（唯一 id `ha_data_store_timer`，注册表预注册固定实体 ID）：
+
+- 状态值 = 活跃任务数（一次性定时器 + 周期任务）
+- 属性：`active_timers` / `active_schedules` / `active_tasks` / `total_tasks` /
+  `current_task` / `successful_task` / `failed_task` / `today_task` / `all_task_list` /
+  `time_zone` / `updated_at`
+- 刷新：订阅 `TIMER_SIGNAL_UPDATE_SENSOR`（此前该信号**只发无人收**，现在有了消费者）
+  + 30 秒轮询兜底 + 启动 3 秒后首刷
+
+### 三、HTTP API（`timer_elves_api.py`，全部挂在 `/api/ha_data_store/timer`）
+
+不注册任何 hass 服务（本集成服务体系保持只有 `generate_daily_summary`）。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/timer` | 概览：活跃定时器/周期任务 + 统计 + 时区 |
+| GET | `/timer/summary` | 纯统计 |
+| GET | `/timer/tasks` | 任务列表（`?task_id= &entity_id= &status= &active=1`） |
+| GET | `/timer/history` | 历史分页（`?limit= &offset= &entity_id= &status= &start= &end= &with_data=1`） |
+| POST | `/timer` | 创建 `{kind: timer\|climate\|cover\|schedule, entity_id, duration?, repeat_type?, schedule_time?, weekdays?, month_days?, action_type?, action_data?}` |
+| POST | `/timer/update` | 修改 `{task_id, patch:{duration?, action_type?, action_data?, repeat_type?, schedule_time?, weekdays?, month_days?}}` |
+| POST | `/timer/cancel` | 取消 `{task_id\|schedule_id\|entity_id}` |
+| DELETE | `/timer?id=xxx` | 取消（query 形式） |
+
+- 鉴权：查询只受「API 访问」开关约束（db_viewer 可直接调）；写入在此之上再受「数据库修改」开关约束。
+- 兼容旧式 `action` 调用（`create_timer` / `create_schedule` / `cancel_timer` / ... 字段与旧版一致）。
+- 补齐旧版 API 的退化：`get_timers` 现在同时返回 schedules（旧版只返 timers）。
+
+### 四、事件总线与前端
+
+- 事件前缀统一为 `ha_data_store_timer_event`（前端 → 后端）与
+  `ha_data_store_timer_response`（后端 → 前端）。
+- 前端事件新增 `update_task` / `get_history` 两个 action 分支。
+- `timer-control-card.js`:7 处改动并已发布到 `/config/www/`：
+  3 处 `fire_event` 事件名、3 处响应事件监听、1 处历史数据源实体 ID
+  （`sensor.timer_active_tasks` → `sensor.ha_data_store_timer`）。
+
+### 五、边界与数据
+
+- 与 `automations.py`（简单自动化引擎：定时/间隔/条件 + `automation_logs`）
+  **独立并存**，两套调度互不干扰；定时精灵负责设备倒计时/周期任务与空调窗帘状态恢复。
+- **不迁移**旧 `timer_backend` 的 JSON 历史数据（其最后记录停在 2026-03，且集成长期处于停用状态）。
+
+### 六、修复：空调定时被降级为关机 + 线程安全告警
+
+**问题 1：空调定时「执行不成功」**
+
+- 现象：事件 `action_type: cool` + 顶层 `climate_mode: cool` / `temperature: 23`，实际执行的是
+  `climate.turn_off`（任务 `action.description = "Turn off AC"`），设备本就 off 故状态无变化。
+- 根因（两条叠加）：
+  1. `generate_climate_action` 只认 `turn_off / set_temperature / set_mode / restore_previous / auto`，
+     **不认识模式名 `cool`** → 走到最后的兜底分支退化为关机；
+  2. `climate_mode` / `temperature` 位于事件**顶层**，而动作生成只读 `action_data` → 参数被整体丢弃。
+- 修复：
+  - 新增 `_normalize_action_data()`：把顶层参数（temperature / hvac_mode / mode / fan_mode /
+    swing_mode / preset_mode / position / tilt_position / brightness / percentage / humidity …）并入
+    `action_data`；兼容前端历史字段 `climate_mode` → `hvac_mode` / `mode`；temperature 归一为 float。
+  - `generate_climate_action` 支持三类写法：① 原语义动作；② push_control 目录命名（`set_hvac_mode`）；
+    ③ 直接给 HA 模式名（cool / heat / dry / fan_only / auto / heat_cool）——带温度时用
+    `climate.set_temperature`（同时传 `hvac_mode`），只给模式时用 `climate.set_hvac_mode`。
+  - 新增 `turn_on` / `set_fan_mode` / `set_swing_mode` / `set_preset_mode` 动作；
+    设温度场景下的风速/摆风/预设走 `extra_calls`（HA 的 `climate.set_temperature` 不接受这些参数），
+    由新增的 `_run_extra_calls()` 在主调用成功后依次下发。
+  - `create_timer` / `create_climate_timer` / `create_cover_timer` / `create_schedule` / `update_task`
+    统一走归一化，并把 `action_type` / `action_data` 落盘（供后续修改与状态还原）。
+  - 未知动作名不再静默退化：先查动作目录，未命中记 warning 再明确退化为关机。
+
+**问题 2：复用 push_control 的动作目录**
+
+- `ACTION_CATALOG`（29 域 / 97 动作）现在被定时精灵复用为「动作名 + 参数名 + 服务映射」的**单一来源**：
+  新增 `_generate_action_from_catalog()`，`generate_action` 与 `generate_climate_action` 在语义动作
+  未命中时按目录生成调用。定时任务的 `action_type` 可直接写目录里的动作名（参数同名），例如
+  `{"entity_id": "light.x", "action_type": "turn_on", "brightness": 50}`。
+- 边界：push_control 的执行链（token 绑定单实体 → 立即 `hass.services.async_call`）**未复用**——
+  定时精灵需要「延迟到点执行 + 状态恢复 + 附加调用」，两者执行模型不同，硬接需改造其安全模型。
+
+**问题 3：线程安全告警（`async_create_task` from a thread other than the event loop）**
+
+- 现象：`sensor.py` 信号回调报 `RuntimeError`，伴随
+  `coroutine 'TimerElvesSensor._async_refresh' was never awaited`，日志线程名为 `SyncWorker_*`。
+- 根因：`async_dispatcher_send` 与 `hass.bus.fire` 都**不切线程**——在哪个线程派发，回调就在哪个线程执行。
+  引擎原先混用 `asyncio.run_coroutine_threadsafe(coro, hass.loop)` 与同步 `bus.fire`，一旦回调落在
+  线程池，dispatcher 就在线程池同步调用订阅者 → 传感器实体里的 `async_create_task` 触发 HA 检测。
+- 修复：
+  - 定时执行入口（`execute_timer` / `execute_climate_timer` / `execute_cover_timer` /
+    `_pre_capture_state` / `execute_recurring_schedule`）统一改用 HA 官方线程安全入口 `hass.add_job()`。
+  - 新增 `_in_event_loop()`：`_update_sensor()` 的信号派发与 `_fire_event()` 在非 loop 线程时
+    经 `loop.call_soon_threadsafe` 切回事件循环（总线事件同时由同步 `bus.fire` 改为 `bus.async_fire`）。
+  - `sensor.py` 的信号回调改为 `hass.add_job(self._async_refresh, payload=payload)`。
+
+### 七、db_viewer：「API 工具 → API 地址生成器」新增「⏱ 定时精灵」查询类型组
+
+- 查询类型下拉新增静态组 **「⏱ 定时精灵」**，7 个条目：
+  任务概览 / 统计摘要 / 任务列表 / 历史记录（GET）+ 创建任务 / 修改任务 / 取消任务（POST）。
+- 参数区按类型动态渲染（`renderTimerParams` + `_timerFieldSpecs`）：
+  - 读接口生成 `?key=&task_id=&entity_id=&status=&limit=&offset=&start=&end=&with_data=` 等 query；
+  - 写接口只生成带 key 的 **POST 地址**，并在提示区给出 **curl + JSON body 示例**
+    （`_timerRequestBody` 负责组装：temperature 数值化、weekdays / month_days 数组化、
+    cancel 的 task_id / schedule_id / entity_id 择一）。
+- 未沿用 media 那套 `_method=&_body=` 的 query 约定——定时精灵后端只解析 JSON body，
+  写操作照实给出 POST 形式，避免生成"看似能 GET 调用"的误导地址；
+  取消任务额外附 DELETE 等价形式（`DELETE /timer?id=<任务ID>`）。
+
+### 八、修复：空调「设温度」模式未生效 + 信号回调 TypeError
+
+**问题 1：设温度无效（空调"还是无法执行"）**
+
+- 现象：日志里动作已正确生成为 `climate.set_temperature{temperature:23.0, hvac_mode:'cool'}`，
+  但任务 `after_entity_state` 仍是 `off`，设备没动。
+- 根因：本集成自带的虚拟空调 `virtual_devices.py:279 VirtualClimate.async_set_temperature()`
+  只取 `temperature`、**忽略 `hvac_mode`**（HA 会把 hvac_mode 一并放进 kwargs 传给实体）。
+  结果是只改了目标温度、运行模式仍为 off。**前端与动作生成都没有问题**。
+- 修复（全在后端，`www/timer-control-card.js` 未改）：
+  - `_climate_set_temperature()` 在带模式时生成 `pre_calls = [climate.set_hvac_mode]`，
+    执行时**先切模式（顺带开机）再设温度**，兼容忽略 hvac_mode 的实体；
+    对正常支持的实体该调用幂等，无副作用。
+  - 执行链支持 `pre_calls` / `extra_calls` 两段（`_run_extra_calls(action, key)`），
+    一次性任务、周期任务、窗帘执行三处统一。
+  - 主调用与附加调用统一 `blocking=True`：服务参数非法 / 服务不存在会真实抛出并记入任务失败，
+    不再出现「`execution_result: success` 但设备没动」的假成功。
+  - `restore_previous`（空调/窗帘状态还原）同样改为阻塞执行，顺序调整为「先模式后温度」。
+
+**问题 2：`TypeError: add_job() got an unexpected keyword argument 'payload'`**
+
+- 根因：上一轮把传感器信号回调改成 `hass.add_job(self._async_refresh, payload=payload)`，
+  而 HA 的 `HomeAssistant.add_job(target, *args)` **只接受位置参数**。
+- 修复：新增 `TimerElvesSensor._async_apply_payload(payload)` 作为信号回调入口，
+  改为 `hass.add_job(self._async_apply_payload, payload)`。
+
+### 九、新增两个查询接口：多实体定时任务 / 指定月有数据的日期
+
+均挂在 `/api/ha_data_store/timer` 之下，读接口（只需「API 访问」开关 + Key）：
+
+| 接口 | 参数 | 返回 |
+|---|---|---|
+| `GET /timer/entity_tasks` | `entities=a,b`（多实体，逗号/中文逗号/分号/空格分隔，兼容 `entity_id`）、`include_history=1`、`active=1`、`is_recurring=1\|0`、`limit=` | `entities` / `total` / `count` / `tasks[]` / `by_entity[]`（每实体：`count`、`active`、`active_timers`、`active_schedules`、`tasks`） |
+| `GET /timer/month_dates` | `month=YYYY-MM`（必填）、`entities=a,b`（可选）、`basis=created\|executed` | `month` / `basis` / `count`（有数据的日期数）/ `dates[]`（每日期：`count` + 各实体条数）/ `by_entity[]`（每实体：`count` + `days[]`） |
+
+实现要点：
+
+- `TimerElvesCoordinator.get_entity_tasks()`：默认只返回活跃任务，`include_history=1` 纳入历史；
+  按实体分组并给出活跃定时器 / 周期任务计数，便于前端按设备展示。
+- `TimerElvesCoordinator.get_month_dates()`：SQL 直接用 `timer_tasks` 的冗余查询列
+  （`substr(created_at,1,7)` 滤月、`substr(...,1,10)` 分组），支持 `basis=executed`
+  按实际执行时间统计（只计已执行，可跨日）；多实体用 `IN (...)` 过滤。
+- View 新增 `_parse_entities()`：统一解析多实体参数（逗号 / 中文逗号 / 分号 / 竖线 / 空格，自动去重）。
+- db_viewer「⏱ 定时精灵」组同步新增两项，参数区与地址生成已适配。
+
+注：这两个接口在 Python 层实现（需重启 HA 生效），不属于「接口管理 ext」的免重启定义类接口。
+
+**修复（同日）**：`entity_tasks` 的 `active=1` 未生效。
+
+- 原因：过滤条件写成 `if not is_active and not (include_history or active_only): continue`，
+  把 `active_only` 放在了「或」里取反——只给 `active=1`（未给 `include_history`）时条件恒为假，
+  历史任务被放行，于是返回了完成/失败的任务。
+- 现改为 `if not is_active and (active_only or not include_history): continue`，语义：
+  `active=1` 强制只看活跃；`include_history=1` 才纳入历史；两者同时给出时以 `active` 为准。
+- 已补 10 项参数组合回归自测（默认 / `active` / `include_history` / 两者叠加 / 多实体 /
+  `is_recurring` / `limit`），全部通过——此前只测了单参数，组合未覆盖是该 bug 漏出的原因。
+
+### 十、新增接口：指定实体 / 多实体在某天的定时任务
+
+`GET /api/ha_data_store/timer/entity_daily`
+
+| 参数 | 说明 |
+|---|---|
+| `date` | **必填**，`YYYY-MM-DD` |
+| `entities` | 可选，多实体（逗号/中文逗号/分号/空格分隔，兼容 `entity_id`） |
+| `basis` | `created`（任务创建日期，默认）/ `executed`（实际执行日期） |
+| `status` | 可选：`active` / `completed` / `failed` / `cancelled` |
+| `limit` | 默认 500，最大 2000 |
+
+返回 `date` / `basis` / `status` / `entities` / `count` / `tasks[]`（解析后的完整任务数据）/
+`by_entity[]`（每实体：`count`、`active`、`active_timers`、`active_schedules`、`tasks`）。
+
+实现要点：
+
+- 数据 = **SQLite 历史 ∪ 内存当前任务**：DB 侧覆盖已从内存裁剪掉的旧记录；
+  内存侧补上刚创建、尚未落盘（`save_tasks` 有 5 秒节流）的任务，保证「今天的任务」不漏。
+- 内存中仍存在的 `task_id` 会跳过 DB 结果，避免同一任务以「DB 旧状态 + 内存新状态」重复出现
+  （例如刚取消的任务不会同时出现在 `status=cancelled` 与 `completed` 里）。
+- db_viewer「⏱ 定时精灵」组同步新增该项（组内现为 10 项）。
+
+### 十一、db_viewer「系统监控」新增「⏱ 定时精灵」概览卡片与详情区块
+
+- 概览卡片区（`#monitorSummary`）新增手工卡片 `timerCard`（`data-target="timer"`）：
+  - `.num` = 活跃任务数（一次性定时器 + 周期任务）
+  - 第三行 = `活跃 x（定时 a · 周期 b）· 今日 c · 成功 x / 失败 y`
+- 详情区块（`#monitorContent`）新增「⏱ 定时精灵」section（默认折叠，点卡片或标题展开）：
+  - 上半：**活跃任务表** —— 实体 / 类型（定时·周期）/ 到点动作 / 时长 / 结束或下次执行 / 状态
+  - 下半：**最近历史表** —— 最近 20 条（实体 / 类型 / 动作 / 结果徽标 / 执行时间），并标注总条数
+- 数据来源：`GET /api/ha_data_store/timer`（概览 + `timers`/`schedules`）与
+  `GET /api/ha_data_store/timer/history?limit=20`；两者只受「API 访问」主开关约束，
+  故沿用监控页的裸 fetch 惯例、不拼 key。
+- 复用既有联动机制：在 `MONITOR_SEC_LABELS` 登记 `timer` 后，
+  卡片点击 → `expandMonitorSection('timer')` 展开定位；`syncSummarySub('timer')` 把区块标题
+  右侧统计克隆到卡片第三行；折叠态与卡片高亮由既有函数自动处理，无其它联动代码改动。
+- 顺带纠正一处认知：`xiaoaiCard / printerCard / recentCard / metricsCard` 并非手工卡片，
+  而是 `makeCard()` 生成（`.num` 取自 `types[key].count`），本页实际只有 7 个手工卡片
+  需要各自的 `loadMonitorXxx()` 回填。
+
+### 十二、定时精灵写入本地日志（db_viewer「日志查看」页可见）
+
+此前 `timer_elves` 只走标准 `_LOGGER`（HA 日志），而「日志查看」页读的是集成目录下
+`logs/YYYY-MM-DD.log`（由 `ha_data_store_local` 这个 logger 写入），所以页面上看不到定时器记录。
+
+- 在事件总出口 `_fire_event()` 中新增 `_log_event_locally()`，把事件转成中文日志行写入本地日志：
+
+| 事件 | 级别 | 日志示例 |
+|---|---|---|
+| `timer_created` | INFO | `[定时精灵] 创建定时器 实体=测试 时长=00:30:00 到点动作=Turn off 结束时间=…` |
+| `schedule_created` | INFO | `[定时精灵] 创建周期任务 实体=客厅插座 重复=daily 时刻=08:00:00 到点动作=关闭 下次执行=…` |
+| `timer_completed` | INFO / WARNING | `[定时精灵] 执行成功 实体=… 到点动作=… 状态 on→off` / `执行失败 …` |
+| `schedule_executed` | INFO / WARNING | `[定时精灵] 周期任务执行成功 实体=… 重复=weekly 状态 off→on` |
+| `timer_cancelled` / `schedule_cancelled` | INFO | `[定时精灵] 已取消定时器 实体=…` |
+| `error` | WARNING | `[定时精灵] 操作失败 环节=create_timer 错误=实体不存在: climate.bad` |
+
+- 不走事件总线的三个场景单独补日志：**引擎启动摘要**（时区 / 任务总数 / 活跃定时器 / 活跃周期，
+  便于重启后确认恢复情况）、**修改任务**、**清空历史**。
+- 刻意不记录 `timers_list` / `schedules_list`（列表推送，前端每次刷新都会触发）与
+  `history_result`（查询结果），避免噪声。
+- 日志写入包在 `try/except` 中，失败绝不影响定时逻辑；写入走 `logger.py` 的线程安全实现。
+- 「日志查看」页支持关键字过滤与级别着色，搜索 **定时精灵** 即可筛出全部记录。
+
+### 十三、定时精灵缺陷修复（安全 / 数据增长 / 契约 / 健壮性）— 全部接口强制 API Key
+
+#### 13.1 安全：所有定时接口强制校验 API Key
+
+- `GET/POST/DELETE /api/ha_data_store/timer*` 原先只判「API 访问」+「数据库修改」两个**默认开启**的开关、
+  **不校验 Key**，等于内网任意设备都能创建定时任务从而间接控制设备。
+- 现统一改用 `_check_api_enabled(request)`（含 Key 校验，与项目其它接口一致）；
+  写接口在其之上再要求「数据库修改」开关。Key 用 `?key=` 或 `Authorization: Bearer` 传入。
+- db_viewer 监控页 `loadMonitorTimer()` 同步适配：用 `getPageKey()`（URL 的 key 或后端注入的首枚 key）
+  拼接 `?key=`，页面无 key 时给出明确提示而非静默失败。
+
+#### 13.2 功能：恢复卡片「空调定时」动作
+
+- 卡片对空调一次性定时发送的是 `action_config`（`{set_mode:{…hvac_mode}, set_temperature:{…temperature}}`）
+  且 `action_type` 固定为 `auto`；后端此前**未解析 action_config**，用户选的「制冷 26℃」被丢弃，
+  退化成关机或静默无动作。
+- 新增 `_parse_action_config()` / `_resolve_action_type()`：动作名优先级 =
+  显式且非 auto 的 action_type > action_config 推导 > 模式名 > 默认；
+  参数从 action_config 各动作的 `data` 并入 action_data。
+- `create_timer` / `create_climate_timer` / `create_cover_timer` / `create_schedule` / `update_task`
+  全部改用统一解析；**前端一行未改**。
+
+#### 13.3 数据：历史不再无限增长
+
+- `timer_tasks` 原先只有 upsert、**全库无一句 DELETE**，历史裁剪只删内存 →
+  表与内存长期膨胀，且重启会把整表读回内存让体积"反弹"。
+- 新增 `_prune_memory()` / `_delete_tasks_from_db()` / `_delete_all_history_in_db()` / `prune_history()`：
+  - `_add_history_record` 裁剪内存时**同步删除库中对应行**；
+  - `prune_history()` 每小时随兜底任务执行：内存超上限部分删库 + 库中非活跃且早于
+    `TIMER_HISTORY_RETENTION_DAYS`（默认 30 天）的行清理；
+  - `restore_tasks` 恢复完成后立即裁剪并按需删库；
+  - `_clear_all_history` 同时清库（`DELETE WHERE status != 'active'`）。
+
+#### 13.4 性能：传感器与信号负载瘦身
+
+- 原先 `all_task_list` 把每条任务的**全字段**（含 action / previous_state / action_data / restore_data）
+  塞进状态属性，100 条约 50-100KB，远超 HA recorder 的 **16384 字节**上限（该实体不会被记历史）。
+- 新增 `_build_task_brief()`：只保留前端渲染必需的 15 个字段 + `id`，历史最多
+  `TIMER_BRIEF_LIMIT`（20）条；实测 20 条序列化 **9320 B**。
+- 完整任务数据由 API 提供（`/timer/tasks`、`/timer/history`、`/timer/entity_tasks` 等）。
+
+#### 13.5 正确性：同实体周期任务不再被静默取消
+
+- `entity_timers` 是单槽且只登记一次性定时器，但 `_cleanup_entity_timers` / `cancel_entity_timer`
+  会把该实体**所有活跃任务（含周期）**标记 cancelled，且不注销周期句柄、不发事件。
+- 现：清理逻辑只处理一次性任务；`cancel_entity_timer` 按类型分派
+  （一次性 → `cancel_timer`，周期 → `cancel_schedule`，两者都会注销句柄并发事件）。
+
+#### 13.6 其他修复
+
+| 项 | 说明 |
+|---|---|
+| 事件 `action` 被覆盖 | `_fire_event` 的 `**data` 会覆盖主 action（`update_task`/`get_history` 的 error 事件变成 action=update_task）；现把内层 action 改名为 `source_action` 保留 |
+| 过期任务句柄泄漏 | `send_all_timers` 过期分支只 `del self.timers[tid]`，底层定时器仍在 → 到点可能重复执行；现弹出并调用句柄 |
+| `restore_previous` 静默无效 | 快照缺失时一个服务都不发却记 success；现改为 `noop`（执行器判为失败），并支持传入**任务内快照**（重启后仍可还原），空调/窗帘的周期任务与 `update_task` 均已接入 |
+| 恢复过程无容错 | 单条坏数据 KeyError 会让整个定时精灵模块启动失败；现逐条 try 跳过并记 warning |
+| 迟到任务无策略 | 新增 `LATE_EXECUTE_MAX_SECONDS`（300s）：超过则标记 `expired` 不补执行，避免重启瞬间集中操作设备 |
+| 窗帘位置 0 误判 | `restore_previous` 用 `pos == 0` 判断"未记录"，而位置 0 是合法值；改用 `is None` |
+
+> 评估后**保持原样**的一项：`save_tasks`(5s) 与 `send_all_timers`(10s) 两套节流冗余但非缺陷，
+> 合并会改变落盘频率、收益低，暂不动。
+
+#### 13.7 回归自测
+
+26 项断言全部通过（临时脚本 + 桩模块 + 临时 SQLite，离线可跑）：
+
+- 逻辑：`action_config` 4 种形态解析、动作名优先级、摘要体积与必需字段、事件 action 不被覆盖、取消分派；
+- DB：内存裁剪 100 条上限、裁剪同步删库、30 天保留清理、清空历史；
+- 恢复：坏数据跳过、未到点重排、迟到 10s 补执行、迟到 1h 标记 expired、恢复后裁剪；
+- db_viewer：内联脚本 0 语法错误、监控调用已带 key、无 key 有提示。
+
+### 六、动作生成：内置语义动作 + 复用 push_control 动作目录
+
+- **来源说明**：定时任务执行的动作由 `timer_elves` 内置逻辑生成（硬编码 `climate.turn_off` /
+  `climate.set_temperature` / `climate.set_hvac_mode` 等），**并非**从 `push_control.ACTION_CATALOG`
+  读取；目录只在「内置未命中的动作名」时兜底（`_generate_action_from_catalog()`，
+  调用点见 `generate_action()` / `generate_climate_action()` / `generate_cover_action()`）。
+- **命名与参数已对齐**：`set_hvac_mode` / `set_temperature` / `set_fan_mode` / `set_swing_mode` /
+  `open_cover` / `close_cover` / `stop_cover` / `set_cover_position` 均可直接作为 `action_type`，
+  参数名同目录（`hvac_mode` / `temperature` / `fan_mode` / `swing_mode` / `position`）。
+- 内置另支持**目录没有**的语义动作：模式名直传（cool / heat / dry / fan_only / heat_cool）、
+  `restore_previous`（优先任务内快照）、`auto`（开着就关、关着就还原）、`set_preset_mode`、
+  风速/摆风随设温下发（`extra_calls`）。
+- **修复回归**：`_CLIMATE_MODE_NAMES` 曾包含 `"auto"`，使 `action_type="auto"`（卡片对空调的固定取值）
+  被当作「切到 HA auto 模式」，而不是原来的「开着就关 / 关着就还原」。现移除 `"auto"`；
+  需要 auto 模式时用 `set_mode` / `set_hvac_mode` + `hvac_mode=auto`。
+- **窗帘域补齐**：新增别名（`open_cover`→`open`、`close_cover`→`close`、
+  `set_cover_position`→`set_position`）、目录独有的 `stop`（`cover.stop_cover`）动作与末尾目录兜底；
+  未知动作改为记 warning 后退化，不再静默。
+- 自测 20 项全过：auto 双向语义、模式名、目录命名、extra_calls、未知动作退化、
+  窗帘 4 种别名 + 停止 + 还原、light/counter 目录兜底。
+
 ## 2026-09-26 — v4.0.0 实体→网络「可控制」+ 整库备份 + API 工具整合
 
 > 本版为当日全部改动的汇总版（原 3.7.0 / 3.8.0 / 3.8.1 / 3.8.2 / 3.8.3 五个版本合并为 4.0.0）。

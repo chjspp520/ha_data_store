@@ -2020,6 +2020,18 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="report_auto_entities">🤖 自动化实体列表</option>
           <option value="report_search">🔎 实体上报复合查询</option>
         </optgroup>
+        <optgroup label="⏱ 定时精灵">
+          <option value="timer_overview">任务概览（活跃定时器 + 周期任务 + 统计）</option>
+          <option value="timer_summary">统计摘要</option>
+          <option value="timer_tasks">任务列表（按实体/状态过滤）</option>
+          <option value="timer_history">历史记录（分页 + 时间/实体过滤）</option>
+          <option value="timer_entity_tasks">指定实体/多实体的定时任务</option>
+          <option value="timer_entity_daily">指定实体/多实体在某天的定时任务</option>
+          <option value="timer_month_dates">指定月哪些日期有定时数据</option>
+          <option value="timer_create">创建任务（POST · 定时/周期/空调/窗帘）</option>
+          <option value="timer_update">修改任务（POST · 时长/动作/周期）</option>
+          <option value="timer_cancel">取消任务（POST / DELETE）</option>
+        </optgroup>
         <optgroup label="自定义路由" id="apiCustomRoutesGroup">
         </optgroup>
         <optgroup label="🧩 新接口（ext·免重启）" id="apiExtGroup">
@@ -2576,6 +2588,12 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="apiCustomParamsRow" style="display:none">
       <label>自定义参数（SQL 中的 :name 占位符）</label>
       <div id="apiCustomParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
+    </div>
+    <!-- 定时精灵参数区（按 timer_* 查询类型动态渲染） -->
+    <div id="apiTimerRow" style="display:none">
+      <label>定时精灵参数</label>
+      <div id="apiTimerBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
+      <div id="apiTimerHint" style="margin-top:8px"></div>
     </div>
   </div>
 
@@ -3580,6 +3598,203 @@ function renderCustomRouteParams(path) {
     box.appendChild(wrap);
   }
   generateApiUrl();
+}
+
+// ============================================================
+//  定时精灵 API：地址生成器的参数区 / 调用示例
+//  读接口为 GET /api/ha_data_store/timer[...]；写接口为 POST（创建/修改/取消）
+// ============================================================
+function _timerFieldSpecs(qt) {
+  function T(name, label, ph, def) { return { name: name, label: label, ph: ph || '', def: def === undefined ? '' : def }; }
+  function S(name, label, options, def) { return { name: name, label: label, options: options, def: (def === undefined ? options[0] : def) }; }
+  if (qt === 'timer_tasks') {
+    return [
+      T('task_id', '任务 ID（填了只取单个）', '留空则返回任务列表'),
+      T('entity_id', '实体 ID 过滤', '如 climate.ceshi'),
+      T('status', '状态过滤', 'active / completed / failed / cancelled'),
+      T('active', '仅活跃任务', '填 1 表示只看 active'),
+    ];
+  }
+  if (qt === 'timer_history') {
+    return [
+      T('limit', '每页条数 limit', '默认 50，最大 500', '50'),
+      T('offset', '偏移 offset', '分页用', '0'),
+      T('entity_id', '实体 ID 过滤', '如 climate.ceshi'),
+      T('status', '状态过滤', '如 completed / cancelled'),
+      T('start', '起始时间 start', 'YYYY-MM-DD 或完整时间'),
+      T('end', '结束时间 end', 'YYYY-MM-DD（自动补到当天 23:59:59）'),
+      T('with_data', '含完整任务数据', '填 1 时附带 data 字段'),
+    ];
+  }
+  if (qt === 'timer_entity_tasks') {
+    return [
+      T('entities', '实体 ID（可多个，逗号分隔）', '如 climate.ceshi,light.keting'),
+      T('include_history', '含历史任务', '填 1 时把已完成/失败/取消一并返回'),
+      T('active', '仅活跃任务', '填 1 表示只看 active'),
+      T('is_recurring', '任务类型', '1=仅周期任务，0=仅一次性定时器'),
+      T('limit', '条数上限', '默认 500，最大 2000', '500'),
+    ];
+  }
+  if (qt === 'timer_entity_daily') {
+    return [
+      T('date', '日期（必填）', 'YYYY-MM-DD，如 2026-09-26'),
+      T('entities', '实体 ID（可多个，逗号分隔）', '留空 = 全部实体'),
+      S('basis', '日期口径 basis', ['created', 'executed'], 'created'),
+      T('status', '状态过滤', 'active / completed / failed / cancelled'),
+      T('limit', '条数上限', '默认 500，最大 2000', '500'),
+    ];
+  }
+  if (qt === 'timer_month_dates') {
+    return [
+      T('month', '月份（必填）', 'YYYY-MM，如 2026-09'),
+      T('entities', '实体 ID（可多个，逗号分隔）', '留空 = 全部实体'),
+      S('basis', '统计口径 basis', ['created', 'executed'], 'created'),
+    ];
+  }
+  if (qt === 'timer_create') {
+    return [
+      S('kind', '任务类型 kind', ['timer', 'climate', 'cover', 'schedule'], 'timer'),
+      T('entity_id', '实体 ID（必填）', '如 light.ceshi / climate.ceshi'),
+      T('duration', '时长 duration', 'HH:MM:SS（timer / cover 用）', '00:30:00'),
+      T('action_type', '动作 action_type', '如 cool / turn_off / set_hvac_mode / auto'),
+      T('temperature', '温度 temperature', '空调用，如 23'),
+      T('hvac_mode', '运行模式 hvac_mode', 'cool / heat / dry / fan_only / off'),
+      S('repeat_type', '重复 repeat_type', ['none', 'daily', 'weekly', 'monthly'], 'none'),
+      T('schedule_time', '执行时刻 schedule_time', '周期任务必填，如 08:00:00'),
+      T('weekdays', '星期 weekdays（weekly）', '逗号分隔，1=周一 … 7=周日，如 1,3,5'),
+      T('month_days', '日期 month_days（monthly）', '逗号分隔，如 1,15'),
+    ];
+  }
+  if (qt === 'timer_update') {
+    return [
+      T('task_id', '任务 ID（必填）', '待修改的活跃任务 ID'),
+      T('duration', '新时长 duration', '一次性定时器：从此刻起重新计时'),
+      T('action_type', '新动作 action_type', '如 cool / turn_off / set_hvac_mode'),
+      T('temperature', '温度 temperature', '空调用'),
+      T('hvac_mode', '运行模式 hvac_mode', 'cool / heat / dry / fan_only'),
+      T('schedule_time', '执行时刻 schedule_time', '周期任务：HH:MM:SS'),
+      S('repeat_type', '重复 repeat_type', ['', 'daily', 'weekly', 'monthly'], ''),
+    ];
+  }
+  if (qt === 'timer_cancel') {
+    return [
+      T('task_id', '任务 ID', '取消单个任务（推荐）'),
+      T('schedule_id', '周期任务 ID', '与 task_id 等价，填一个即可'),
+      T('entity_id', '实体 ID', '取消该实体的全部任务'),
+    ];
+  }
+  return [];
+}
+
+function _timerValues() {
+  const out = {};
+  document.querySelectorAll('#apiTimerBox [data-name]').forEach(function (el) {
+    const key = el.getAttribute('data-name');
+    if (!key) return;
+    out[key] = (el.type === 'checkbox') ? (el.checked ? '1' : '') : el.value;
+  });
+  return out;
+}
+
+function _timerRequestBody(qt, v) {
+  function num(x) { const n = parseFloat(x); return isNaN(n) ? x : n; }
+  function numArr(x) {
+    return String(x).split(',').map(function (s) { return s.trim(); }).filter(Boolean).map(function (s) {
+      const n = parseInt(s, 10);
+      return isNaN(n) ? s : n;
+    });
+  }
+  if (qt === 'timer_create') {
+    const body = { kind: v.kind || 'timer', entity_id: v.entity_id || '' };
+    if (v.duration) body.duration = v.duration;
+    if (v.action_type) body.action_type = v.action_type;
+    if (v.temperature) body.temperature = num(v.temperature);
+    if (v.hvac_mode) body.hvac_mode = v.hvac_mode;
+    if (v.repeat_type && v.repeat_type !== 'none') body.repeat_type = v.repeat_type;
+    if (v.schedule_time) body.schedule_time = v.schedule_time;
+    if (v.weekdays) body.weekdays = numArr(v.weekdays);
+    if (v.month_days) body.month_days = numArr(v.month_days);
+    return body;
+  }
+  if (qt === 'timer_update') {
+    const patch = {};
+    ['duration', 'action_type', 'temperature', 'hvac_mode', 'schedule_time', 'repeat_type'].forEach(function (k) {
+      if (v[k]) patch[k] = (k === 'temperature') ? num(v[k]) : v[k];
+    });
+    return { task_id: v.task_id || '', patch: patch };
+  }
+  const cancel = {};
+  if (v.task_id) cancel.task_id = v.task_id;
+  else if (v.schedule_id) cancel.schedule_id = v.schedule_id;
+  else if (v.entity_id) cancel.entity_id = v.entity_id;
+  return cancel;
+}
+
+function renderTimerParams(qt) {
+  const box = document.getElementById('apiTimerBox');
+  if (!box) return;
+  const specs = _timerFieldSpecs(qt);
+  box.innerHTML = '';
+  if (!specs.length) {
+    box.innerHTML = '<div class="hint" style="grid-column:1/-1">该接口无需参数，直接用生成的地址（可选填 API Key）。</div>';
+    generateApiUrl();
+    return;
+  }
+  specs.forEach(function (sp) {
+    const wrap = document.createElement('div');
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:11px;color:var(--text2);margin-bottom:2px';
+    label.textContent = sp.label;
+    let el;
+    if (sp.options) {
+      el = document.createElement('select');
+      sp.options.forEach(function (o) {
+        const opt = document.createElement('option');
+        opt.value = o;
+        opt.textContent = o === '' ? '（不修改）' : o;
+        el.appendChild(opt);
+      });
+      el.value = sp.def;
+      el.onchange = generateApiUrl;
+    } else {
+      el = document.createElement('input');
+      el.type = 'text';
+      el.placeholder = sp.ph || '';
+      el.value = sp.def || '';
+      el.oninput = generateApiUrl;
+    }
+    el.setAttribute('data-name', sp.name);
+    el.style.cssText = 'width:100%;padding:6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box';
+    wrap.appendChild(label);
+    wrap.appendChild(el);
+    box.appendChild(wrap);
+  });
+  generateApiUrl();
+}
+
+function renderTimerApiHint(qt, url, values) {
+  const box = document.getElementById('apiTimerHint');
+  if (!box) return;
+  const isWrite = (qt === 'timer_create' || qt === 'timer_update' || qt === 'timer_cancel');
+  if (!isWrite) {
+    box.innerHTML = '<div class="hint">该接口为 <b>GET</b>，直接用上面的地址即可'
+      + '（需先开启「API 访问」并选中 API Key）。</div>';
+    return;
+  }
+  const body = _timerRequestBody(qt, values);
+  const curl = 'curl -X POST "' + url + '" \\\n'
+    + '  -H "Content-Type: application/json" \\\n'
+    + "  -d '" + JSON.stringify(body, null, 2) + "'";
+  let extra = '';
+  if (qt === 'timer_cancel') {
+    const base = BASE_PATH + '/api/ha_data_store/timer';
+    const k = selectedApiKey ? ('?key=' + encodeURIComponent(selectedApiKey) + '&') : '?';
+    extra = '<div class="hint" style="margin-top:6px">DELETE 等价形式（query 传 id）：'
+      + '<br><code>curl -X DELETE "' + escHtml(base + k + 'id=&lt;任务ID&gt;') + '"</code></div>';
+  }
+  box.innerHTML = '<div style="color:var(--accent);font-weight:600;margin-bottom:4px">调用方式：POST（JSON body）</div>'
+    + '<div class="push-guide-code" style="white-space:pre-wrap">' + escHtml(curl) + '</div>' + extra
+    + '<div class="hint" style="margin-top:6px">写接口需「API 访问」与「数据库修改」两个开关都开启。</div>';
 }
 
 // 初始化时加载路由列表 + 新接口列表 + 填充地址生成器下拉
@@ -4701,6 +4916,7 @@ const MONITOR_SEC_LABELS = {
   virtual: '🔮 虚拟设备', helper: '🧩 辅助元素',   power: '⚡ 用电计量', printer: '🖨️ 打印机',
   media: '🎵 媒体播放列表', recent: '🕘 最近使用设备', metrics: '📊 指标管理',
   automation: '🤖 自动化',
+  timer: '⏱ 定时精灵',
 };
 
 // 给区块标题标注 data-sec（按标题文字匹配，忽略图标/角标/统计数字的差异）
@@ -4893,7 +5109,8 @@ async function loadMonitor() {
       makeCard('recent','🕘 最近使用设备','recentCard') +
       makeCard('metrics','📊 指标管理','metricsCard') +
       '<div class="summary-card c-online" id="mediaCard" data-target="media" title="点击展开下方对应内容" onclick="expandMonitorSection(\'media\')"><div class="num">--</div><div class="lbl">🎵 媒体播放列表</div><div class="card-sub"></div></div>' +
-      '<div class="summary-card c-online" id="automationCard" data-target="automation" title="点击展开下方对应内容" onclick="expandMonitorSection(\'automation\')"><div class="num">--</div><div class="lbl">🤖 自动化</div><div class="card-sub"></div></div>';
+      '<div class="summary-card c-online" id="automationCard" data-target="automation" title="点击展开下方对应内容" onclick="expandMonitorSection(\'automation\')"><div class="num">--</div><div class="lbl">🤖 自动化</div><div class="card-sub"></div></div>' +
+      '<div class="summary-card c-online" id="timerCard" data-target="timer" title="点击展开下方对应内容" onclick="expandMonitorSection(\'timer\')"><div class="num">--</div><div class="lbl">⏱ 定时精灵</div><div class="card-sub"></div></div>';
 
     // 更新 sub-tab 角标
     setSubTabBadge('device', (types.device||{}).count||0);
@@ -5186,6 +5403,10 @@ async function loadMonitor() {
     html += '<h4 class="section-head title-good">🤖 自动化 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="autoMonitorStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="autoMonitorTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
+    // -- 定时精灵（设备倒计时/周期任务；数据取自 /api/ha_data_store/timer）--
+    html += '<h4 class="section-head title-good">⏱ 定时精灵 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="timerStat">加载中...</span></h4>';
+    html += '<div class="section-content collapsed"><div id="timerTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
+
     content.innerHTML = html;
 
     // 绑定 section-head 点击展开/折叠（同时标注 data-sec，供 summary 卡片定位）
@@ -5202,13 +5423,14 @@ async function loadMonitor() {
       });
     });
 
-    // 异步加载桥接/虚拟设备/辅助元素/用电计量/媒体播放列表/自动化数据
+    // 异步加载桥接/虚拟设备/辅助元素/用电计量/媒体播放列表/自动化/定时精灵数据
     loadMonitorBridge();
     loadMonitorVirtual();
     loadMonitorHelper();
     loadMonitorPower();
     loadMonitorMedia();
     loadMonitorAutomation();
+    loadMonitorTimer();
   } catch(e) {
     content.innerHTML = '<div class="empty">请求失败: ' + e + '</div>';
     document.getElementById('pagination').style.display = 'none';
@@ -5560,6 +5782,121 @@ async function loadMonitorAutomation() {
     }
     tbl.innerHTML = html;
   } catch(e) { /* silent */ }
+}
+
+// 「⏱ 定时精灵」监控区块：数据取自 /api/ha_data_store/timer（概览 + 活跃任务）
+// 与 /api/ha_data_store/timer/history（最近历史）；两个接口只受「API 访问」主开关约束，无需 key。
+async function loadMonitorTimer() {
+  try {
+    // 定时接口强制校验 API Key：页面用 getPageKey() 取（URL 的 key 或后端注入的首枚 key）
+    var pageKey = (typeof getPageKey === 'function') ? (getPageKey() || '') : '';
+    var tblEl = document.getElementById('timerTbl');
+    if (!pageKey) {
+      if (tblEl) {
+        tblEl.innerHTML = '<div class="hint" style="padding:6px 0">定时精灵接口需要 API Key：'
+          + '请先在「系统配置 → 🔑 API 访问」创建 Key，再用带 key 的地址打开本页 '
+          + '（或在「API 工具」里生成带 key 的地址）</div>';
+      }
+      return;
+    }
+    var keyQ = 'key=' + encodeURIComponent(pageKey);
+
+    var ov = {};
+    try {
+      var r1 = await fetch('/api/ha_data_store/timer?' + keyQ);
+      var j1 = await r1.json();
+      if (j1 && j1.success) ov = j1;
+    } catch (e1) { /* silent */ }
+
+    var hist = [];
+    var histTotal = 0;
+    try {
+      var r2 = await fetch('/api/ha_data_store/timer/history?limit=20&' + keyQ);
+      var j2 = await r2.json();
+      if (j2 && j2.success) {
+        hist = j2.items || [];
+        histTotal = j2.total || hist.length;
+      }
+    } catch (e2) { /* silent */ }
+
+    var active = ov.active_tasks || 0;
+    var card = document.getElementById('timerCard');
+    if (card) card.querySelector('.num').textContent = active;
+
+    var stat = document.getElementById('timerStat');
+    if (stat) {
+      stat.textContent = '活跃 ' + active + '（定时 ' + (ov.active_timers || 0)
+        + ' · 周期 ' + (ov.active_schedules || 0) + '） · 今日 ' + (ov.today_task || 0)
+        + ' · 成功 ' + (ov.successful_task || 0) + ' / 失败 ' + (ov.failed_task || 0);
+    }
+    syncSummarySub('timer');   // 同步到卡片第三行
+
+    var tbl = document.getElementById('timerTbl');
+    if (!tbl) return;
+
+    var stateMap = {
+      active: '进行中', completed: '已完成', failed: '失败', error: '异常',
+      cancelled: '已取消', expired: '已过期',
+    };
+    var resultMap = {
+      success: '成功', completed: '成功', failed: '失败', cancelled: '取消', unknown: '未知',
+    };
+    var activeItems = [].concat(
+      Array.isArray(ov.timers) ? ov.timers : [],
+      Array.isArray(ov.schedules) ? ov.schedules : []
+    );
+
+    var html = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">'
+      + '<span class="hint">时区 ' + escHtml(ov.time_zone || '-')
+      + ' · 内存任务 ' + (ov.total_tasks || 0) + ' 条'
+      + ' · 增删改与完整历史见「API 工具 → ⏱ 定时精灵」</span></div>';
+
+    if (activeItems.length) {
+      html += '<div class="table-wrap"><table><thead><tr>'
+        + '<th style="width:26%">实体</th><th style="width:8%">类型</th><th style="width:26%">到点动作</th>'
+        + '<th style="width:12%">时长</th><th style="width:20%">结束 / 下次执行</th><th style="width:8%">状态</th>'
+        + '</tr></thead><tbody>';
+      activeItems.forEach(function(t) {
+        var act = (t.action && (t.action.description || t.action.service)) || t.task_action || '';
+        html += '<tr><td>' + escHtml(String(t.entity_name || t.entity_id || '-')) + '</td>'
+          + '<td style="font-size:12px">' + (t.is_recurring ? '周期' : '定时') + '</td>'
+          + '<td style="font-size:12px;color:var(--text2)">' + escHtml(String(act)) + '</td>'
+          + '<td style="font-size:12px">' + escHtml(String(t.duration || '-')) + '</td>'
+          + '<td style="font-size:12px;color:var(--text2)">'
+          + escHtml(String(t.is_recurring ? (t.next_execution || '-') : (t.end_time || '-'))) + '</td>'
+          + '<td><span class="badge badge-online">'
+          + escHtml(stateMap[t.status] || String(t.status || '-')) + '</span></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    } else {
+      html += '<div class="hint" style="padding:6px 0">当前没有正在计时的任务</div>';
+    }
+
+    html += '<div style="margin:12px 0 6px;color:var(--accent);font-weight:600">最近历史'
+      + (histTotal > hist.length
+          ? '（共 ' + histTotal + ' 条，显示最近 ' + hist.length + ' 条）' : '')
+      + '</div>';
+    if (!hist.length) {
+      html += '<div class="empty">暂无历史记录</div>';
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr>'
+        + '<th style="width:24%">实体</th><th style="width:8%">类型</th><th style="width:24%">动作</th>'
+        + '<th style="width:12%">结果</th><th style="width:32%">执行时间</th></tr></thead><tbody>';
+      hist.forEach(function(h) {
+        var res = String(h.execution_result || h.status || '');
+        var ok = (res === 'success' || res === 'completed');
+        html += '<tr><td>' + escHtml(String(h.entity_name || h.entity_id || '-')) + '</td>'
+          + '<td style="font-size:12px">' + escHtml(String(h.task_type || '-')) + '</td>'
+          + '<td style="font-size:12px;color:var(--text2)">' + escHtml(String(h.action_desc || '-')) + '</td>'
+          + '<td><span class="badge ' + (ok ? 'badge-online' : 'badge-offline') + '">'
+          + escHtml(resultMap[res] || res || '-') + '</span></td>'
+          + '<td style="font-size:12px;color:var(--text2)">'
+          + escHtml(String(h.executed_at || h.created_at || '-')) + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    tbl.innerHTML = html;
+  } catch (e) { /* silent */ }
 }
 
 // 从监控页「🤖 自动化」区块跳转到「自动化」选项卡（自动化列表）
@@ -10420,6 +10757,11 @@ function onApiTypeChange() {
   const isExtPath = isExt ? qt.slice('ext:'.length) : '';
   // 实体→网络（push）：value 格式 "push:data:{id}" / "push:control:{id}"，token 即密钥
   const isPush = qt.startsWith('push:');
+  // 定时精灵（timer_*）：静态分组，参数区按查询类型动态渲染
+  const isTimerApi = qt.startsWith('timer_');
+  // 默认隐藏定时精灵参数区；仅 timer_* 分支会重新显示
+  const elTimerRow = document.getElementById('apiTimerRow');
+  if (elTimerRow) elTimerRow.style.display = 'none';
   // 默认隐藏自定义参数区；仅自定义路由分支会重新显示
   document.getElementById('apiCustomParamsRow').style.display = 'none';
   // 默认隐藏实体→网络的调用方式区；仅 push 分支会重新显示
@@ -10601,6 +10943,15 @@ function onApiTypeChange() {
     apiHideAllParamRows();
     document.getElementById('apiCustomParamsRow').style.display = 'block';
     renderExtParams(isExtPath);
+    return;
+  }
+
+  if (isTimerApi) {
+    // 定时精灵：隐藏所有常规输入行，只显示定时专属参数区（按类型动态渲染）
+    apiHideAllParamRows();
+    const timerRow = document.getElementById('apiTimerRow');
+    if (timerRow) timerRow.style.display = 'block';
+    renderTimerParams(qt);
     return;
   }
 
@@ -11533,6 +11884,39 @@ function generateApiUrl() {
       : '';
     document.getElementById('apiUrlOutput').value = url;
     renderPushApiHint(kind, target, url);
+    return;
+  }
+
+  // 定时精灵：读接口 GET /timer[/tasks|/history|/summary]；写接口 POST /timer[/update|/cancel]
+  if (qt.startsWith('timer_')) {
+    const timerBase = BASE_PATH + '/api/ha_data_store/timer';
+    const tValues = _timerValues();
+    let timerUrl = timerBase;
+    if (qt === 'timer_tasks') timerUrl += '/tasks';
+    else if (qt === 'timer_history') timerUrl += '/history';
+    else if (qt === 'timer_entity_tasks') timerUrl += '/entity_tasks';
+    else if (qt === 'timer_entity_daily') timerUrl += '/entity_daily';
+    else if (qt === 'timer_month_dates') timerUrl += '/month_dates';
+    else if (qt === 'timer_summary') timerUrl += '/summary';
+    else if (qt === 'timer_update') timerUrl += '/update';
+    else if (qt === 'timer_cancel') timerUrl += '/cancel';
+    const isTimerWrite = (qt === 'timer_create' || qt === 'timer_update' || qt === 'timer_cancel');
+    if (isTimerWrite) {
+      // 写接口：地址只带 key，参数放在 POST 的 JSON body（调用示例见下方提示区）
+      if (selectedApiKey) timerUrl += '?key=' + encodeURIComponent(selectedApiKey);
+    } else {
+      const qp = [];
+      if (selectedApiKey) qp.push('key=' + encodeURIComponent(selectedApiKey));
+      Object.keys(tValues).forEach(function (k) {
+        const val = tValues[k];
+        if (val !== '' && val !== null && val !== undefined) {
+          qp.push(encodeURIComponent(k) + '=' + encodeURIComponent(val));
+        }
+      });
+      if (qp.length) timerUrl += '?' + qp.join('&');
+    }
+    document.getElementById('apiUrlOutput').value = timerUrl;
+    renderTimerApiHint(qt, timerUrl, tValues);
     return;
   }
 

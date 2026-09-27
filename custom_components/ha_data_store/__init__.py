@@ -4679,6 +4679,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_manager.start()
     hass.data[DOMAIN]["automation_manager"] = automation_manager
 
+    # ── 定时精灵（设备倒计时/周期任务 + 空调窗帘状态恢复；与上面的简单自动化独立并存）──
+    #    持久化直接用本集成 SQLite（timer_tasks 表），不落 JSON 文件。
+    #    单独 try 包裹：它出问题不应拖垮整个集成加载。
+    try:
+        from .timer_elves import TimerElvesCoordinator
+        from .timer_elves_api import async_setup_timer_api
+
+        timer_coordinator = TimerElvesCoordinator(
+            hass,
+            db_path,
+            time_zone=entry.options.get("timezone", DEFAULT_TIMEZONE),
+        )
+        await timer_coordinator.async_setup()
+        hass.data[DOMAIN]["timer_elves"] = timer_coordinator
+        await async_setup_timer_api(hass, db_path, timer_coordinator)
+        _LOGGER.info("[HDS] 定时精灵已启动（db=%s）", os.path.basename(db_path))
+    except Exception:
+        _LOGGER.exception("[HDS] 定时精灵初始化失败（其它模块不受影响）")
+
     # ── 服务：今日家庭状态总结（按需生成） ──
     from homeassistant.helpers import config_validation as cv
     from homeassistant.helpers.service import ServiceCall
@@ -5211,6 +5230,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_manager = hass.data.get(DOMAIN, {}).get("automation_manager")
     if automation_manager:
         automation_manager.stop()
+
+    # 停止定时精灵（取消句柄 + 强制落盘）
+    timer_coordinator = hass.data.get(DOMAIN, {}).get("timer_elves")
+    if timer_coordinator:
+        try:
+            await timer_coordinator.async_unload()
+        except Exception:
+            _LOGGER.exception("[HDS] 定时精灵停止异常")
 
     # 停止用户操作记录收件箱后台搬运（残留数据已落盘 JSON，下次启动自动补迁）
     action_inbox = hass.data.get(DOMAIN, {}).get("action_log_inbox")

@@ -954,6 +954,111 @@ class TodayFamilyStatusSensor(SensorEntity):
         self.async_write_ha_state()
 
 
+class TimerElvesSensor(SensorEntity):
+    """定时精灵传感器（固定实体 ID: sensor.ha_data_store_timer）。
+
+    状态值 = 活跃任务数（一次性定时器 + 周期任务）
+    状态属性：
+      active_tasks      → 活跃任务数（= 状态值）
+      active_timers     → 活跃一次性定时器数
+      active_schedules  → 活跃周期任务数
+      total_tasks       → 内存中任务总数（含历史）
+      current_task      → 当前活动任务数（与 active_tasks 同义，兼容旧字段名）
+      successful_task   → 成功执行数
+      failed_task       → 失败执行数
+      today_task        → 今日任务数
+      all_task_list[]   → 全部任务明细
+      time_zone         → 定时引擎时区
+      updated_at        → 数据刷新时间
+
+    数据源 = hass.data["ha_data_store"]["timer_elves"]（协调器内存，无 IO），
+    由 TIMER_SIGNAL_UPDATE_SENSOR 信号实时推送刷新，另有 30 秒定时兜底。
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "定时精灵"
+    _attr_icon = "mdi:timer-cog-outline"
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_timer_elves"
+        self._attr_device_info = device_info
+        self._attr_native_value = 0
+        self._attr_extra_state_attributes = {}
+
+    def _collect(self) -> dict:
+        """汇总协调器内存状态（纯内存读取，可安全在事件循环内调用）。"""
+        coord = self._hass.data.get(DOMAIN, {}).get("timer_elves")
+        empty = {
+            "active_tasks": 0, "active_timers": 0, "active_schedules": 0,
+            "total_tasks": 0, "current_task": 0, "successful_task": 0,
+            "failed_task": 0, "today_task": 0, "all_task_list": [], "time_zone": "",
+        }
+        if coord is None:
+            return empty
+        try:
+            tasks = coord.tasks
+            timers = sum(
+                1 for td in tasks.values()
+                if not td.get("is_recurring") and td.get("status") == "active"
+            )
+            schedules = sum(
+                1 for td in tasks.values()
+                if td.get("is_recurring") and td.get("status") == "active"
+            )
+            return {
+                "active_tasks": timers + schedules,
+                "active_timers": timers,
+                "active_schedules": schedules,
+                "total_tasks": len(tasks),
+                "current_task": timers + schedules,
+                "successful_task": coord.stats.get("successful_task", 0),
+                "failed_task": coord.stats.get("failed_task", 0),
+                "today_task": coord.stats.get("today_task", 0),
+                "all_task_list": coord.stats.get("all_task_list", []),
+                "time_zone": coord.time_zone,
+            }
+        except Exception:
+            return empty
+
+    async def _async_refresh(self, now=None, payload: dict | None = None):
+        """刷新状态；带 payload（信号推送）时直接采用，避免重复统计。"""
+        data = payload if isinstance(payload, dict) else self._collect()
+        attrs = dict(data)
+        attrs.setdefault("time_zone", self._hass.data.get(DOMAIN, {}).get("timezone", ""))
+        attrs["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._attr_native_value = int(attrs.get("active_tasks") or 0)
+        self._attr_extra_state_attributes = attrs
+        self.async_write_ha_state()
+
+    async def _async_apply_payload(self, payload: dict) -> None:
+        """信号回调入口（payload 由 TIMER_SIGNAL_UPDATE_SENSOR 推送）。
+
+        单独定义此方法是因为 `hass.add_job()` 只接受位置参数，
+        无法用 `add_job(self._async_refresh, payload=...)` 传关键字。
+        """
+        await self._async_refresh(payload=payload)
+
+    async def async_added_to_hass(self) -> None:
+        """订阅协调器的任务变更信号（每次创建/执行/取消都会推送）。"""
+        try:
+            from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
+            from .timer_elves_const import TIMER_SIGNAL_UPDATE_SENSOR
+
+            self.async_on_remove(
+                async_dispatcher_connect(
+                    self._hass,
+                    TIMER_SIGNAL_UPDATE_SENSOR,
+                    # hass.add_job 是线程安全入口：信号可能在非事件循环线程被派发
+                    # （注意 add_job 只接受位置参数，故走专用的 payload 回调入口）
+                    lambda payload: self._hass.add_job(self._async_apply_payload, payload),
+                )
+            )
+        except Exception as e:
+            _LOGGER.warning("[HDS] 定时精灵传感器信号订阅失败: %s", e)
+
+
 class AutomationStatusSensor(SensorEntity):
     """简单自动化 + 上报自动化实体（ha_automation）状态传感器。
 
@@ -1307,16 +1412,18 @@ async def async_setup_entry(hass, entry, async_add_entities):
     cpu_sensor = CpuUsageSensor(hass, device_info)
     mem_sensor = MemoryUsageSensor(hass, device_info)
     disk_sensor = DiskUsageSensor(hass, device_info)
+    timer_elves_sensor = TimerElvesSensor(hass, device_info)
     # 存引用，供按钮/服务触发按需刷新
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
     hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
     hass.data.setdefault(DOMAIN, {})["automation_status_sensor"] = automation_status_sensor
     hass.data.setdefault(DOMAIN, {})["all_entities_sensor"] = all_entities_sensor
+    hass.data.setdefault(DOMAIN, {})["timer_elves_sensor"] = timer_elves_sensor
     entities = [sensor, report_sensor, summary_sensor, user_actions_sensor,
                 automation_status_sensor, db_viewer_url_sensor,
                 helper_summary_sensor, power_all_sensor, whole_usage_sensor,
                 all_entities_sensor,
-                cpu_sensor, mem_sensor, disk_sensor]
+                cpu_sensor, mem_sensor, disk_sensor, timer_elves_sensor]
     # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
     url, attrs = await db_viewer_url_sensor._fetch_url()
     db_viewer_url_sensor._attr_native_value = url
@@ -1338,6 +1445,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
                                 suggested_object_id="ha_data_store_automation")
     except Exception as e:
         _LOGGER.warning("[HDS] 自动化状态传感器实体ID设置失败: %s", e)
+
+    # 定时精灵传感器：强制固定实体 ID 为 sensor.ha_data_store_timer
+    try:
+        reg = er.async_get(hass)
+        new_eid = "sensor.ha_data_store_timer"
+        old_eid = reg.async_get_entity_id("sensor", DOMAIN, timer_elves_sensor.unique_id)
+        if old_eid and old_eid != new_eid:
+            try:
+                reg.async_update_entity(old_eid, new_entity_id=new_eid)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 定时精灵传感器实体重命名失败（%s → %s）: %s", old_eid, new_eid, e)
+        reg.async_get_or_create(domain="sensor", platform=DOMAIN,
+                                unique_id=timer_elves_sensor.unique_id,
+                                suggested_object_id="ha_data_store_timer")
+    except Exception as e:
+        _LOGGER.warning("[HDS] 定时精灵传感器实体ID设置失败: %s", e)
 
     # 数据库浏览器地址传感器：强制固定实体 ID 为 sensor.ha_data_store_db_viewer_url
     try:
@@ -1457,12 +1580,24 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     async_add_entities(entities)
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
+    # 定时精灵：信号推送为主，30 秒轮询兜底（防止信号丢失导致状态滞留）
+    async_track_time_interval(hass, timer_elves_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, report_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, helper_summary_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, power_all_sensor._async_refresh, timedelta(seconds=30))
     async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
     # 全屋用电/用时汇总：每 1 分钟刷新
     async_track_time_interval(hass, whole_usage_sensor._async_refresh, timedelta(seconds=60))
+
+    # 定时精灵：启动后尽快刷一次（协调器建立任务早于本实体订阅信号）
+    async def _first_timer_elves_refresh():
+        try:
+            await asyncio.sleep(3)
+            await timer_elves_sensor._async_refresh()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 定时精灵传感器首次刷新失败: %s", e)
+
+    hass.async_create_task(_first_timer_elves_refresh())
 
     # 注册完成后先刷一次全屋用电/用时汇总（避免初始未知等待 1 分钟）
     async def _first_whole_usage_refresh():
