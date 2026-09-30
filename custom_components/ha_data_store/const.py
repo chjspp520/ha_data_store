@@ -53,9 +53,68 @@ CATEGORY_VACUUM = "vacuum_cleaner"
 ATTR_MODE_FIELDS = "fields"   # 字段快照
 ATTR_MODE_LIST = "list"       # 列表展开
 ATTR_MODE_MULTI = "multi"    # 混合模式：列表展开 + 附加字段
+ATTR_MODE_COMM = "comm"      # 通讯数据：列表展开 + 固定通讯字段列（列名/类型不可改）
 
 # 附加标量字段 JSON 合并列名
 EXTRA_JSON_COLUMN = "extra_json"
+
+# ── 通讯数据采集（comm 模式）──────────────────────────────────────────────
+# 建议的 attr_type_defs.type_name（决定数据表名 attr_comm_records）；
+# 查询 API 默认读写该类型，可通过 type_name 参数覆盖。
+COMM_DEFAULT_TYPE_NAME = "comm_records"
+
+# 通讯数据表类型名设置实体：留空 = 自动探测 attr_type_defs 中 mode=comm 的类型名
+# （优先取数据表已存在者），仅在自动探测不符合预期（如同一库里有多张通讯表）时才需显式指定。
+COMM_TYPE_NAME_ENTITY_ID = "text.ha_data_store_comm_type_name"
+COMM_TYPE_NAME_DEFAULT = ""
+
+# 固定通讯字段定义：(目标列名, 列类型, 中文标签, 是否必填)
+# 所有列在建表时全部创建，field_mapping 只决定采集时从源数据填充哪些列。
+COMM_FIELDS: tuple[tuple[str, str, str, bool], ...] = (
+    ("my_number",    "TEXT",    "我方号码",   False),
+    ("party_number", "TEXT",    "对方号码",   False),
+    ("party_place",  "TEXT",    "对方归属地", False),
+    ("party_name",   "TEXT",    "对方姓名",   False),
+    ("time",         "TEXT",    "通讯时间",   True),
+    ("location",     "TEXT",    "通讯地点",   False),
+    ("msg_type",     "TEXT",    "消息类型",   False),
+    ("channel",      "TEXT",    "数据来源",   False),
+    ("call_type",    "TEXT",    "呼叫类型",   False),
+    ("duration",     "INTEGER", "时长(秒)",   False),
+    ("cost",         "REAL",    "金额(元)",   False),
+    ("traffic_usage", "REAL",   "流量(MB)",   False),
+    ("traffic_type", "TEXT",    "流量类型",   False),
+    ("content",      "TEXT",    "消息内容",   False),
+    ("image_path",   "TEXT",    "图片路径",   False),
+    ("location_coordinate", "TEXT", "我的坐标",   False),
+    ("party_isp",           "TEXT", "对方运营商", False),
+    ("party_coordinate",    "TEXT", "对方坐标",   False),
+)
+
+# 通讯列名白名单（顺序即建表顺序）
+COMM_COLUMNS: tuple[str, ...] = tuple(f[0] for f in COMM_FIELDS)
+
+# 通讯列名 → 列类型
+COMM_COLUMN_TYPES: dict[str, str] = {f[0]: f[1] for f in COMM_FIELDS}
+
+# 通讯列名 → 中文标签
+COMM_COLUMN_LABELS: dict[str, str] = {f[0]: f[2] for f in COMM_FIELDS}
+
+# 必填列（保存配置时校验）
+COMM_REQUIRED_COLUMNS: tuple[str, ...] = tuple(f[0] for f in COMM_FIELDS if f[3])
+
+# 通讯表附加索引：(索引后缀, 列元组)
+COMM_INDEX_DEFS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("time",  ("time",)),
+    ("party", ("party_number", "time")),
+    ("name",  ("party_name", "time")),
+    ("place", ("location", "time")),
+)
+
+
+def is_comm_column(name: str) -> bool:
+    """判断给定列名是否属于通讯固定字段白名单。"""
+    return name in COMM_COLUMN_TYPES
 
 # 采集模式
 COLLECT_MODE_POLL = "poll"
@@ -116,6 +175,18 @@ RECENT_WINDOW_DAYS_MIN = 1
 RECENT_WINDOW_DAYS_MAX = 365
 RECENT_EXCLUDE_SETTING_KEY = "recent_exclude_entities"  # api_settings 中的排除项键（JSON 数组）
 
+# ── 历史今日（传感器 + 时间范围设置实体）──
+# 传感器状态 = 三类数据的记录总数；属性含 comm / device / env 三个节点（各自的汇总与明细）
+TODAY_IN_HISTORY_SENSOR_ID = "sensor.ha_data_store_today_in_history"
+# 时间范围设置实体：写法 `<时间>,<前后分钟>`，如 "01,80"（01:00 前后 80 分钟）、
+# "now,60"（此刻前后 60 分钟）；留空 = 全部数据（不限定时间范围）
+TODAY_IN_HISTORY_RANGE_ENTITY_ID = "text.ha_data_store_today_in_history_set"
+TODAY_IN_HISTORY_RANGE_DEFAULT = ""            # 默认留空 = 不限定
+TODAY_IN_HISTORY_RANGE_EXAMPLE = "now,60"      # 供表单 / 提示展示的示例
+# 排除实体（存 api_settings 键值表，JSON 数组）：被排除的 entity_id 不进入历史今日统计，
+# 同时作用于「历史今日」API（/api/ha_data_store/onthisday）与传感器。
+TODAY_IN_HISTORY_EXCLUDE_SETTING_KEY = "today_in_history_exclude_entities"
+
 # ── 实体→网络（push_targets / control_logs）──
 # 控制总开关在 hass.data 中的键（由 switch.py 的 HaDataStorePushControlSwitch 维护）
 PUSH_CONTROL_SWITCH_KEY = "push_control_enabled"
@@ -123,4 +194,4 @@ PUSH_CONTROL_SWITCH_KEY = "push_control_enabled"
 PUSH_CONTROL_DEFAULT_RATE_LIMIT = 60
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "4.1.0"
+VERSION = "4.15.3"

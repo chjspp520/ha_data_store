@@ -303,11 +303,14 @@
     <button class="btn-accent" onclick="initDbViewer()" style="font-size:12px;padding:6px 12px">🔄 刷新</button>
     <button id="btnBatchDel" class="btn-batch-del hidden" onclick="batchDeleteRows()" title="批量删除选中的数据行">🗑 批量删除</button>
     <button class="btn-accent" onclick="deleteSelectedTable()" style="background:#c0392b;border-color:#c0392b;font-size:12px;padding:6px 12px" title="删除当前选中表（需管理员密码）">🗑 删表</button>
+    <button class="btn-accent" onclick="clearSelectedTable()" style="background:#d35400;border-color:#d35400;font-size:12px;padding:6px 12px" title="清空当前表的全部数据，并让自增 ID 从 1 重新开始（需管理员密码）">🧹 清空表</button>
     <button class="btn-accent" onclick="openCreateTableModal()" style="background:#2ecc71;border-color:#2ecc71;font-size:12px;padding:6px 12px" title="新建自定义数据表">➕ 新建表</button>
     <button class="btn-accent" onclick="openAlterTablePanel()" style="background:#16a085;border-color:#16a085;font-size:12px;padding:6px 12px" title="查看/添加/删除当前表的字段">🧬 字段管理</button>
     <button id="btnVacuum" class="btn-accent" onclick="vacuumDatabase()" style="background:var(--orange);border-color:var(--orange);font-size:12px;padding:6px 12px" title="压缩数据库文件">🗜 压缩</button>
     <button class="btn-accent" onclick="showUnclosedToday()" style="background:#8e44ad;border-color:#8e44ad;font-size:12px;padding:6px 12px" title="查找当日有on_time但没有off_time的记录">⚠ 未关闭记录</button>
     <button class="btn-accent" onclick="showSQLModal()" style="background:#2ecc71;border-color:#2ecc71;font-size:12px;padding:6px 12px" title="执行自定义 SQL 语句">▶ 执行SQL</button>
+    <button class="btn-accent" onclick="openImportPanel()" style="background:#2980b9;border-color:#2980b9;font-size:12px;padding:6px 12px" title="从 CSV / JSON 文件或粘贴文本导入数据到数据表">📥 导入数据</button>
+    <button class="btn-accent" onclick="exportCurrentCsv()" style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px" title="把当前表的数据导出为 CSV">⬇️ 导出CSV</button>
     <span class="colvis-wrap" id="colVisWrap">
       <button id="btnColVis" class="btn-accent" onclick="toggleColVisMenu(event)" style="background:#34495e;border-color:#34495e;font-size:12px;padding:6px 12px" title="勾选需要显示的字段列（按表分别记忆）">👁 显示字段</button>
       <div class="colvis-menu" id="colVisMenu"></div>
@@ -322,6 +325,87 @@
     <button class="btn-green btn-filter" onclick="applyFilters()" title="应用筛选条件">应用筛选</button>
     <button class="btn-filter" onclick="clearFilters()" style="font-size:12px;padding:5px 12px">清除</button>
     <span class="filter-active" id="filterStatus"></span>
+  </div>
+
+  <!-- 📥 数据导入面板 -->
+  <div id="importPanel" style="display:none;margin:12px 0;padding:14px;background:var(--card);border:1px solid var(--accent);border-radius:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h4 style="color:var(--accent);margin:0">📥 导入数据</h4>
+      <button onclick="closeImportPanel()" style="background:transparent;border:none;color:var(--text2);cursor:pointer;font-size:18px;padding:0 4px">✕</button>
+    </div>
+    <div class="hint" style="margin-bottom:10px">支持 CSV / JSON 文件或直接粘贴文本；先解析预览，确认无误后再写入。目标列既可以取数据源里的列，也可以直接填固定值（如 <b>=wechat</b>）。</div>
+
+    <!-- ① 数据源 -->
+    <div style="border-top:1px solid var(--border);padding-top:10px">
+      <div style="color:var(--accent);font-size:13px;font-weight:600;margin-bottom:6px">① 选择数据源</div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+        <button class="btn-accent" onclick="document.getElementById('impFileInput').click()" style="font-size:12px;padding:5px 12px">📄 选择 CSV / JSON 文件</button>
+        <input type="file" id="impFileInput" accept=".csv,.txt,.json,text/csv,application/json" style="display:none" onchange="impLoadFile(this)">
+        <label style="font-size:12px"><input type="checkbox" id="impHasHeader" checked> 首行是表头</label>
+        <label style="font-size:12px"><input type="checkbox" id="impJsonMode"> 按 JSON 解析</label>
+        <span class="info" id="impFileInfo"></span>
+      </div>
+      <textarea id="impText" rows="4" placeholder="或在此粘贴 CSV / JSON 文本…" style="width:100%;box-sizing:border-box;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:12px;font-family:Consolas,monospace"></textarea>
+      <div style="margin-top:6px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <button class="btn-accent" onclick="impReparse()" style="font-size:12px;padding:5px 12px">🔍 解析预览</button>
+        <span class="info" id="impParseInfo"></span>
+      </div>
+      <div id="impPreviewWrap" style="display:none;margin-top:8px">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:4px">数据预览（最多显示 20 行，共 <b id="impTotalRows">0</b> 行）</div>
+        <div class="table-wrap" id="impPreviewTable" style="max-height:260px;overflow:auto"></div>
+      </div>
+    </div>
+
+    <!-- ② 目标表 -->
+    <div id="impStepTable" style="display:none;border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div style="color:var(--accent);font-size:13px;font-weight:600;margin-bottom:6px">② 选择目标表</div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <select id="impTargetTable" onchange="impOnTableChange()" style="min-width:240px"></select>
+        <label style="font-size:12px"><input type="checkbox" id="impCreateTable"> 表不存在时自动建表（按数据推断列类型）</label>
+        <label style="font-size:12px"><input type="checkbox" id="impAddColumns"> 缺少的列自动创建</label>
+        <span class="info" id="impTableInfo"></span>
+      </div>
+    </div>
+
+    <!-- ③ 字段映射 -->
+    <div id="impStepMap" style="display:none;border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div style="color:var(--accent);font-size:13px;font-weight:600;margin-bottom:6px">③ 字段映射（目标列 ← 源列 / 固定值）</div>
+      <div class="hint" style="margin-bottom:6px">输入数据源的列名即取该列的值；填其它内容即固定值（<span style="color:var(--green)">绿色=源列</span>、<span style="color:var(--orange)">橙色=固定值</span>）。<b>留空的目标列不写入</b>。</div>
+      <datalist id="impSrcList"></datalist>
+      <div class="table-wrap" style="max-height:320px;overflow:auto">
+        <table class="field-mapping-table">
+          <thead><tr><th style="width:200px">目标列</th><th>取值（源列 / 固定值）</th><th style="width:120px">类型</th></tr></thead>
+          <tbody id="impMappingBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ④ 写入模式 -->
+    <div id="impStepMode" style="display:none;border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div style="color:var(--accent);font-size:13px;font-weight:600;margin-bottom:6px">④ 写入模式与选项</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;font-size:12px">
+        <label><input type="radio" name="impMode" value="append" checked onchange="impOnModeChange()"> 追加（全部插入新行）</label>
+        <label><input type="radio" name="impMode" value="upsert" onchange="impOnModeChange()"> Upsert（按唯一键更新已存在的行，不存在则插入）</label>
+        <label><input type="checkbox" id="impNormalizeTime" checked> 日期时间规范化</label>
+        <label><input type="checkbox" id="impParseNumber" checked> 数值清洗（¥1,234.5 → 1234.5）</label>
+      </div>
+      <div id="impKeyWrap" style="display:none;margin-top:8px">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:4px">唯一键列（可多选，按组合判重）：</div>
+        <div id="impKeyList" style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px"></div>
+      </div>
+    </div>
+
+    <!-- ⑤ 执行 -->
+    <div id="impStepRun" style="display:none;border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div style="color:var(--accent);font-size:13px;font-weight:600;margin-bottom:6px">⑤ 执行</div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <button class="btn-accent" onclick="impRun(true)" style="font-size:12px;padding:5px 12px">🧪 试运行（不写库）</button>
+        <button class="btn-green" onclick="impRun(false)" style="font-size:12px;padding:5px 12px">▶ 开始导入</button>
+        <button class="btn-accent" onclick="impDownloadTemplate()" style="font-size:12px;padding:5px 12px">⬇️ 下载目标表模板</button>
+        <span id="impProgress" class="info"></span>
+      </div>
+      <div id="impResult" style="margin-top:8px;font-size:12px"></div>
+    </div>
   </div>
 
   <div id="dbContent"></div>
@@ -479,6 +563,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('xiaoai')">💬 小爱对话<span class="sub-tab-badge" id="badge-xiaoai"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('printer')">🖨️ 打印机配置<span class="sub-tab-badge" id="badge-printer"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('recent')">🕘 近期使用设备<span class="sub-tab-badge" id="badge-recent"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('onthisday')">📜 历史今日<span class="sub-tab-badge" id="badge-onthisday"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('metrics')">📊 指标管理<span class="sub-tab-badge" id="badge-metrics"></span></button>
   </div>
 
@@ -542,13 +627,15 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <label><input type="radio" name="attrMode" value="list" onchange="onAttrModeChange()"> 列表展开（实体属性中有数组，每个元素是一条记录）</label>
           <label><input type="radio" name="attrMode" value="fields" onchange="onAttrModeChange()"> 字段快照（提取属性的扁平字段值）</label>
           <label><input type="radio" name="attrMode" value="multi" onchange="onAttrModeChange()"> 混合模式（列表展开 + 附加标量字段）</label>
+          <label><input type="radio" name="attrMode" value="comm" onchange="onAttrModeChange()"> 通讯数据采集（通话/短信/聊天记录，字段固定）</label>
         </div>
         <div class="hint">混合模式：展开数组的同时，额外采集标量字段（如计费标准、同步日期等），每个数组元素行都会包含这些附加字段的值。</div>
+        <div class="hint">通讯数据采集：按数组展开写入固定的 18 个通讯字段（我方号码/对方号码/归属地/姓名/时间/地点/消息类型/来源/呼叫类型/时长/金额/流量/流量类型/内容/图片路径/我的坐标/对方运营商/对方坐标），列名与类型由系统固定，只需把源字段对应到目标列，也可以直接填固定值。流量支持带单位写法（如 <code>1.5GB</code> / <code>512MB</code>），会自动换算为 MB。</div>
       </div>
 
-      <!-- Step 4a: 列表展开配置 -->
+      <!-- Step 4a: 列表展开配置（通讯模式复用本区块的数组路径 / 唯一键字段） -->
       <div class="step" id="attrListConfig" style="display:none">
-        <h4>步骤 4：列表展开配置</h4>
+        <h4><span id="attrListConfigTitle">步骤 4：列表展开配置</span></h4>
         <div class="form-row">
           <div>
             <label>数组路径</label>
@@ -560,22 +647,48 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
             <label>唯一键字段</label>
             <select id="attrKeyField" style="width:180px"><option value="">-- 选择 --</option></select>
           </div>
-          <div>
+          <div id="attrCompareLimitWrap">
             <label>对比最近条数</label>
-            <input type="number" id="attrCompareLimit" value="30" min="1" max="500" style="width:80px">
+            <input type="number" id="attrCompareLimit" value="30" min="1" max="200000" style="width:90px">
           </div>
-          <div>
+          <div id="attrDecimalPlacesWrap">
             <label>小数位数</label>
             <input type="number" id="attrDecimalPlaces" value="2" min="0" max="6" style="width:70px">
           </div>
         </div>
-        <div class="hint">小数位数用于 REAL/INTEGER 类型字段的精度控制（0=取整，-1=不限制）。</div>
-        <h5 style="color: var(--text2); margin: 10px 0 6px;">字段映射（勾选需要提取的字段，可重命名目标列名）</h5>
-        <div class="table-wrap">
-          <table class="field-mapping-table">
-            <thead><tr><th style="width:40px"><input type="checkbox" title="全选/取消" onchange="toggleAllCheckboxes(this,'attrFieldMappingBody','data-field')"><br><small>提取</small></th><th>源字段</th><th>目标列名</th><th>类型</th></tr></thead>
-            <tbody id="attrFieldMappingBody"></tbody>
-          </table>
+        <div class="hint" id="attrDecimalPlacesHint">小数位数用于数值列（REAL/INTEGER）的精度控制：0=取整，-1=不限制；通讯模式下作用于金额 cost 等数值列。</div>
+        <div class="hint" id="attrCompareLimitHint" style="display:none">「对比最近条数」是去重窗口：每次采集会回查最近这么多条历史记录来判断哪些是已存在的（按唯一键字段比对），命中则更新、未命中才插入。通讯数据通常成批同步，且可能重复推送已同步过的历史记录，建议不小于单次同步的最大条数（通讯模式默认 1000）。采集时会自动放大到至少 2 倍本次条数，所以设小也能保证本次数据不重复，但若手机端每批推送量差异很大，请把它设成该最大批量。</div>
+
+        <!-- 普通列表 / 混合模式：自由字段映射 -->
+        <div id="attrFieldMappingWrap">
+          <h5 style="color: var(--text2); margin: 10px 0 6px;">字段映射（勾选需要提取的字段，可重命名目标列名）</h5>
+          <div class="table-wrap">
+            <table class="field-mapping-table">
+              <thead><tr><th style="width:40px"><input type="checkbox" title="全选/取消" onchange="toggleAllCheckboxes(this,'attrFieldMappingBody','data-field')"><br><small>提取</small></th><th>源字段</th><th>目标列名</th><th>类型</th></tr></thead>
+              <tbody id="attrFieldMappingBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 通讯模式：固定字段映射（目标列与类型不可改） -->
+        <div id="attrCommMappingWrap" style="display:none">
+          <h5 style="color: var(--text2); margin: 10px 0 6px;">通讯字段映射（目标列固定，取值方式自由）</h5>
+          <div class="hint" style="margin-bottom:6px;border-left:3px solid var(--orange);padding-left:8px">
+            <b>⚠️ 这里是「类型级」默认映射</b>，<b>只对</b>「没有内置预设、也没有单独配置」的实体生效。
+            <code>*_calls</code> / <code>*_sms</code> / <code>*_traffic</code> 这三类实体会自动套用
+            <b>内置预设</b>；每个实体还可以在「属性提取 → 编辑」的<b>实体表格</b>里点「字段映射 - 编辑」
+            <b>单独调整</b>。<b>那两层都优先于这里</b> —— 所以在这里改，对有预设的实体<b>看不到效果</b>。
+          </div>
+          <div class="hint" style="margin-bottom:6px">每个字段可以<b>选择数组里的字段名</b>，也可以<b>直接填写固定值</b>（如 my_number 填自己的号码、channel 填 wechat）。不在字段列表里的内容会自动按固定值写入；也可加 <b>=</b> 前缀强制指定固定值。输入框边框：<span style="color:var(--green)">绿色=源字段</span>、<span style="color:var(--orange)">橙色=固定值</span>。</div>
+          <div class="hint" style="margin-bottom:6px">「通讯时间」为必填项；留空的列将保持为空。</div>
+          <div class="hint" style="margin-bottom:6px">「时长(秒)」支持 <b>3分53秒</b>、<b>27秒</b>、<b>1小时2分3秒</b>、<b>3:53</b>（分:秒）、<b>233</b>（秒）等写法，采集时自动换算为秒；「金额(元)」自动转为数值。</div>
+          <datalist id="attrCommSrcList"></datalist>
+          <div class="table-wrap">
+            <table class="field-mapping-table">
+              <thead><tr><th style="width:170px">目标列</th><th>源字段 / 固定值</th><th style="width:90px">类型</th></tr></thead>
+              <tbody id="attrCommMappingBody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -650,6 +763,31 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <div class="row" style="margin-top:12px">
           <button class="btn-green" onclick="saveAttrConfig()">保存配置</button>
         </div>
+      </div>
+    </div>
+
+    <!-- 修改已有配置弹窗（纯前端：走通用库接口，无需后端改动） -->
+    <div id="attrEditOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:999" onclick="closeAttrEditModal()"></div>
+    <div id="attrEditModal" class="attr-config" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:16px 20px;z-index:1000;width:90%;max-width:1040px;max-height:88vh;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.6)">
+      <style>
+        #attrEditModal .step { margin-bottom: 0; }
+        #attrEditModal .hint { color: var(--text2); font-size: 11px; margin-top: 6px; line-height: 1.5; }
+        #attrEditModal .step h4 { font-size: 13px; color: var(--accent); margin-bottom: 8px; }
+      </style>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h4 style="color:var(--accent);margin:0">✏️ 修改属性提取配置：<span id="attrEditTypeName" style="font-family:monospace"></span></h4>
+        <div style="display:flex;align-items:center;gap:6px">
+          <button id="attrEditMaxBtn" onclick="toggleAttrEditMax()" title="最大化 / 还原（宽表格看不全时用）"
+                  style="background:transparent;border:1px solid var(--border);color:var(--text2);cursor:pointer;font-size:12px;padding:2px 8px;border-radius:4px">⛶ 最大化</button>
+          <button onclick="closeAttrEditModal()" style="background:transparent;border:none;color:var(--text2);cursor:pointer;font-size:18px;padding:0 4px">✕</button>
+        </div>
+      </div>
+      <div id="attrEditBody" style="overflow:auto;flex:1 1 auto;min-height:140px;padding-right:4px"></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+        <span class="hint" style="margin-right:auto" id="attrEditStatus"></span>
+        <button class="btn-accent" onclick="refreshAttrEditFields()">🔄 重新读取实体字段</button>
+        <button class="btn-green" onclick="saveAttrEdit()">💾 保存修改</button>
+        <button class="btn-accent" onclick="closeAttrEditModal()" style="background:transparent;color:var(--text2)">取消</button>
       </div>
     </div>
   </div>
@@ -1497,6 +1635,53 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 历史今日（排除实体配置） -->
+  <div id="sub-onthisday" class="sub-panel">
+    <div class="section">
+      <h3>📜 历史今日</h3>
+      <div class="hint">
+        「历史今日」传感器（<code>sensor.ha_data_store_today_in_history</code>）与
+        API（<code>/api/ha_data_store/onthisday</code>）的共用配置。<br>
+        时间范围由 HA 实体 <code>text.ha_data_store_today_in_history_set</code> 控制：
+        写法 <code>&lt;时间&gt;,&lt;前后分钟&gt;</code>，如 <code>01,80</code>（01:00 前后 80 分钟）、
+        <code>now,60</code>（此刻前后 60 分钟），<b>留空 = 全部数据</b>。<br>
+        本页的<b>排除实体</b>用于剔除不参与统计的实体，同时作用于传感器与 API 的
+        <b>全部数据源</b>（通讯 / 设备 / 环境）。
+      </div>
+    </div>
+
+    <div class="section">
+      <h4 class="sep-title">排除实体（不参与统计的 entity_id）</h4>
+      <div id="otdExcludeList" style="margin-bottom:8px"></div>
+      <div class="form-row">
+        <div class="full">
+          <label>手动输入（逗号或换行分隔，支持一次粘贴多个）</label>
+          <textarea id="otdExcludeText" rows="2" placeholder="sensor.xxx, switch.yyy"></textarea>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-green" onclick="saveOtdExclude()">💾 保存排除实体</button>
+        <button class="btn-accent" onclick="loadOtdExclude()">🔄 刷新</button>
+        <span class="hint">修改后需点「保存排除实体」才写入数据库（保存后传感器立即刷新）</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h4 class="sep-title">从数据实体中选择（数据源：device_history / env_* / attr_*）</h4>
+      <div class="form-row">
+        <div>
+          <label>搜索（entity_id / 名称 / 房间）</label>
+          <input type="text" id="otdEntitySearch" placeholder="输入关键字过滤"
+                 oninput="renderOtdEntityPicker()">
+        </div>
+        <div style="align-self:flex-end">
+          <button class="btn-accent" onclick="loadOtdEntityPicker()">🔄 重新加载实体</button>
+        </div>
+      </div>
+      <div id="otdEntityPicker" style="max-height:320px;overflow:auto;margin-top:8px"></div>
+    </div>
+  </div>
+
   <!-- 子面板: 指标管理（元数据 + 通用指标引擎 metrics_catalog） -->
   <div id="sub-metrics" class="sub-panel">
     <div class="section">
@@ -2031,6 +2216,46 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="timer_create">创建任务（POST · 定时/周期/空调/窗帘）</option>
           <option value="timer_update">修改任务（POST · 时长/动作/周期）</option>
           <option value="timer_cancel">取消任务（POST / DELETE）</option>
+        </optgroup>
+        <optgroup label="📞 通讯数据查询">
+          <option value="comm:records">通讯记录明细（多条件 / 多号码 / 时间段）</option>
+          <option value="comm:dates">哪些日期有数据（指定月份 / 号码 / 姓名）</option>
+          <option value="comm:stats:year_all">统计分析 · 全部数据按年汇总</option>
+          <option value="comm:stats:month_all">统计分析 · 全部数据按年月汇总</option>
+          <option value="comm:stats:month_in_year">统计分析 · 指定年 → 按月汇总</option>
+          <option value="comm:stats:day_in_month">统计分析 · 指定年月 → 按日汇总</option>
+          <option value="comm:stats:party">统计分析 · 指定号码/姓名 → 按年/年月/年月日汇总</option>
+          <option value="comm:stats">统计分析 · 自定义（任选粒度 year/quarter/month/week/day/hour）</option>
+          <option value="comm:crosstab">交叉汇总（行维度 × 列维度 · 类型 / 地点 / 号码 / 姓名）</option>
+          <option value="comm:compare">周期对比（环比 / 同比 · 日 / 周 / 月 / 季 / 年）</option>
+          <option value="comm:contact">联系人档案（某号码 / 姓名的完整画像）</option>
+          <option value="comm:longest">单次 Top N（最长通话 / 最高金额）</option>
+          <option value="comm:quality">数据质量检查（空值 / 异常值 / 疑似重复）</option>
+          <option value="comm:meta">数据概览（总量 / 时间跨度 / 维度取值清单）</option>
+          <option value="comm:ranking">排行榜（指定年 / 月 / 日 · 按人 / 地点 / 号码）</option>
+          <option value="comm:trend">趋势序列（日 / 月 / 年 / 小时）</option>
+          <option value="comm:summary">汇总统计（总量 / 时长 / 金额 / 分布）</option>
+          <option value="comm:parties">联系人清单（按对方号码聚合）</option>
+          <option value="comm:places">通讯地点清单</option>
+          <option value="comm:heatmap">时段分布（星期 × 小时）</option>
+        </optgroup>
+        <optgroup label="📜 历史上的今日">
+          <option value="comm:onthisday:stats">历年今日 · 汇总（按年 / 年月 / 年月日）</option>
+          <option value="comm:onthisday:ranking">历年今日 · 排行榜（按人 / 地点 / 号码）</option>
+          <option value="comm:onthisday:parties">历年今日 · 联系人汇总（号码 / 姓名 + 条数 / 时长）</option>
+          <option value="comm:onthisday:records">历年今日 · 明细（可指定「此刻」与筛选条件）</option>
+          <option value="comm:onthisday:detail">历年今日 · 详细明细（逐条记录 + 各年汇总对比）</option>
+          <option value="comm:onthisday:crosstab">历年今日 · 交叉汇总（类型 / 地点 / 号码 / 姓名）</option>
+        </optgroup>
+        <optgroup label="📜 历史今日 · 设备 / 环境">
+          <option value="otd:device:stats">设备 · 历年今日汇总（次数 / 运行时长 / 用电）</option>
+          <option value="otd:device:detail">设备 · 历年今日明细（逐条开关记录）</option>
+          <option value="otd:device:ranking">设备 · 历年今日排行（按设备 / 房间）</option>
+          <option value="otd:device:crosstab">设备 · 历年今日交叉汇总（房间 × 设备）</option>
+          <option value="otd:env:stats">环境 · 历年今日汇总（采样数 / 均值 / 极值）</option>
+          <option value="otd:env:detail">环境 · 历年今日明细（逐条采样记录）</option>
+          <option value="otd:env:ranking">环境 · 历年今日排行（按实体 / 房间）</option>
+          <option value="otd:env:crosstab">环境 · 历年今日交叉汇总（房间 × 实体）</option>
         </optgroup>
         <optgroup label="自定义路由" id="apiCustomRoutesGroup">
         </optgroup>
@@ -2594,6 +2819,41 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <label>定时精灵参数</label>
       <div id="apiTimerBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
       <div id="apiTimerHint" style="margin-top:8px"></div>
+    </div>
+    <!-- 通讯数据查询参数区（按 comm:* 查询类型动态渲染） -->
+    <div id="apiCommRow" style="display:none">
+      <label>通讯数据查询参数（留空表示不限制）</label>
+      <div id="apiCommParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
+      <div id="apiCommHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
+      <!-- 通讯字段回填（归属地 / 运营商 / 坐标）：数据来自本地 phone2region.zdb + city_coordinates.json -->
+      <div style="margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2)">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="btn-accent" onclick="runCommBackfill(false)"
+                  style="background:#16a085;border-color:#16a085;font-size:12px;padding:6px 12px"
+                  title="用本地归属地库与城市坐标表，补全「对方归属地 / 对方运营商 / 对方坐标 / 我的坐标」的空值；不覆盖已有内容、不联网">📇 自动填写</button>
+          <button class="btn-accent" onclick="runCommBackfill(true)"
+                  style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px"
+                  title="只统计会补多少条，不写入数据库">🧪 预览</button>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="checkbox" id="commBackfillOverwrite"> 覆盖已有值
+          </label>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px">
+            最多处理
+            <input type="number" id="commBackfillLimit" min="0" step="100" value="0"
+                   style="width:80px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px">
+            行（0 = 全部）
+          </label>
+          <button class="btn-accent" onclick="loadCommBackfillStatus()"
+                  style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px">🔄 刷新状态</button>
+        </div>
+        <div id="commBackfillStatus" style="margin-top:6px;font-size:12px;color:var(--text2)">选择「通讯数据查询」后自动读取库状态…</div>
+      </div>
+    </div>
+    <!-- 历史今日（设备 / 环境）参数区 -->
+    <div id="apiOtdRow" style="display:none">
+      <label>历史今日参数（留空表示不限制）</label>
+      <div id="apiOtdParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
+      <div id="apiOtdHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
     </div>
   </div>
 
@@ -3193,6 +3453,31 @@ async function deleteSelectedTable() {
       showToast('删除失败: ' + json.error, false);
     }
   } catch(e) { showToast('请求失败', false); }
+}
+
+// 清空当前表的全部数据，并让自增 ID 从 1 重新开始（需管理员密码）
+async function clearSelectedTable() {
+  const table = document.getElementById('tableSelect').value;
+  if (!table) { showToast('请先选择要清空的表', false); return; }
+  const pw = adminPw || prompt('⚠️ 将删除表「' + table + '」的全部数据，并让自增 ID 从 1 重新开始。\n此操作不可撤销！请输入管理员密码：');
+  if (!pw) return;
+  adminPw = pw;
+  if (!confirm('再次确认：确定清空表「' + table + '」的全部数据？')) return;
+  try {
+    const resp = await fetch('/api/ha_data_store/clear_table', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table: table, admin_password: pw }),
+    });
+    const json = await resp.json();
+    if (json.success) {
+      showToast(json.message + '（如需回收磁盘空间，可点「🗜 压缩」）', true);
+      loadTable(1);
+      initDbViewer();
+    } else {
+      showToast('清空失败: ' + json.error, false);
+    }
+  } catch (e) { showToast('请求失败', false); }
 }
 
 async function showUnclosedToday() {
@@ -3815,6 +4100,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof loadMediaBadge === 'function') loadMediaBadge();
   // 「🕘 近期使用设备」角标：显示排除项数量（负值），无需点开子面板
   if (typeof loadRecentBadge === 'function') loadRecentBadge();
+  if (typeof loadOtdBadge === 'function') loadOtdBadge();
   // 「📊 指标管理」角标：显示指标总数，无需点开子面板
   if (typeof loadMetricsBadge === 'function') loadMetricsBadge();
 });
@@ -3937,6 +4223,502 @@ async function sqlLoadPage(page) {
   } catch(e) {
     statusEl.textContent = '❌ 请求异常: ' + e;
   }
+}
+
+// ==============================
+//  📥 数据导入 / 导出 CSV
+// ==============================
+const IMPORT_PARSE_API = '/api/ha_data_store/import/parse';
+const IMPORT_API = '/api/ha_data_store/import';
+const IMPORT_TEMPLATE_API = '/api/ha_data_store/import/template';
+const EXPORT_CSV_API = '/api/ha_data_store/export/csv';
+// 单次提交的文本片大小（字符数）。大文本按行切片后分多次提交，避免超过 HA 的
+// 请求体上限（约 16 MB）；每片都会拼上表头，后端可独立解析，无需会话状态。
+const IMP_CHUNK_CHARS = 2 * 1024 * 1024;
+
+let impParsed = null;          // {columns, preview, total_rows, chunks, format, has_header}
+let impTargetCols = [];        // [{name, type}]
+
+// 把 CSV 文本按行切成若干片；「首行是表头」时每片自带表头，引号内的跨行字段不会被切断
+function impSplitCsvText(text, hasHeader) {
+  if (text.length <= IMP_CHUNK_CHARS) return [text];
+  const lines = text.split('\n');
+  if (lines.length < 2) return [text];
+
+  const header = (hasHeader && lines.length) ? lines[0] : '';
+  const startIndex = header ? 1 : 0;
+  const headerChars = header ? header.length + 1 : 0;
+  const chunks = [];
+  let buffer = [];
+  let chars = headerChars;
+  let inQuote = false;
+
+  const flush = function () {
+    if (!buffer.length) return;
+    chunks.push(header ? header + '\n' + buffer.join('\n') + '\n' : buffer.join('\n') + '\n');
+    buffer = [];
+    chars = headerChars;
+  };
+
+  for (let i = startIndex; i < lines.length; i++) {
+    const line = lines[i];
+    buffer.push(line);
+    chars += line.length + 1;
+    let odd = false;
+    for (let k = 0; k < line.length; k++) {
+      if (line.charCodeAt(k) === 34) odd = !odd;   // 34 = "
+    }
+    if (odd) inQuote = !inQuote;
+    if (!inQuote && chars >= IMP_CHUNK_CHARS) flush();
+  }
+  flush();
+  return chunks.length ? chunks : [text];
+}
+
+// 通用取值判定：命中候选字段名 → 源列；否则 → 固定值（'=' 前缀可强制固定值）
+function resolveMapValue(raw, fields) {
+  const text = (raw || '').trim();
+  if (!text) return { src: '', kind: 'empty' };
+  if (text.startsWith('=')) return { src: text, kind: 'fixed' };
+  const list = fields || [];
+  if (list.indexOf(text) >= 0) return { src: text, kind: 'field' };
+  return { src: '=' + text, kind: 'fixed' };
+}
+
+function openImportPanel() {
+  document.getElementById('importPanel').style.display = 'block';
+  // 直接展开全部步骤，便于一眼看到「字段映射」在哪；映射内容在解析数据后自动填充
+  ['impStepTable', 'impStepMap', 'impStepMode', 'impStepRun'].forEach(function (id) {
+    document.getElementById(id).style.display = 'block';
+  });
+  impFillTableSelect();
+  impRenderMapping();
+  document.getElementById('importPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeImportPanel() {
+  document.getElementById('importPanel').style.display = 'none';
+}
+
+function impFillTableSelect() {
+  const sel = document.getElementById('impTargetTable');
+  if (!sel) return;
+  const keep = sel.value;
+  let html = '<option value="">-- 选择数据表 --</option>';
+  // 导入目标可以是任意业务表，这里只排除 SQLite 系统表
+  (typeof allTables !== 'undefined' && allTables ? allTables : []).forEach(function (t) {
+    if (/^sqlite_/i.test(t)) return;
+    html += '<option value="' + escAttr(t) + '">' + escHtml(t) + '</option>';
+  });
+  sel.innerHTML = html;
+  const dbSel = document.getElementById('tableSelect');
+  const prefer = keep || (dbSel ? dbSel.value : '');
+  if (prefer) sel.value = prefer;
+  impOnTableChange();
+}
+
+function impLoadFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function (e) {
+    const buf = e.target.result;
+    let text = '';
+    try {
+      text = new TextDecoder('utf-8').decode(buf);
+      // Excel 导出的 CSV 常是 GBK：出现替换字符时改用 GBK 解码
+      const bad = (text.match(/\uFFFD/g) || []).length;
+      if (bad > 0) {
+        try {
+          const alt = new TextDecoder('gbk').decode(buf);
+          if ((alt.match(/\uFFFD/g) || []).length < bad) text = alt;
+        } catch (err) { /* 浏览器不支持 gbk 时保持 utf-8 */ }
+      }
+    } catch (err) {
+      showToast('文件读取失败', false);
+      return;
+    }
+    document.getElementById('impText').value = text;
+    document.getElementById('impFileInfo').textContent =
+      file.name + '（' + (file.size / 1024).toFixed(1) + ' KB）';
+    const isJson = /\.json$/i.test(file.name);
+    document.getElementById('impJsonMode').checked = isJson;
+    document.getElementById('impHasHeader').checked = !isJson;
+    impReparse();
+  };
+  reader.readAsArrayBuffer(file);
+  input.value = '';
+}
+
+async function impReparse() {
+  const text = document.getElementById('impText').value;
+  if (!text.trim()) { showToast('请先选择文件或粘贴数据内容', false); return; }
+  const hasHeader = document.getElementById('impHasHeader').checked;
+  const jsonMode = document.getElementById('impJsonMode').checked;
+  const format = jsonMode ? 'json' : 'auto';
+  const info = document.getElementById('impParseInfo');
+
+  // JSON 无法按行切片（需整体解析）；CSV 切片后每片自带表头
+  const chunks = jsonMode ? [text] : impSplitCsvText(text, hasHeader);
+
+  let columns = null;
+  let total = 0;
+  let preview = [];
+  for (let i = 0; i < chunks.length; i++) {
+    info.textContent = '解析中 ' + (i + 1) + ' / ' + chunks.length + ' …';
+    let json = null;
+    try {
+      const resp = await fetch(IMPORT_PARSE_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: chunks[i], format: format, has_header: hasHeader }),
+      });
+      json = await resp.json();
+    } catch (err) {
+      info.textContent = '';
+      showToast('解析请求失败', false);
+      return;
+    }
+    if (!json.success) {
+      info.textContent = '';
+      showToast('解析失败：' + (json.error || '未知错误'), false);
+      return;
+    }
+    if (!columns) columns = json.columns;
+    total += json.total_rows || 0;
+    if (preview.length < 20) {
+      preview = preview.concat(json.preview || []).slice(0, 20);
+    }
+  }
+
+  impParsed = {
+    columns: columns,
+    preview: preview,
+    total_rows: total,
+    chunks: chunks,
+    format: format,
+    has_header: hasHeader,
+  };
+  info.textContent = '识别 ' + columns.length + ' 列 / ' + total + ' 行'
+    + (chunks.length > 1 ? '（分 ' + chunks.length + ' 次提交）' : '');
+  impRenderPreview();
+  ['impStepTable', 'impStepMap', 'impStepMode', 'impStepRun'].forEach(function (id) {
+    document.getElementById(id).style.display = 'block';
+  });
+  impFillTableSelect();
+}
+
+function impRenderPreview() {
+  const wrap = document.getElementById('impPreviewWrap');
+  const box = document.getElementById('impPreviewTable');
+  if (!impParsed) { wrap.style.display = 'none'; return; }
+  document.getElementById('impTotalRows').textContent = impParsed.total_rows;
+  let html = '<table class="field-mapping-table"><thead><tr><th style="width:36px">#</th>';
+  impParsed.columns.forEach(function (c) { html += '<th>' + escHtml(c) + '</th>'; });
+  html += '</tr></thead><tbody>';
+  (impParsed.preview || []).forEach(function (row, i) {
+    html += '<tr><td style="color:var(--text2)">' + (i + 1) + '</td>';
+    impParsed.columns.forEach(function (_, ci) {
+      const v = row[ci];
+      html += '<td>' + escHtml(v == null ? '' : String(v)) + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+  wrap.style.display = 'block';
+}
+
+function impOnTableChange() {
+  const table = document.getElementById('impTargetTable').value;
+  const info = document.getElementById('impTableInfo');
+  impTargetCols = [];
+  if (!table) {
+    info.textContent = '';
+    impRenderMapping();
+    return;
+  }
+  info.textContent = '读取列结构…';
+  fetch('/api/ha_data_store/table_columns?table=' + encodeURIComponent(table))
+    .then(function (r) { return r.json(); })
+    .then(function (json) {
+      if (!json.success) {
+        info.textContent = '';
+        showToast('读取列结构失败：' + (json.error || ''), false);
+        return;
+      }
+      impTargetCols = (json.data || []).filter(function (c) { return c.name !== '_rowid'; });
+      info.textContent = impTargetCols.length
+        ? impTargetCols.length + ' 个目标列'
+        : '表不存在或没有列（勾选「自动建表」后按数据源列名创建）';
+      impRenderMapping();
+    })
+    .catch(function () { info.textContent = ''; });
+}
+
+function impRenderMapping() {
+  const tbody = document.getElementById('impMappingBody');
+  if (!tbody) return;
+  const srcCols = (impParsed && impParsed.columns) ? impParsed.columns : [];
+  const dl = document.getElementById('impSrcList');
+  if (dl) {
+    dl.innerHTML = srcCols.map(function (c) {
+      return '<option value="' + escAttr(c) + '"></option>';
+    }).join('');
+  }
+
+  let targets = impTargetCols.map(function (c) { return { name: c.name, type: c.type }; });
+  if (!targets.length && srcCols.length) {
+    // 目标表还没有列：以数据源列名作为目标列
+    targets = srcCols.map(function (c) { return { name: c, type: '自动推断' }; });
+  }
+
+  const inputStyle = 'width:100%;background:var(--card);color:var(--text);'
+    + 'border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;box-sizing:border-box';
+  let html = '';
+  targets.forEach(function (t) {
+    const picked = srcCols.indexOf(t.name) >= 0 ? t.name : '';
+    html += '<tr>';
+    html += '<td>' + escHtml(t.name)
+      + (t.type ? ' <span style="color:var(--text2);font-size:11px">' + escHtml(t.type) + '</span>' : '')
+      + '</td>';
+    html += '<td><input type="text" list="impSrcList" data-imp-col="' + escAttr(t.name) + '" '
+      + 'value="' + escAttr(picked) + '" placeholder="源列名，或直接填固定值" '
+      + 'oninput="impSrcInputChanged(this)" style="' + inputStyle + '"></td>';
+    html += '<td style="color:var(--text2);font-size:11px">' + escHtml(t.type || '') + '</td>';
+    html += '</tr>';
+  });
+  tbody.innerHTML = html
+    || '<tr><td colspan="3" style="color:var(--text2)">请先解析数据源并选择目标表</td></tr>';
+  tbody.querySelectorAll('input[data-imp-col]').forEach(function (inp) { impSrcInputChanged(inp); });
+  impRenderKeyList();
+}
+
+function impSrcInputChanged(inp) {
+  const info = resolveMapValue(inp.value, (impParsed && impParsed.columns) || []);
+  if (info.kind === 'field') {
+    inp.style.borderColor = 'var(--green)';
+    inp.title = '数据源列：' + inp.value.trim();
+  } else if (info.kind === 'fixed') {
+    inp.style.borderColor = 'var(--orange)';
+    inp.title = '固定值：' + info.src.slice(1);
+  } else {
+    inp.style.borderColor = 'var(--border)';
+    inp.title = '';
+  }
+}
+
+function impCurrentMode() {
+  const el = document.querySelector('input[name="impMode"]:checked');
+  return el ? el.value : 'append';
+}
+
+function impOnModeChange() {
+  const wrap = document.getElementById('impKeyWrap');
+  if (wrap) wrap.style.display = (impCurrentMode() === 'upsert') ? 'block' : 'none';
+  impRenderKeyList();
+}
+
+function impRenderKeyList() {
+  const box = document.getElementById('impKeyList');
+  if (!box) return;
+  if (impCurrentMode() !== 'upsert') { box.innerHTML = ''; return; }
+  const checked = {};
+  box.querySelectorAll('input[data-imp-key]:checked').forEach(function (cb) {
+    checked[cb.getAttribute('data-imp-key')] = true;
+  });
+  const cols = impCollectMapping().targets;
+  let html = '';
+  cols.forEach(function (c) {
+    html += '<label><input type="checkbox" data-imp-key="' + escAttr(c) + '"'
+      + (checked[c] ? ' checked' : '') + '> ' + escHtml(c) + '</label>';
+  });
+  box.innerHTML = html || '<span style="color:var(--text2)">请先完成字段映射</span>';
+}
+
+function impCollectMapping() {
+  const tbody = document.getElementById('impMappingBody');
+  const mapping = {};
+  const used = {};
+  const targets = [];
+  let duplicate = '';
+  if (!tbody) return { mapping: mapping, duplicate: duplicate, targets: targets };
+  const srcCols = (impParsed && impParsed.columns) ? impParsed.columns : [];
+  tbody.querySelectorAll('input[data-imp-col]').forEach(function (inp) {
+    const col = inp.getAttribute('data-imp-col');
+    const info = resolveMapValue(inp.value, srcCols);
+    if (!info.src) return;
+    if (used[info.src]) {
+      if (!duplicate) duplicate = info.src.charAt(0) === '=' ? info.src.slice(1) : info.src;
+      return;
+    }
+    used[info.src] = true;
+    mapping[info.src] = col;
+    targets.push(col);
+  });
+  return { mapping: mapping, duplicate: duplicate, targets: targets };
+}
+
+async function impRun(dryRun) {
+  if (!impParsed) { showToast('请先解析数据源', false); return; }
+  const table = document.getElementById('impTargetTable').value;
+  if (!table) { showToast('请选择目标表', false); return; }
+  const mode = impCurrentMode();
+  const collected = impCollectMapping();
+  if (collected.duplicate) {
+    showToast('取值「' + collected.duplicate + '」被多个目标列共用，请为每列填写不同的源列或固定值', false);
+    return;
+  }
+  if (!collected.targets.length) { showToast('请至少映射一个字段', false); return; }
+
+  const keyColumns = [];
+  if (mode === 'upsert') {
+    document.querySelectorAll('#impKeyList input[data-imp-key]:checked').forEach(function (cb) {
+      keyColumns.push(cb.getAttribute('data-imp-key'));
+    });
+    if (!keyColumns.length) { showToast('Upsert 模式请勾选唯一键列', false); return; }
+  }
+
+  const base = {
+    table: table,
+    mode: mode,
+    mapping: collected.mapping,
+    key_columns: keyColumns,
+    options: {
+      normalize_time: document.getElementById('impNormalizeTime').checked,
+      parse_number: document.getElementById('impParseNumber').checked,
+    },
+    format: impParsed.format,
+    has_header: impParsed.has_header,
+    dry_run: !!dryRun,
+    create_table: document.getElementById('impCreateTable').checked,
+    add_columns: document.getElementById('impAddColumns').checked,
+  };
+
+  if (!dryRun) {
+    const msg = '确定把 ' + impParsed.total_rows + ' 行数据导入表「' + table + '」？\n'
+      + '写入模式：' + (mode === 'upsert' ? 'Upsert（唯一键：' + keyColumns.join(' + ') + '）' : '追加')
+      + '\n自动建表：' + (base.create_table ? '是' : '否')
+      + '\n自动补列：' + (base.add_columns ? '是' : '否');
+    if (!confirm(msg)) return;
+  }
+  await impSend(base, impParsed.chunks, dryRun);
+}
+
+async function impSend(base, chunks, dryRun) {
+  const progress = document.getElementById('impProgress');
+  const resultBox = document.getElementById('impResult');
+  const total = (impParsed && impParsed.total_rows) || 0;
+  const startedAt = Date.now();
+  const summary = {
+    inserted: 0, updated: 0, failed: 0, errors: [],
+    created_table: false, created_columns: [], added_columns: [],
+  };
+  resultBox.innerHTML = '';
+  let rowOffset = 0;   // 已处理行数偏移，用于把分片的行号还原成整体行号
+
+  for (let i = 0; i < chunks.length; i++) {
+    progress.textContent = (dryRun ? '试运行中 ' : '导入中 ')
+      + (i + 1) + ' / ' + chunks.length + ' 次提交（共约 ' + total + ' 行）…';
+    let json = null;
+    try {
+      const resp = await fetch(IMPORT_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({}, base, { text: chunks[i] })),
+      });
+      json = await resp.json();
+    } catch (err) {
+      progress.textContent = '';
+      showToast('请求失败（第 ' + (i + 1) + ' 次提交）', false);
+      return;
+    }
+    if (!json.success) {
+      progress.textContent = '';
+      showToast('导入失败：' + (json.error || '未知错误'), false);
+      impRenderResult(dryRun, summary, total, Date.now() - startedAt);
+      return;
+    }
+    summary.inserted += json.inserted || 0;
+    summary.updated += json.updated || 0;
+    summary.failed += json.failed || 0;
+    (json.errors || []).forEach(function (e) {
+      if (summary.errors.length < 50) {
+        summary.errors.push({ row: rowOffset + (e.row || 0), reason: e.reason });
+      }
+    });
+    rowOffset += json.total_rows || 0;
+    if (json.created_table) {
+      summary.created_table = true;
+      summary.created_columns = json.created_columns || [];
+      base.create_table = false;   // 表已建好，后续分片无需再建
+    }
+    if (json.added_columns && json.added_columns.length) {
+      summary.added_columns = json.added_columns;
+      base.add_columns = false;
+    }
+  }
+
+  progress.textContent = '';
+  impRenderResult(dryRun, summary, rowOffset || total, Date.now() - startedAt);
+  if (!dryRun) {
+    if (typeof initDbViewer === 'function') initDbViewer();
+    if (typeof loadTable === 'function') loadTable(typeof currentPage === 'number' ? currentPage : 1);
+  }
+}
+
+function impRenderResult(dryRun, s, total, elapsedMs) {
+  const box = document.getElementById('impResult');
+  let html = '<div style="padding:8px 10px;background:var(--input-bg);border-radius:6px">';
+  html += '<b>' + (dryRun ? '🧪 试运行结果（未写入数据库）' : '✅ 导入完成') + '</b><br>';
+  html += '数据行：' + total;
+  html += '　新增：<span style="color:var(--green)">' + s.inserted + '</span>';
+  html += '　更新：<span style="color:var(--accent)">' + s.updated + '</span>';
+  if (s.failed) html += '　失败：<span style="color:#e74c3c">' + s.failed + '</span>';
+  if (elapsedMs) html += '　耗时：' + (elapsedMs / 1000).toFixed(1) + 's';
+  html += '</div>';
+  if (s.created_table) {
+    html += '<div style="margin-top:6px;color:var(--orange)">' + (dryRun ? '将创建表，列：' : '已创建表，列：')
+      + s.created_columns.map(function (c) { return escHtml(c.column + '(' + c.type + ')'); }).join('、')
+      + '</div>';
+  }
+  if (s.added_columns && s.added_columns.length) {
+    html += '<div style="margin-top:4px;color:var(--orange)">' + (dryRun ? '将新增列：' : '已新增列：')
+      + s.added_columns.map(function (c) { return escHtml(c.column + '(' + c.type + ')'); }).join('、')
+      + '</div>';
+  }
+  if (s.errors && s.errors.length) {
+    html += '<div style="margin-top:6px;color:#e74c3c">错误明细（最多 50 条，行号为数据源中的行序）：</div>';
+    html += '<div class="table-wrap" style="max-height:180px;overflow:auto">'
+      + '<table class="field-mapping-table"><thead><tr><th style="width:80px">行号</th><th>原因</th></tr></thead><tbody>';
+    s.errors.forEach(function (e) {
+      html += '<tr><td>' + escHtml(String(e.row)) + '</td><td>' + escHtml(e.reason || '') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+  box.innerHTML = html;
+}
+
+function impDownloadUrl(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function impDownloadTemplate() {
+  const table = document.getElementById('impTargetTable').value;
+  if (!table) { showToast('请先选择目标表', false); return; }
+  impDownloadUrl(IMPORT_TEMPLATE_API + '?table=' + encodeURIComponent(table), 'template_' + table + '.csv');
+}
+
+function exportCurrentCsv() {
+  const sel = document.getElementById('tableSelect');
+  const table = sel ? sel.value : '';
+  if (!table) { showToast('请先在数据浏览中选中要导出的表', false); return; }
+  impDownloadUrl(EXPORT_CSV_API + '?table=' + encodeURIComponent(table), table + '.csv');
 }
 
 async function initDbViewer() {
@@ -6300,6 +7082,8 @@ async function addEnvEntities() {
 const ATTR_STATE_API = '/api/ha_data_store/entity_state';
 const ATTR_TYPES_API = '/api/ha_data_store/attr_types';
 const ATTR_CONFIG_API = '/api/ha_data_store/attr_config';
+// 实体配置 upsert（EntityConfigView）：新增「某实体挂到某类型」用它，不需要 field_mapping
+const ATTR_ENTITY_CONFIG_API = '/api/ha_data_store/config';
 let attrEntityState = null;
 let attrCurrentMode = '';
 
@@ -6426,6 +7210,131 @@ function renderRecentEntityPicker() {
   }).join('');
 }
 
+// ==============================
+//  历史今日：排除实体（同时作用于 /onthisday API 与传感器）
+// ==============================
+const OTD_EXCLUDE_API = '/api/ha_data_store/onthisday/exclude';
+const OTD_ENTITIES_API = '/api/ha_data_store/onthisday/entities';
+let otdExclude = [];         // 已保存的排除项（待保存的改动保存在输入框中）
+let otdEntRows = [];         // 候选实体 [{entity_id,name,room,table}]
+let otdEntLoaded = false;
+
+// 页面加载时先取一次数量，让「📜 历史今日」角标在未点开该子面板时也显示（-N）
+async function loadOtdBadge() {
+  try {
+    const resp = await fetch(OTD_EXCLUDE_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    setSubTabBadge('onthisday', -((json.exclude || []).length));
+  } catch (e) { /* 忽略：角标不阻断页面 */ }
+}
+
+async function loadOtdExclude() {
+  try {
+    const resp = await fetch(OTD_EXCLUDE_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    otdExclude = (json.exclude || []).slice();
+  } catch (e) {
+    otdExclude = [];
+  }
+  document.getElementById('otdExcludeText').value = otdExclude.join(', ');
+  renderOtdExcludeList();
+  setSubTabBadge('onthisday', -otdExclude.length);
+  if (!otdEntLoaded) { loadOtdEntityPicker(); } else { renderOtdEntityPicker(); }
+}
+
+function renderOtdExcludeList() {
+  const box = document.getElementById('otdExcludeList');
+  if (!otdExclude.length) {
+    box.innerHTML = '<div class="hint">（暂无排除实体）</div>';
+    return;
+  }
+  box.innerHTML = otdExclude.map(e =>
+    '<span style="display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;padding:3px 8px;'
+    + 'border:1px solid var(--border);border-radius:12px;background:var(--bg2)">'
+    + '<code>' + escHtml(e) + '</code>'
+    + '<a href="javascript:void(0)" onclick="removeOtdExclude(\'' + escAttr(e) + '\')" '
+    + 'style="color:var(--accent);text-decoration:none">✕</a></span>').join('');
+}
+
+function addOtdExclude(eid) {
+  if (!otdExclude.includes(eid)) otdExclude.push(eid);
+  syncOtdExcludeInput();
+}
+
+function removeOtdExclude(eid) {
+  otdExclude = otdExclude.filter(x => x !== eid);
+  syncOtdExcludeInput();
+}
+
+function syncOtdExcludeInput() {
+  document.getElementById('otdExcludeText').value = otdExclude.join(', ');
+  renderOtdExcludeList();
+  setSubTabBadge('onthisday', -otdExclude.length);
+  renderOtdEntityPicker();
+}
+
+async function saveOtdExclude() {
+  const raw = document.getElementById('otdExcludeText').value || '';
+  const list = raw.replace(/，/g, ',').split(/[\n,]/).map(s => s.trim()).filter(s => s);
+  try {
+    const resp = await fetch(OTD_EXCLUDE_API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exclude: list }),
+    });
+    const json = await resp.json();
+    if (!json.success) { showToast('保存失败: ' + (json.error || ''), false); return; }
+    otdExclude = (json.exclude || []).slice();
+    syncOtdExcludeInput();
+    showToast('排除实体已保存（' + otdExclude.length + ' 个），传感器已刷新', true);
+  } catch (e) {
+    showToast('保存失败: ' + e, false);
+  }
+}
+
+async function loadOtdEntityPicker() {
+  const box = document.getElementById('otdEntityPicker');
+  box.innerHTML = '加载中...';
+  try {
+    const resp = await fetch(OTD_ENTITIES_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    otdEntRows = json.rows || [];
+    otdEntLoaded = true;
+  } catch (e) {
+    otdEntRows = [];
+    otdEntLoaded = true;
+    box.innerHTML = '加载失败: ' + e;
+    return;
+  }
+  renderOtdEntityPicker();
+}
+
+function renderOtdEntityPicker() {
+  const box = document.getElementById('otdEntityPicker');
+  const kw = (document.getElementById('otdEntitySearch').value || '').trim().toLowerCase();
+  const rows = otdEntRows.filter(r => {
+    if (!kw) return true;
+    return (r.entity_id || '').toLowerCase().includes(kw)
+      || (r.name || '').toLowerCase().includes(kw)
+      || (r.room || '').toLowerCase().includes(kw)
+      || (r.table || '').toLowerCase().includes(kw);
+  });
+  if (!rows.length) { box.innerHTML = '<div class="hint">没有匹配的实体</div>'; return; }
+  box.innerHTML = rows.map(r => {
+    const excluded = otdExclude.includes(r.entity_id);
+    return '<div style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid var(--border)">'
+      + '<code style="min-width:280px">' + escHtml(r.entity_id) + '</code>'
+      + '<span style="flex:1;color:var(--text2)">' + escHtml(r.name || '(未命名)')
+      + (r.room ? ' · ' + escHtml(r.room) : '')
+      + (r.table ? ' <span class="hint">[' + escHtml(r.table) + ']</span>' : '') + '</span>'
+      + (excluded
+        ? '<button class="btn-accent" onclick="removeOtdExclude(\'' + escAttr(r.entity_id) + '\')">✔ 已排除（取消）</button>'
+        : '<button class="btn-green" onclick="addOtdExclude(\'' + escAttr(r.entity_id) + '\')">➕ 排除</button>')
+      + '</div>';
+  }).join('');
+}
+
 function switchSubTab(name) {
   document.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
@@ -6442,6 +7351,7 @@ function switchSubTab(name) {
   if (name === 'printer') { loadPrinterConfigs(); }
   if (name === 'power') { loadPowerMeters(); }
   if (name === 'recent') { loadRecentExclude(); }
+  if (name === 'onthisday') { loadOtdExclude(); }
   if (name === 'metrics') { loadMetrics(); }
 }
 
@@ -6957,7 +7867,8 @@ async function loadAttrTypes() {
       else if (t.collect_mode === 'poll') updMethod = '每' + (t.collect_interval || 30) + '分钟';
       html += '<tr>';
       html += '<td><strong>' + escHtml(t.type_name) + '</strong></td>';
-      const modeLabel = t.mode === 'list' ? '列表展开' : (t.mode === 'multi' ? '混合模式' : '字段快照');
+      const modeLabel = (t.mode === 'comm') ? '通讯数据'
+        : (t.mode === 'list' ? '列表展开' : (t.mode === 'multi' ? '混合模式' : '字段快照'));
       html += '<td>' + modeLabel + '</td>';
       html += '<td>' + updMethod + '</td>';
       html += '<td>' + escHtml(t.array_path || '-') + '</td>';
@@ -6971,6 +7882,7 @@ async function loadAttrTypes() {
       html += '<td style="color:var(--green);font-weight:500">' + (t.last_trigger_count > 0 ? '+' + t.last_trigger_count + ' 条' : '<span style="color:var(--text2)">-</span>') + '</td>';
       html += '<td style="font-size:12px;color:var(--text2)">' + fmtTime(t.last_trigger_time || t.updated_at) + '</td>';
       html += '<td><button onclick="manualTriggerAttrById(\'' + escAttr(t.type_name) + '\', this)" style="background:var(--green);color:#fff;border:none;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px">⚡ 触发</button>' +
+          ' <button onclick="openAttrEditModal(\'' + escAttr(t.type_name) + '\')" style="background:#2980b9;color:#fff;border:none;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px">✏️ 修改</button>' +
           ' <button class="btn-del" onclick="deleteAttrType(\'' + escAttr(t.type_name) + '\')">删除</button></td>';
       html += '</tr>';
     });
@@ -6988,6 +7900,1532 @@ async function deleteAttrType(typeName) {
     showToast(json.success ? json.message : ('删除失败: ' + json.error), json.success);
     if (json.success) { loadAttrTypes(); loadEntities(); }
   } catch(e) { showToast('请求失败: ' + e, false); }
+}
+
+// ==============================================================================
+//  属性提取：修改已有配置（纯前端，仅复用通用库接口，未新增后端接口）
+//    读: GET  /api/ha_data_store/db_viewer/data    (DB_API)
+//    写: POST /api/ha_data_store/db_viewer/update  (UPDATE_API，逐列更新)
+//        POST /api/ha_data_store/alter_table       (ALTER_API，仅补新增目标列)
+//        GET  /api/ha_data_store/table_columns     (COLUMNS_API，读现有列)
+//  采集侧每轮都从数据库读取配置，改完下一轮采集即生效，无需重启 HA。
+//  注意：目标列名必须为英文/数字/下划线（alter_table 的标识符校验），否则无法自动补列。
+// ==============================================================================
+const _AE_INPUT = 'width:100%;padding:4px 6px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:4px;box-sizing:border-box';
+const _AE_MODE_LABELS = { fields: '字段快照', list: '列表展开', multi: '混合模式', comm: '通讯数据' };
+const _AE_COL_TYPES = ['TEXT', 'INTEGER', 'REAL'];
+let attrEditCtx = null;
+
+function _aeJson(v, fallback) {
+  if (v === null || v === undefined || v === '') return fallback;
+  if (typeof v === 'object') return v;
+  try { const p = JSON.parse(v); return (p === null || p === undefined) ? fallback : p; } catch(e) { return fallback; }
+}
+function _aeStable(o) {
+  if (Array.isArray(o)) return '[' + o.map(_aeStable).join(',') + ']';
+  if (o && typeof o === 'object') {
+    return '{' + Object.keys(o).sort().map(k => JSON.stringify(k) + ':' + _aeStable(o[k])).join(',') + '}';
+  }
+  return JSON.stringify(o === undefined ? null : o);
+}
+function _aeSame(a, b) { return _aeStable(a) === _aeStable(b); }
+function _aeNormCol(name) { return String(name === undefined || name === null ? '' : name).trim().replace(/\./g, '_'); }
+function _aeValidCol(name) { return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name); }
+function _aeSrcForTarget(mapping, target) {
+  const keys = Object.keys(mapping || {});
+  for (let i = 0; i < keys.length; i++) { if (mapping[keys[i]] === target) return keys[i]; }
+  return '';
+}
+// DB 里 extra_fields 兼容 {src:"col"} 与 {src:{target_col:"col"}} 两种格式，统一成前者
+function _aeNormalizeExtras(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  Object.keys(raw).forEach(k => {
+    const v = raw[k];
+    if (typeof v === 'string') out[k] = v;
+    else if (v && typeof v === 'object') out[k] = v.target_col || k.replace(/\./g, '_');
+  });
+  return out;
+}
+function _aeFieldCandidates(attrs, arrayPath) {
+  const out = [];
+  const push = v => { if (v && out.indexOf(v) < 0) out.push(v); };
+  if (arrayPath) {
+    const arr = getNestedValue(attrs, arrayPath);
+    if (Array.isArray(arr) && arr.length && arr[0] && typeof arr[0] === 'object') {
+      // 指定了采集节点：候选就是**该节点下元素的字段**（正是要映射的对象），
+      // 不再混入顶层标量，否则映射时要在无关字段里翻。
+      Object.keys(arr[0]).forEach(push);
+      return out;
+    }
+  }
+  // 未指定节点（或节点下取不到元素样本）：退回实体顶层标量属性
+  Object.keys(attrs || {}).forEach(k => {
+    const v = attrs[k];
+    if (v === null || typeof v !== 'object') push(k);
+  });
+  return out;
+}
+function _aeNodeCandidates(tree) {
+  const out = [];
+  (tree || []).forEach(n => {
+    if (n && (n.type === 'list' || n.type === 'dict') && n.path && out.indexOf(n.path) < 0) out.push(n.path);
+  });
+  return out;
+}
+function _aeUpdateDatalists() {
+  const ctx = attrEditCtx;
+  if (!ctx) return;
+  const fl = document.getElementById('attrEditFieldList');
+  if (fl) fl.innerHTML = ctx.fieldCands.map(f => '<option value="' + escAttr(f) + '"></option>').join('');
+  const nl = document.getElementById('attrEditNodeList');
+  if (nl) nl.innerHTML = ctx.nodeCands.map(p => '<option value="' + escAttr(p) + '"></option>').join('');
+  // 实体表格每行的「唯一键字段」用各自实体在其采集节点下的字段作候选
+  (ctx.entities || []).forEach((e, i) => {
+    const dl = document.getElementById('aeKeyList_' + i);
+    if (!dl) return;
+    const list = (ctx.entityFieldCands && ctx.entityFieldCands[e.entity_id]) || [];
+    dl.innerHTML = list.map(f => '<option value="' + escAttr(f) + '"></option>').join('');
+  });
+}
+
+async function _aeFetchRows(table, filters) {
+  let url = DB_API + '?table=' + encodeURIComponent(table) + '&page=1';
+  if (filters && filters.length) url += '&filter=' + encodeURIComponent(JSON.stringify(filters));
+  const resp = await fetch(url);
+  const json = await resp.json();
+  if (!json.success) throw new Error(json.error || '读取失败');
+  return json.data || {};
+}
+
+async function _aeCellUpdate(table, rowId, column, value) {
+  const resp = await fetch(UPDATE_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ table: table, row_id: rowId, column: column, value: value }),
+  });
+  const json = await resp.json();
+  if (!json.success) throw new Error(column + ' → ' + (json.error || '更新失败'));
+  return json;
+}
+
+// 行 HTML 构造（fixedTarget 用于通讯模式：目标列固定，只填源字段/固定值）
+function _aeMappingRowHtml(src, target, type, fixedTarget) {
+  const S = _AE_INPUT;
+  const ty = String(type || 'REAL').toUpperCase();
+  const cell = 'padding:3px 6px;border-bottom:1px solid var(--border)';
+  let h = '<tr' + (fixedTarget ? ' data-target="' + escAttr(target) + '"' : '') + '>';
+  if (fixedTarget) {
+    h += '<td style="' + cell + ';font-family:monospace">' + escHtml(target) + '</td>';
+    h += '<td style="' + cell + '"><input data-role="src" list="attrEditFieldList" value="' + escAttr(src || '') + '" placeholder="源字段 或 固定值(=xxx)" style="' + S + '"></td>';
+    h += '<td style="' + cell + ';color:var(--text2)">' + escHtml(ty) + '</td>';
+  } else {
+    h += '<td style="' + cell + '"><input data-role="src" list="attrEditFieldList" value="' + escAttr(src || '') + '" placeholder="源字段" style="' + S + '"></td>';
+    h += '<td style="' + cell + '"><input data-role="target" value="' + escAttr(target || '') + '" placeholder="目标列名" style="' + S + '"></td>';
+    h += '<td style="' + cell + '"><select data-role="type" style="' + S + '">' +
+      _AE_COL_TYPES.map(t => '<option value="' + t + '"' + (t === ty ? ' selected' : '') + '>' + t + '</option>').join('') + '</select></td>';
+  }
+  h += '<td style="' + cell + ';text-align:center">' + (fixedTarget ? '' :
+    '<button onclick="_aeRemoveRow(this)" title="删除该映射（不会删除数据表中的列）" style="background:transparent;border:none;color:var(--text2);cursor:pointer">✕</button>') + '</td>';
+  h += '</tr>';
+  return h;
+}
+function _aeExtraRowHtml(src, target, type) {
+  const S = _AE_INPUT;
+  const ty = String(type || 'TEXT').toUpperCase();
+  const cell = 'padding:3px 6px;border-bottom:1px solid var(--border)';
+  let h = '<tr>';
+  h += '<td style="' + cell + '"><input data-role="src" list="attrEditNodeList" value="' + escAttr(src || '') + '" placeholder="属性路径（如 sync_date）" style="' + S + '"></td>';
+  h += '<td style="' + cell + '"><input data-role="target" value="' + escAttr(target || '') + '" placeholder="目标列名" style="' + S + '"></td>';
+  h += '<td style="' + cell + '"><select data-role="type" style="' + S + '">' +
+    _AE_COL_TYPES.map(t => '<option value="' + t + '"' + (t === ty ? ' selected' : '') + '>' + t + '</option>').join('') + '</select></td>';
+  h += '<td style="' + cell + ';text-align:center"><button onclick="_aeRemoveRow(this)" title="删除该附加字段" style="background:transparent;border:none;color:var(--text2);cursor:pointer">✕</button></td>';
+  h += '</tr>';
+  return h;
+}
+function _aeNodeRowHtml(path) {
+  const S = _AE_INPUT;
+  const cell = 'padding:3px 6px;border-bottom:1px solid var(--border)';
+  return '<tr>' +
+    '<td style="' + cell + '"><input data-role="node" list="attrEditNodeList" value="' + escAttr(path || '') + '" placeholder="节点路径（dict/list）" style="' + S + '"></td>' +
+    '<td style="' + cell + ';text-align:center"><button onclick="_aeRemoveRow(this)" title="删除该节点" style="background:transparent;border:none;color:var(--text2);cursor:pointer">✕</button></td>' +
+    '</tr>';
+}
+function _aeAddMappingRow() {
+  const tbody = document.getElementById('attrEditMappingBody');
+  if (tbody) tbody.insertAdjacentHTML('beforeend', _aeMappingRowHtml('', '', 'REAL', ''));
+}
+function _aeAddExtraRow() {
+  const tbody = document.getElementById('attrEditExtraBody');
+  if (tbody) tbody.insertAdjacentHTML('beforeend', _aeExtraRowHtml('', '', 'TEXT'));
+}
+function _aeAddNodeRow() {
+  const tbody = document.getElementById('attrEditNodesBody');
+  if (tbody) tbody.insertAdjacentHTML('beforeend', _aeNodeRowHtml(''));
+}
+function _aeRemoveRow(btn) {
+  const tr = btn && btn.closest ? btn.closest('tr') : null;
+  if (tr) tr.remove();
+}
+
+// 读取实体属性，重建「源字段 / 节点路径」候选（实体不可用时静默跳过）
+//
+// 关键：候选随「数组路径」变化而**整体重建**（不是累加）——
+// 换了要采集的节点后，源字段候选必须变成**该节点下元素的字段**，旧节点的字段不应残留。
+async function _aeLoadEntityFields(silent) {
+  const ctx = attrEditCtx;
+  if (!ctx) return 0;
+  const pathEl = document.getElementById('attrEditArrayPath');
+  const arrayPath = (pathEl && pathEl.value ? pathEl.value.trim() : '') || ctx.defRow.array_path || '';
+
+  const fieldCands = [];
+  const nodeCands = [];
+  const entityNodes = {};       // {entity_id: [数组节点]} —— 供实体表格的「采集节点」下拉
+  const entityFieldCands = {};  // {entity_id: [字段]} —— 供该行「唯一键字段」的候选
+  let nodeFieldCount = 0;
+  const addField = v => { if (v && fieldCands.indexOf(v) < 0) fieldCands.push(v); };
+  const addNode = v => { if (v && nodeCands.indexOf(v) < 0) nodeCands.push(v); };
+
+  let ok = 0;
+  for (const e of ctx.entities) {
+    if (!e.entity_id) continue;
+    try {
+      const resp = await fetch(ATTR_STATE_API + '?entity_id=' + encodeURIComponent(e.entity_id));
+      const json = await resp.json();
+      if (!json.success || !json.data) continue;
+      const attrs = json.data.attributes || {};
+      const tree = json.data.attribute_tree || [];
+      if (!aeNodeTree.length) aeNodeTree = tree;   // 供「从实体属性选节点」面板使用
+      // 每个实体各自的数组节点（各实体数据形状不同，节点也不同）
+      entityNodes[e.entity_id] = tree
+        .filter(n => n && n.type === 'list' && n.path)
+        .map(n => ({ path: n.path, length: n.length || 0 }));
+      // 该实体在其「采集节点」下的字段：唯一键字段要在这里面选
+      // （唯一键是源字段名，去重时从数组元素里取值，不是数据库列名）
+      const _idx = ctx.entities.indexOf(e);
+      const _nodeEl = document.querySelector(
+        '#attrEditEntityBody tr[data-idx="' + _idx + '"] select[data-role="array_path"]');
+      const _eNode = (_nodeEl && _nodeEl.value ? _nodeEl.value.trim() : '')
+        || String(e.array_path || '');
+      entityFieldCands[e.entity_id] = _aeFieldCandidates(attrs, _eNode || arrayPath);
+      // 该节点（数组元素）下的字段数，单独统计用于提示
+      if (arrayPath) {
+        const arr = getNestedValue(attrs, arrayPath);
+        if (Array.isArray(arr) && arr.length && arr[0] && typeof arr[0] === 'object') {
+          nodeFieldCount = Math.max(nodeFieldCount, Object.keys(arr[0]).length);
+        }
+      }
+      _aeFieldCandidates(attrs, arrayPath).forEach(addField);
+      _aeNodeCandidates(tree).forEach(addNode);
+      ok++;
+      // 注意：这里不能提前 break —— 每个实体的「采集节点」下拉都要各自的节点列表，
+      // 少探测一个实体，那一行就只能选「继承类型级」。
+    } catch(e) { /* 单个实体读取失败不影响编辑 */ }
+  }
+
+  ctx.fieldCands = fieldCands;
+  ctx.nodeCands = nodeCands;
+  ctx.entityNodes = entityNodes;
+  ctx.entityFieldCands = entityFieldCands;
+  ctx.nodeFieldCount = nodeFieldCount;
+
+  if (silent !== true) {
+    _aeUpdateDatalists();
+    _aeUpdateArrayPathHint();
+    _aeSyncArrayPathSelect();
+    const status = document.getElementById('attrEditStatus');
+    if (status) { status.style.color = ''; status.textContent = ok ? ('已读取 ' + ok + ' 个实体的字段候选') : '实体当前不可用，可手工填写字段名'; }
+  }
+  return ok;
+}
+
+// -------- 采集节点（数组路径）↔ 字段映射候选 的联动 --------
+let aeArrayPathTimer = null;
+
+// 数组路径变化 → 防抖后重新探测并重建源字段候选
+function aeOnArrayPathChanged() {
+  if (aeArrayPathTimer) clearTimeout(aeArrayPathTimer);
+  aeArrayPathTimer = setTimeout(async () => {
+    aeArrayPathTimer = null;
+    await _aeLoadEntityFields(true);
+    _aeUpdateDatalists();
+    _aeUpdateArrayPathHint();
+    _aeSyncArrayPathSelect();
+  }, 350);
+}
+
+// 「从实体属性选节点」下拉：只列 list（数组）节点
+function _aeSyncArrayPathSelect(tree) {
+  const sel = document.getElementById('aeArrayPathSelect');
+  if (!sel) return;
+  const arrEl = document.getElementById('attrEditArrayPath');
+  const cur = arrEl ? (arrEl.value || '').trim() : '';
+  const nodes = (tree || aeNodeTree || []).filter(n => n && n.type === 'list' && n.path);
+  nodes.sort((a, b) => String(a.path).localeCompare(String(b.path)));
+  const opts = ['<option value="">-- 选择数组节点 --</option>'];
+  nodes.forEach(n => {
+    opts.push('<option value="' + escAttr(n.path) + '"' + (n.path === cur ? ' selected' : '') + '>'
+      + escHtml(n.path) + ' [' + (n.length || 0) + ' 个元素]</option>');
+  });
+  sel.innerHTML = opts.join('');
+  if (cur && nodes.some(n => n.path === cur)) sel.value = cur;
+}
+
+function aePickArrayPathFromSelect(path) {
+  if (!path) return;
+  const el = document.getElementById('attrEditArrayPath');
+  if (!el) return;
+  el.value = path;
+  aeOnArrayPathChanged();
+  aeRenderNodePicker();
+}
+
+// 提示：当前节点下有多少字段进了源字段候选
+function _aeUpdateArrayPathHint() {
+  const el = document.getElementById('attrEditArrayPathHint');
+  if (!el || !attrEditCtx) return;
+  const arrEl = document.getElementById('attrEditArrayPath');
+  const arrayPath = arrEl ? (arrEl.value || '').trim() : '';
+  if (!arrayPath) {
+    el.innerHTML = '<span class="hint">未指定节点：下方「字段映射」的源字段候选为实体的'
+      + '<b>顶层标量属性</b>。指定数组节点后会改为<b>该节点下元素的字段</b>。</span>';
+    return;
+  }
+  const n = attrEditCtx.nodeFieldCount || 0;
+  el.innerHTML = '<span class="hint">节点 <code>' + escHtml(arrayPath) + '</code>'
+    + (n ? ' 下共 <b>' + n + '</b> 个字段' : '（未取到元素样本）')
+    + '，已并入下方「字段映射」的源字段候选（共 ' + (attrEditCtx.fieldCands || []).length
+    + ' 个）；可在下拉里直接选，或点「🌳 从实体属性选择节点」查看完整属性树。</span>';
+}
+
+async function refreshAttrEditFields() {
+  if (!attrEditCtx) return;
+  const status = document.getElementById('attrEditStatus');
+  if (status) { status.style.color = ''; status.textContent = '读取实体属性中...'; }
+  const ok = await _aeLoadEntityFields(true);
+  _aeUpdateDatalists();
+  _aeUpdateArrayPathHint();
+  _aeSyncArrayPathSelect();
+  if (status) status.textContent = ok ? ('已读取 ' + ok + ' 个实体的字段候选') : '未能读取实体属性（实体不可用时可手工填写）';
+  showToast(ok ? ('已读取 ' + ok + ' 个实体的字段候选') : '未能读取实体属性（实体不可用时可手工填写）', ok > 0);
+}
+
+// -------- 实体属性树 / 节点选择（编辑弹窗内） --------
+// 编辑已有类型时，用实体真实属性树辅助填写 array_path 与 extra_json_nodes
+let aeNodeTree = [];
+let aeNodePickerOpen = false;
+
+function aeToggleNodePicker() {
+  const box = document.getElementById('aeNodePicker');
+  if (!box) return;
+  aeNodePickerOpen = !(box.style.display === 'block');
+  box.style.display = aeNodePickerOpen ? 'block' : 'none';
+  if (aeNodePickerOpen) {
+    _aeFillNodePickerEntities();
+    if (!aeNodeTree.length) aeProbeNodes();
+    else aeRenderNodePicker();
+  }
+}
+
+function aeCloseNodePicker() {
+  aeNodePickerOpen = false;
+  const box = document.getElementById('aeNodePicker');
+  if (box) box.style.display = 'none';
+}
+
+// 探测实体下拉：只列启用中的实体（排除待停用行）
+function _aeFillNodePickerEntities() {
+  const sel = document.getElementById('aeNodePickerEntity');
+  if (!sel || !attrEditCtx) return;
+  const list = (attrEditCtx.entities || []).filter(e => e.entity_id && !e._disabled);
+  const prev = sel.value;
+  sel.innerHTML = list.map(e =>
+    '<option value="' + escAttr(e.entity_id) + '">' + escHtml(e.entity_id)
+    + (e.room ? '（' + escHtml(e.room) + '）' : '') + '</option>').join('');
+  if (prev && list.some(e => e.entity_id === prev)) sel.value = prev;
+}
+
+async function aeProbeNodes() {
+  const sel = document.getElementById('aeNodePickerEntity');
+  const meta = document.getElementById('aeNodePickerMeta');
+  const head = document.getElementById('aeNodePickerHead');
+  const body = document.getElementById('aeNodePickerBody');
+  const entityId = sel ? (sel.value || '').trim() : '';
+  if (!entityId) {
+    if (meta) meta.textContent = '该类型下没有可用实体，请先添加实体再探测';
+    return;
+  }
+  if (meta) meta.textContent = '读取中…';
+  try {
+    const resp = await fetch(ATTR_STATE_API + '?entity_id=' + encodeURIComponent(entityId));
+    const json = await resp.json();
+    if (!json.success) {
+      aeNodeTree = [];
+      if (meta) meta.textContent = '读取失败：' + (json.error || '');
+      if (body) body.innerHTML = '';
+      return;
+    }
+    const d = json.data || {};
+    aeNodeTree = d.attribute_tree || [];
+    if (head) {
+      head.innerHTML = '实体 <code>' + escHtml(entityId) + '</code> 状态 <b>'
+        + escHtml(String(d.state)) + '</b>；属性节点 ' + aeNodeTree.length + ' 个'
+        + (d.last_updated ? '（更新于 ' + escHtml(d.last_updated) + '）' : '');
+    }
+    if (meta) meta.textContent = aeNodeTree.length ? '' : '该实体没有可用的属性节点';
+    aeRenderNodePicker();
+    _aeSyncArrayPathSelect(aeNodeTree);
+  } catch (err) {
+    aeNodeTree = [];
+    if (meta) meta.textContent = '读取失败：' + err;
+  }
+}
+
+function _aeNodeDepth(path) {
+  return String(path || '').split('.').length - 1;
+}
+
+function aeRenderNodePicker() {
+  const body = document.getElementById('aeNodePickerBody');
+  if (!body) return;
+  if (!aeNodeTree.length) {
+    body.innerHTML = '<div class="hint">没有可用节点。可先点「🔍 探测属性树」。</div>';
+    return;
+  }
+  const arrEl = document.getElementById('attrEditArrayPath');
+  const curArray = arrEl ? (arrEl.value || '').trim() : '';
+  const curNodes = new Set();
+  document.querySelectorAll('#attrEditNodesBody input[data-role="node"]').forEach(inp => {
+    const p = String(inp.value || '').trim();
+    if (p) curNodes.add(p);
+  });
+  const rows = aeNodeTree.slice().sort((a, b) =>
+    String(a.path).localeCompare(String(b.path)));
+  body.innerHTML = rows.map(node => {
+    const path = String(node.path || '');
+    const type = String(node.type || '');
+    const depth = _aeNodeDepth(path);
+    const isList = type === 'list';
+    const isDict = type === 'dict';
+    const extra = isList ? ('[' + (node.length || 0) + ' 个元素]')
+      : (isDict ? ('{' + ((node.keys || []).length) + ' 个键}') : '');
+    let actions = '';
+    if (isList) {
+      actions += (curArray === path)
+        ? '<span style="color:var(--green)">✔ 当前数组路径</span> '
+        : '<a href="javascript:void(0)" onclick="aePickNodeAsArrayPath(\'' + escAttr(path)
+          + '\')" style="color:var(--accent);text-decoration:none">设为数组路径</a> ';
+    }
+    if (isList || isDict) {
+      actions += curNodes.has(path)
+        ? '<span style="color:var(--green)">✔ 已在 JSON 节点</span> '
+        : '<a href="javascript:void(0)" onclick="aePickNodeAsJsonNode(\'' + escAttr(path)
+          + '\')" style="color:var(--accent);text-decoration:none">加为 JSON 节点</a> ';
+    }
+    actions += '<a href="javascript:void(0)" onclick="aePickNodeAsKeyField(\'' + escAttr(path)
+      + '\')" style="color:var(--text2);text-decoration:none">设为唯一键</a> '
+      + '<a href="javascript:void(0)" onclick="aeCopyNodePath(\'' + escAttr(path)
+      + '\')" style="color:var(--text2);text-decoration:none">复制路径</a>';
+    return '<div style="display:flex;align-items:center;gap:6px;padding:2px 0;'
+      + 'border-bottom:1px solid var(--border)">'
+      + '<span style="padding-left:' + (6 + depth * 14) + 'px;min-width:220px;'
+      + 'font-family:monospace">' + escHtml(path) + '</span>'
+      + '<span class="hint" style="min-width:130px">' + escHtml(type)
+      + (extra ? ' ' + escHtml(extra) : '') + '</span>'
+      + '<span style="flex:1">' + actions + '</span></div>';
+  }).join('');
+}
+
+function aePickNodeAsArrayPath(path) {
+  const el = document.getElementById('attrEditArrayPath');
+  if (!el) return;
+  el.value = path;
+  // 触发联动：下方「字段映射」的源字段候选会重建为该节点下元素的字段
+  aeOnArrayPathChanged();
+  showToast('已设为采集节点：' + path + '（下方源字段候选已随之更新）', true);
+  aeRenderNodePicker();
+}
+
+function aePickNodeAsKeyField(path) {
+  const el = document.getElementById('attrEditKeyField');
+  if (!el) return;
+  el.value = path;
+  showToast('已填入唯一键字段：' + path, true);
+  aeRenderNodePicker();
+}
+
+function aePickNodeAsJsonNode(path) {
+  const tbody = document.getElementById('attrEditNodesBody');
+  if (!tbody) {
+    showToast('当前模式不使用 JSON 节点', false);
+    return;
+  }
+  const dup = Array.from(tbody.querySelectorAll('input[data-role="node"]'))
+    .some(i => (i.value || '').trim() === path);
+  if (dup) { showToast('该节点已在列表中', false); return; }
+  tbody.insertAdjacentHTML('beforeend', _aeNodeRowHtml(path));
+  showToast('已加入 JSON 节点：' + path, true);
+  aeRenderNodePicker();
+}
+
+function aeCopyNodePath(path) {
+  const done = () => showToast('已复制路径：' + path, true);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(path).then(done).catch(done);
+  } else {
+    done();
+  }
+}
+
+// 编辑弹窗最大化 / 还原：实体表格现在有 10 列，非最大化时容易看不全
+let attrEditMaxed = false;
+
+function toggleAttrEditMax() {
+  const modal = document.getElementById('attrEditModal');
+  const btn = document.getElementById('attrEditMaxBtn');
+  if (!modal) return;
+  attrEditMaxed = !attrEditMaxed;
+  if (attrEditMaxed) {
+    modal.style.width = '99vw';
+    modal.style.maxWidth = '99vw';
+    modal.style.height = '96vh';
+    modal.style.maxHeight = '96vh';
+    modal.style.padding = '10px 14px';
+  } else {
+    modal.style.width = '90%';
+    modal.style.maxWidth = '1040px';
+    modal.style.height = '';
+    modal.style.maxHeight = '88vh';
+    modal.style.padding = '16px 20px';
+  }
+  if (btn) btn.textContent = attrEditMaxed ? '⤡ 还原' : '⛶ 最大化';
+}
+
+function closeAttrEditModal() {
+  const overlay = document.getElementById('attrEditOverlay');
+  const modal = document.getElementById('attrEditModal');
+  if (overlay) overlay.style.display = 'none';
+  if (modal) modal.style.display = 'none';
+  attrEditCtx = null;
+  // 重置节点选择面板状态，避免下次打开时残留上一个类型的属性树
+  aeNodePickerOpen = false;
+  aeNodeTree = [];
+}
+
+async function openAttrEditModal(typeName) {
+  const overlay = document.getElementById('attrEditOverlay');
+  const modal = document.getElementById('attrEditModal');
+  const body = document.getElementById('attrEditBody');
+  const status = document.getElementById('attrEditStatus');
+  if (!overlay || !modal || !body) return;
+  const nameEl = document.getElementById('attrEditTypeName');
+  if (nameEl) nameEl.textContent = typeName;
+  if (status) { status.style.color = ''; status.textContent = ''; }
+  body.innerHTML = '<div class="loading">加载中...</div>';
+  overlay.style.display = 'block';
+  modal.style.display = 'flex';
+
+  try {
+    const defs = await _aeFetchRows('attr_type_defs', [{ col: 'type_name', op: 'eq', val: typeName }]);
+    const defRow = (defs.rows || []).find(r => r.type_name === typeName);
+    if (!defRow) throw new Error('未找到类型定义「' + typeName + '」');
+    const ecs = await _aeFetchRows('entity_configs', [
+      { col: 'attr_type', op: 'eq', val: typeName },
+      { col: 'enabled', op: 'eq', val: '1' },
+    ]);
+
+    let cols = null;
+    try {
+      const resp = await fetch(COLUMNS_API + '?table=' + encodeURIComponent('attr_' + typeName));
+      const json = await resp.json();
+      if (json.success) cols = (json.data || []).map(c => c.name);
+    } catch(e) { cols = null; }
+
+    const nodesRaw = _aeJson(defRow.extra_json_nodes, []);
+    attrEditCtx = {
+      typeName: typeName,
+      defRow: defRow,
+      entities: ecs.rows || [],
+      fieldCands: [],
+      nodeCands: [],
+      mapping: _aeJson(defRow.field_mapping, {}),
+      types: _aeJson(defRow.field_types, {}),
+      extras: _aeNormalizeExtras(_aeJson(defRow.extra_fields, {})),
+      nodes: Array.isArray(nodesRaw) ? nodesRaw.slice() : [],
+      mode: defRow.mode || 'fields',
+      table: 'attr_' + typeName,
+      existingCols: cols,
+    };
+    await _aeLoadEntityFields(true);
+    _aeRender();
+    if (cols === null && status) {
+      status.style.color = 'var(--orange)';
+      status.textContent = '⚠ 未读到数据表结构，为避免误判已阻止保存';
+    }
+  } catch(e) {
+    body.innerHTML = '<div class="empty">加载失败: ' + escHtml(e && e.message ? e.message : e) + '</div>';
+  }
+}
+
+function _aeRender() {
+  const ctx = attrEditCtx;
+  const body = document.getElementById('attrEditBody');
+  if (!ctx || !body) return;
+  // 重渲染前先把表格里未保存的编辑收回 ctx，避免「添加 / 删除行」时丢失输入
+  if (typeof _aeSyncEntityInputs === 'function') _aeSyncEntityInputs();
+  const isComm = ctx.mode === 'comm';
+  const isListLike = ctx.mode === 'list' || ctx.mode === 'multi' || isComm;
+  const S = _AE_INPUT;
+  const cell = 'padding:3px 6px;border-bottom:1px solid var(--border)';
+  const th = 'text-align:left;' + cell;
+  const def = ctx.defRow;
+  const num = (v, d) => (v === null || v === undefined || v === '') ? d : v;
+  let h = '';
+
+  h += '<div class="hint" style="margin-bottom:10px">保存依赖 <b>「数据库浏览」+「数据库修改」</b> 两个开关；采集侧每轮都从数据库读取配置，<b>改完立即生效（无需重启 HA）</b>。</div>';
+
+  // ---- 采集参数 ----
+  h += '<div class="step" style="margin-top:0">';
+  h += '<h4>采集参数</h4>';
+  h += '<div class="form-row">';
+  h += '<div><label>类型名（不可改）</label><input readonly value="' + escAttr(ctx.typeName) + '" style="' + S + ';width:200px;opacity:.65"></div>';
+  h += '<div><label>模式（不可改）</label><input readonly value="' + escAttr(_AE_MODE_LABELS[ctx.mode] || ctx.mode) + '" style="' + S + ';width:140px;opacity:.65"></div>';
+  h += '</div>';
+  // 采集节点 / 唯一键 / 去重窗口 / 小数位已下移到「实体采集参数」，每个实体各自设置
+  h += '<div class="hint" style="margin-top:6px">'
+    + '采集节点（数组路径）、唯一键字段、对比最近条数、小数位数都已下移到下方的'
+    + '<b>「实体采集参数」</b>，<b>每个实体各自设置</b>。'
+    + (isComm ? '通讯字段映射也改为点每个实体行的「编辑」按钮设置。' : '')
+    + '</div>';
+  h += '</div>';
+
+  // ---- 字段映射（通讯模式不在类型级渲染：改由每个实体行的「编辑」各自设置）----
+  if (!isComm) {
+    h += '<div class="step" style="margin-top:12px">';
+    h += '<h4>字段映射（源字段 → 目标列）</h4>';
+    h += '<div class="hint">目标列名可改：<b>新列会自动补建</b>到数据表；改列名<b>不会删除旧列</b>，旧数据仍保留在旧列中。</div>';
+    h += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
+    h += '<th style="' + th + '">源字段</th><th style="' + th + '">目标列名</th><th style="' + th + ';width:110px">类型</th>';
+    h += '<th style="' + th + ';width:50px"></th></tr></thead><tbody id="attrEditMappingBody"></tbody></table>';
+    h += '<div style="margin-top:6px"><button class="btn-accent" onclick="_aeAddMappingRow()" style="font-size:12px">➕ 添加映射行</button></div>';
+    h += '</div>';
+  }
+
+  // ---- 附加标量字段（通讯模式不使用）----
+  if (!isComm) {
+    h += '<div class="step" style="margin-top:12px">';
+    h += '<h4>附加标量字段 — 独立列</h4>';
+    h += '<div class="hint">从实体属性额外取标量值写入独立列（仅最新一条记录保留）。</div>';
+    h += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
+    h += '<th style="' + th + '">源字段路径</th><th style="' + th + '">目标列名</th><th style="' + th + ';width:110px">类型</th><th style="' + th + ';width:50px"></th>';
+    h += '</tr></thead><tbody id="attrEditExtraBody"></tbody></table>';
+    h += '<div style="margin-top:6px"><button class="btn-accent" onclick="_aeAddExtraRow()" style="font-size:12px">➕ 添加附加字段</button></div>';
+    h += '</div>';
+
+    h += '<div class="step" style="margin-top:12px">';
+    h += '<h4>附加标量字段 — JSON 节点</h4>';
+    h += '<div class="hint">整个 dict/list 节点以 JSON 存入 extra_json 列，子字段变化自动适应。</div>';
+    h += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
+    h += '<th style="' + th + '">节点路径</th><th style="' + th + ';width:50px"></th>';
+    h += '</tr></thead><tbody id="attrEditNodesBody"></tbody></table>';
+    h += '<div style="margin-top:6px"><button class="btn-accent" onclick="_aeAddNodeRow()" style="font-size:12px">➕ 添加 JSON 节点</button></div>';
+    h += '</div>';
+  }
+
+  // ---- 实体采集参数 ----
+  h += '<div class="step" style="margin-top:12px">';
+  const entList = ctx.entities || [];
+  const entOld = entList.filter(e => !e._isNew).length;
+  const entNew = entList.filter(e => e._isNew).length;
+  h += '<h4>实体采集参数（' + entOld + ' 个启用实体'
+    + (entNew ? '，待新增 ' + entNew + ' 个' : '') + '）</h4>';
+  h += '<div style="margin-bottom:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">';
+  h += '<button class="btn-green" onclick="aeAddEntityRow()">➕ 添加实体</button>';
+  h += '<button class="btn-accent" onclick="aeBatchAddEntities()">📋 批量添加</button>';
+  h += '<span class="hint">同一类型可挂多个实体；它们采集到<b>同一张表</b>，'
+    + '新实体保存后从下一轮采集开始写入</span>';
+  h += '</div>';
+  {
+    h += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
+    h += '<th style="' + th + '">实体</th><th style="' + th + ';width:110px">房间</th>'
+      + '<th style="' + th + ';width:140px">采集方式</th><th style="' + th + ';width:90px">间隔(分钟)</th>'
+      + '<th style="' + th + ';width:200px">采集节点（数组路径）</th>'
+      + '<th style="' + th + ';width:150px">唯一键字段</th>'
+      + '<th style="' + th + ';width:110px">对比最近条数</th>'
+      + '<th style="' + th + ';width:100px">小数位数</th>'
+      + '<th style="' + th + ';width:140px">字段映射</th>'
+      + '<th style="' + th + ';width:76px">操作</th>';
+    h += '</tr></thead><tbody id="attrEditEntityBody">';
+    if (!entList.length) {
+      h += '<tr><td colspan="10" class="hint" style="padding:8px">该类型下暂无实体，'
+        + '点上方「➕ 添加实体」新增。</td></tr>';
+    }
+    entList.forEach((e, i) => {
+      const cm = e.collect_mode || 'poll';
+      h += '<tr data-idx="' + i + '"' + (e._isNew ? ' data-new="1"' : '')
+        + (e._disabled ? ' style="opacity:.45"' : '') + '>';
+      h += '<td style="' + cell + '"><input data-role="entity_id" value="' + escAttr(e.entity_id || '') + '" placeholder="sensor.xxx" style="' + S + ';font-family:monospace"></td>';
+      h += '<td style="' + cell + '"><input data-role="room" value="' + escAttr(e.room || '') + '" style="' + S + '"></td>';
+      h += '<td style="' + cell + '"><select data-role="collect_mode" style="' + S + '">' +
+        '<option value="event"' + (cm === 'event' ? ' selected' : '') + '>event（状态变化）</option>' +
+        '<option value="poll"' + (cm === 'poll' ? ' selected' : '') + '>poll（定时轮询）</option></select></td>';
+      h += '<td style="' + cell + '"><input data-role="interval" type="number" min="1" max="1440" value="' + escAttr(num(e.collect_interval, 30)) + '" style="' + S + '"></td>';
+      // 采集节点（实体级 array_path）：选项来自该实体自己的属性树里的数组节点
+      const nodeList = (ctx.entityNodes && ctx.entityNodes[e.entity_id]) || [];
+      const curNode = String(e.array_path || '');
+      let nodeOpts = '<option value="">（继承类型级' + (def.array_path ? '：' + escHtml(def.array_path) : '') + '）</option>';
+      if (curNode && !nodeList.some(n => n.path === curNode)) {
+        nodeOpts += '<option value="' + escAttr(curNode) + '" selected>' + escHtml(curNode) + '（当前，未探测到）</option>';
+      }
+      nodeList.forEach(n => {
+        nodeOpts += '<option value="' + escAttr(n.path) + '"' + (n.path === curNode ? ' selected' : '')
+          + '>' + escHtml(n.path) + ' [' + (n.length || 0) + ']</option>';
+      });
+      h += '<td style="' + cell + '"><select data-role="array_path" style="' + S + '"'
+        + (isListLike ? '' : ' disabled') + ' onchange="aeOnEntityNodeChanged(this)">'
+        + nodeOpts + '</select></td>';
+      // 唯一键字段 / 对比最近条数 / 小数位数：同样是实体级（留空 / 0 / -2 = 继承类型级）
+      // 唯一键是「源字段名」（数组元素里的字段），所以候选必须来自**该实体自己的节点**，
+      // 因此每行挂一个独立 datalist（由 _aeLoadEntityFields 按各自节点填充）。
+      h += '<td style="' + cell + '">'
+        + '<datalist id="aeKeyList_' + i + '"></datalist>'
+        + '<input data-role="key_field" list="aeKeyList_' + i + '" value="'
+        + escAttr(e.key_field || '') + '" placeholder="' + (def.key_field
+          ? '继承：' + escAttr(def.key_field) : '源字段名（该节点下）')
+        + '" style="' + S + '"' + (isListLike ? '' : ' disabled') + '></td>';
+      const eCl = Number(e.compare_limit || 0);
+      h += '<td style="' + cell + '"><input data-role="compare_limit" type="number" min="0" max="200000" value="'
+        + escAttr(eCl > 0 ? eCl : '') + '" placeholder="继承：' + escAttr(num(def.compare_limit, 30))
+        + '" style="' + S + '"></td>';
+      const eDp = (e.decimal_places === null || e.decimal_places === undefined)
+        ? -2 : Number(e.decimal_places);
+      h += '<td style="' + cell + '"><input data-role="decimal_places" type="number" min="-1" max="6" value="'
+        + escAttr(eDp >= -1 ? eDp : '') + '" placeholder="继承：' + escAttr(num(def.decimal_places, 2))
+        + '" style="' + S + '"></td>';
+      let ownMap = {};
+      try { ownMap = e.field_mapping ? JSON.parse(e.field_mapping) : {}; } catch (err) { ownMap = {}; }
+      const ownCnt = Object.keys(ownMap).length;
+      const _pre = commPresetOf(e.entity_id);
+      h += '<td style="' + cell + '">'
+        + (e._isNew
+            ? '<span class="hint">保存后可设置</span>'
+            : (ownCnt
+                ? '<span style="color:var(--accent)">自定义 ' + ownCnt + ' 项</span>'
+                : (_pre
+                    ? '<span style="color:var(--green)" title="按实体 ID 后缀自动套用内置映射">内置：'
+                      + escHtml(_pre.label) + '</span>'
+                    : '<span class="hint">继承类型级</span>'))
+              + ' <a href="javascript:void(0)" onclick="aeOpenEntityMapping(' + i + ')" '
+              + 'style="color:var(--accent);text-decoration:none">编辑</a>')
+        + '</td>';
+      const rowTag = e._isNew
+        ? '<span class="hint">待新增</span> '
+        : (e._disabled ? '<span style="color:var(--accent)">待停用</span> ' : '');
+      h += '<td style="' + cell + '">' + rowTag
+        + '<a href="javascript:void(0)" onclick="aeRemoveEntityRow(' + i + ')" '
+        + 'style="color:var(--accent);text-decoration:none" title="'
+        + (e._isNew ? '移除这一待新增行'
+                    : (e._disabled ? '取消停用，恢复该实体的采集'
+                                   : '停用该实体的本类型采集（软删，历史数据保留）'))
+        + '">' + (e._disabled ? '↩ 恢复' : '🗑 删除') + '</a></td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+    h += '<div class="hint">poll 模式按间隔定时采集，event 模式在实体状态变化时采集。'
+      + '<br><b>内置预设</b>：实体 ID 末段以 <code>_calls</code> / <code>_sms</code> / '
+      + '<code>_traffic</code> 结尾时，会自动套用对应的数组节点与字段映射'
+      + '（如 <code>*_traffic</code> → 节点「上网会话清单」，'
+      + '<code>volume_mb→traffic_usage</code>、<code>business_type→traffic_type</code>），'
+      + '<b>开箱即用、无需配置</b>；优先级为「实体级配置 &gt; 内置预设 &gt; 类型级配置」，'
+      + '三层是<b>整体</b>关系——命中上层就<b>完全取代</b>下层（例如流量实体走内置预设时，'
+      + '不会再混入类型级里属于通话的字段）。一旦在某行手工配了就以手工的为准。'
+      + '<br><b>采集节点</b>是<b>每个实体各自</b>的数组路径（如 <code>data.records</code>）：'
+      + '同一类型下各实体的数据形状往往不同（如 <code>xxx_traffic</code> / <code>xxx_sms</code> / '
+      + '<code>xxx_calls</code>），各自选自己的节点即可；留空 = 继承类型级（'
+      + escHtml(def.array_path || '未设置') + '）。'
+      + '<br><b>唯一键字段 / 对比最近条数 / 小数位数</b>同样是<b>每个实体各自</b>的：'
+      + '留空（或 0 / 空）即继承类型级，该行输入框的占位符会显示当前继承值。'
+      + '<br><b>唯一键字段填的是「源字段名」</b>（即<b>该实体采集节点下数组元素里的字段</b>，'
+      + '如 <code>call_time</code>、<code>b_when</code>），<b>不是数据库列名</b>——'
+      + '去重时是拿它到数组元素里取值，再经字段映射落到目标列。'
+      + '候选已按该实体的采集节点自动填充，改节点后会自动刷新。'
+      + '若填了该节点下不存在的字段，采集时会自动回退到时间列并在日志里提示。'
+      + '<br>「对比最近条数」= 去重窗口（按唯一键回查最近 N 条判断已存在，命中则更新、未命中才插入）；'
+      + '小数位数对数值列生效' + (isComm ? '，通讯模式建议不小于<b>单次同步的最大批量</b>（通常 ≥1000）' : '') + '。'
+      + '<br><b>字段映射</b>点该行的「编辑」打开：面板里的<b>源字段候选会按该实体的采集节点刷新</b>，'
+      + '直接选该节点下的字段就行。多个实体写的是<b>同一张表</b>，各映射各自的源字段。'
+      + '<br><b>实体 ID 可直接修改</b>（更换被采集的实体）：保存时会校验实体是否存在；'
+      + '旧数据保留在原表中不迁移，新实体从下一轮采集开始写入。'
+      + '<br>「🗑 删除」把该实体的<b>本类型采集配置</b>停用（软删，不影响其它类型），保存后生效。</div>';
+    // 实体级字段映射编辑区（点表格行尾「编辑」展开）
+    h += '<div id="aeEntMappingBox" style="display:none;margin-top:8px;padding:8px;'
+      + 'border:1px solid var(--border);border-radius:6px;background:var(--bg2)">';
+    h += '<div id="aeEntMappingHead" style="margin-bottom:6px"></div>';
+    h += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
+    h += '<th style="' + th + '">目标列</th><th style="' + th + '">源字段（或 =固定值）</th>'
+      + '<th style="' + th + ';width:70px">类型</th></tr></thead><tbody id="aeEntMappingBody"></tbody></table>';
+    h += '<div style="margin-top:6px">'
+      + '<button class="btn-green" onclick="aeSaveEntityMapping()">💾 保存该实体的映射</button> '
+      + '<button class="btn-accent" onclick="aeClearEntityMapping()">↩ 清除（改回继承）</button> '
+      + '<button class="btn-accent" onclick="aeCloseEntityMapping()">✕ 关闭</button></div>';
+    h += '</div>';
+  }
+  h += '</div>';
+
+  h += '<datalist id="attrEditFieldList"></datalist>';
+  h += '<datalist id="attrEditNodeList"></datalist>';
+
+  body.innerHTML = h;
+
+  const mTbody = document.getElementById('attrEditMappingBody');
+  if (mTbody) {
+    if (isComm) {
+      COMM_FIELD_DEFS.forEach(d2 => {
+        mTbody.insertAdjacentHTML('beforeend', _aeMappingRowHtml(_aeSrcForTarget(ctx.mapping, d2[0]), d2[0], d2[2], d2[0]));
+      });
+    } else {
+      Object.keys(ctx.mapping).forEach(src => {
+        const target = ctx.mapping[src];
+        mTbody.insertAdjacentHTML('beforeend', _aeMappingRowHtml(src, target, ctx.types[target] || 'REAL', ''));
+      });
+    }
+  }
+  const xTbody = document.getElementById('attrEditExtraBody');
+  if (xTbody) {
+    Object.keys(ctx.extras).forEach(src => {
+      const target = ctx.extras[src];
+      xTbody.insertAdjacentHTML('beforeend', _aeExtraRowHtml(src, target, ctx.types[target] || 'TEXT'));
+    });
+  }
+  const nTbody = document.getElementById('attrEditNodesBody');
+  if (nTbody) ctx.nodes.forEach(p => nTbody.insertAdjacentHTML('beforeend', _aeNodeRowHtml(p)));
+
+  _aeUpdateDatalists();
+
+  // 重渲染会重建 DOM：恢复节点下拉选中值、字段提示，以及面板展开状态
+  _aeSyncArrayPathSelect();
+  _aeUpdateArrayPathHint();
+  if (aeNodePickerOpen) {
+    const picker = document.getElementById('aeNodePicker');
+    if (picker) {
+      picker.style.display = 'block';
+      _aeFillNodePickerEntities();
+      aeRenderNodePicker();
+    }
+  }
+}
+
+async function saveAttrEdit() {
+  const ctx = attrEditCtx;
+  if (!ctx) return;
+  const status = document.getElementById('attrEditStatus');
+  const setStatus = t => { if (status) status.textContent = t || ''; };
+  if (ctx.existingCols === null) {
+    showToast('未读到数据表结构，无法安全校验新增列，已阻止保存', false);
+    return;
+  }
+  const isComm = ctx.mode === 'comm';
+  const isListLike = ctx.mode === 'list' || ctx.mode === 'multi' || isComm;
+  const errs = [];
+  const val = (el) => (el && el.value !== undefined ? el.value : '');
+
+  // 1) 字段映射
+  const mapping = {};
+  const types = {};
+  document.querySelectorAll('#attrEditMappingBody tr').forEach(tr => {
+    const src = val(tr.querySelector('input[data-role="src"]')).trim();
+    if (isComm) {
+      const target = tr.getAttribute('data-target') || '';
+      if (!src) return;                                  // 留空 = 不采集该列
+      if (mapping[src] !== undefined) { errs.push('通讯映射：取值「' + src + '」被多个目标列共用'); return; }
+      mapping[src] = target;
+      return;
+    }
+    const target = val(tr.querySelector('input[data-role="target"]')).trim();
+    const type = val(tr.querySelector('select[data-role="type"]')) || 'REAL';
+    if (!src && !target) return;                         // 空行忽略
+    if (!src) { errs.push('目标列「' + target + '」缺少源字段'); return; }
+    if (!target) { errs.push('源字段「' + src + '」缺少目标列名'); return; }
+    if (mapping[src] !== undefined) { errs.push('源字段「' + src + '」重复'); return; }
+    mapping[src] = target;
+    types[target] = type;
+  });
+
+  // 2) 附加字段 / JSON 节点（通讯模式不使用）
+  const extras = {};
+  if (!isComm) {
+    document.querySelectorAll('#attrEditExtraBody tr').forEach(tr => {
+      const src = val(tr.querySelector('input[data-role="src"]')).trim();
+      if (!src) return;
+      const target = val(tr.querySelector('input[data-role="target"]')).trim() || src.replace(/\./g, '_');
+      const type = val(tr.querySelector('select[data-role="type"]')) || 'TEXT';
+      extras[src] = target;
+      types[target] = type;
+    });
+  }
+  const nodes = [];
+  document.querySelectorAll('#attrEditNodesBody input[data-role="node"]').forEach(inp => {
+    const p = String(inp.value || '').trim();
+    if (p && nodes.indexOf(p) < 0) nodes.push(p);
+  });
+
+  // 3) 采集参数校验：这些项已全部下移到「实体采集参数」，
+  //    取值优先级为「实体级 → 内置预设（按实体 ID 后缀）→ 类型级」，
+  //    三者都取不到才算错（不能只看实体级，否则预设/类型级兜底时会被误报）。
+  _aeSyncEntityInputs();
+  const defArrPath = String((ctx.defRow && ctx.defRow.array_path) || '').trim();
+  const defKeyField = String((ctx.defRow && ctx.defRow.key_field) || '').trim();
+  if (isListLike) {
+    (ctx.entities || []).forEach(e => {
+      if (!e.entity_id || e._disabled) return;
+      const pre = commPresetOf(e.entity_id);
+      if (!(String(e.array_path || '').trim() || (pre && pre.arrayPath) || defArrPath)) {
+        errs.push('实体「' + e.entity_id + '」的采集节点为空'
+          + '（实体级、内置预设、类型级均未设置）');
+      }
+      if (!(String(e.key_field || '').trim() || (pre && pre.keyField) || defKeyField)) {
+        errs.push('实体「' + e.entity_id + '」的唯一键字段为空'
+          + '（实体级、内置预设、类型级均未设置）');
+      }
+    });
+  }
+
+  // 4) 新增目标列校验（列名须能通过 alter_table 的标识符校验）
+  const wanted = [];
+  Object.keys(mapping).forEach(src => wanted.push({ raw: mapping[src], type: types[mapping[src]] || (isComm ? 'TEXT' : 'REAL') }));
+  Object.keys(extras).forEach(src => wanted.push({ raw: extras[src], type: types[extras[src]] || 'TEXT' }));
+  const addCols = [];
+  wanted.forEach(w => {
+    const col = _aeNormCol(w.raw);
+    if (!_aeValidCol(col)) {
+      errs.push('目标列名「' + w.raw + '」含非法字符：仅支持英文字母/数字/下划线且不以数字开头（无法自动补列），请改用英文列名');
+      return;
+    }
+    if (ctx.existingCols.indexOf(col) < 0 && !addCols.some(x => x.col === col)) addCols.push({ col: col, type: w.type });
+  });
+  if (errs.length) {
+    showToast(errs[0] + (errs.length > 1 ? '（共 ' + errs.length + ' 项，已中止保存）' : ''), false);
+    setStatus('校验未通过，未写入数据库');
+    return;
+  }
+
+  // 5) 差异计算
+  const def = ctx.defRow;
+  const defUpdates = [];
+  const num = (v, d) => (v === null || v === undefined || v === '') ? d : Number(v);
+  // 类型级的 array_path / key_field / compare_limit / decimal_places 已下移到实体行，
+  // 此处不再改动它们（保留库中原值，继续作为实体级的兜底默认）。
+  // 通讯模式的字段映射同理：已改由每个实体的「编辑」各自设置，
+  // 类型级的 field_mapping 仅作兜底保留，**不能**在这里被空 mapping 覆盖掉。
+  if (!isComm) {
+    if (!_aeSame(_aeJson(def.field_mapping, {}), mapping)) {
+      defUpdates.push(['field_mapping', JSON.stringify(mapping)]);
+    }
+    if (!_aeSame(_aeJson(def.field_types, {}), types)) {
+      defUpdates.push(['field_types', JSON.stringify(types)]);
+    }
+  }
+  if (!isComm && !_aeSame(_aeNormalizeExtras(_aeJson(def.extra_fields, {})), extras)) {
+    defUpdates.push(['extra_fields', Object.keys(extras).length ? JSON.stringify(extras) : '']);
+  }
+  const oldNodes = _aeJson(def.extra_json_nodes, []);
+  if (!isComm && !_aeSame(Array.isArray(oldNodes) ? oldNodes : [], nodes)) {
+    defUpdates.push(['extra_json_nodes', nodes.length ? JSON.stringify(nodes) : '']);
+  }
+
+  // 6) 实体参数差异（含新增 / 更换 / 停用被采集的实体）
+  const entUpdates = [];
+  const entRenames = [];
+  const entAdds = [];        // 待新增的实体（表格里「待新增」的行）
+  const entDisables = [];    // 待停用的实体（点了「🗑 删除」但未保存）
+  const seenIds = new Set();
+  let entError = '';
+  document.querySelectorAll('#attrEditEntityBody tr[data-idx]').forEach(tr => {
+    if (entError) return;
+    const idx = parseInt(tr.getAttribute('data-idx'));
+    const orig = ctx.entities[idx];
+    if (!orig) return;
+    const newId = val(tr.querySelector('input[data-role="entity_id"]')).trim();
+    if (!newId) { entError = '第 ' + (idx + 1) + ' 行的实体 ID 不能为空'; return; }
+    if (seenIds.has(newId)) { entError = '实体 ID 重复：' + newId; return; }
+    seenIds.add(newId);
+    const room = val(tr.querySelector('input[data-role="room"]')).trim();
+    const cm = val(tr.querySelector('select[data-role="collect_mode"]')) || 'poll';
+    const interval = parseInt(val(tr.querySelector('input[data-role="interval"]'))) || 30;
+    const arrPathEnt = val(tr.querySelector('select[data-role="array_path"]')).trim();
+    const kfEnt = val(tr.querySelector('input[data-role="key_field"]')).trim();
+    const clEnt = parseInt(val(tr.querySelector('input[data-role="compare_limit"]')) || '0', 10) || 0;
+    const dpRaw = val(tr.querySelector('input[data-role="decimal_places"]')).trim();
+    const dpEnt = dpRaw === '' ? -2 : (parseInt(dpRaw, 10) >= -1 ? parseInt(dpRaw, 10) : -2);
+
+    // 新增行：没有 _rowid，走 upsert 新建 entity_configs 行
+    if (orig._isNew || !orig._rowid) {
+      entAdds.push({ entityId: newId, room: room, collectMode: cm, interval: interval,
+                     arrayPath: arrPathEnt, keyField: kfEnt,
+                     compareLimit: clEnt, decimalPlaces: dpEnt });
+      return;
+    }
+    if ((orig.entity_id || '') !== newId) {
+      entRenames.push({ rowId: orig._rowid, oldId: orig.entity_id, newId: newId });
+    }
+    if ((orig.room || '') !== room) entUpdates.push({ rowId: orig._rowid, column: 'room', value: room, ent: orig.entity_id });
+    if ((orig.collect_mode || 'poll') !== cm) entUpdates.push({ rowId: orig._rowid, column: 'collect_mode', value: cm, ent: orig.entity_id });
+    // 采集节点等实体级参数：空串 / 哨兵值 = 清除，回退类型级
+    if (String(orig.array_path || '') !== arrPathEnt) {
+      entUpdates.push({ rowId: orig._rowid, column: 'array_path', value: arrPathEnt, ent: orig.entity_id });
+    }
+    if (String(orig.key_field || '') !== kfEnt) {
+      entUpdates.push({ rowId: orig._rowid, column: 'key_field', value: kfEnt, ent: orig.entity_id });
+    }
+    if (Number(orig.compare_limit || 0) !== clEnt) {
+      entUpdates.push({ rowId: orig._rowid, column: 'compare_limit', value: clEnt, ent: orig.entity_id });
+    }
+    const dpOrig = (orig.decimal_places === null || orig.decimal_places === undefined)
+      ? -2 : Number(orig.decimal_places);
+    if (dpOrig !== dpEnt) {
+      entUpdates.push({ rowId: orig._rowid, column: 'decimal_places', value: dpEnt, ent: orig.entity_id });
+    }
+    if (Number(orig.collect_interval === null || orig.collect_interval === undefined ? 30 : orig.collect_interval) !== interval) {
+      entUpdates.push({ rowId: orig._rowid, column: 'collect_interval', value: interval, ent: orig.entity_id });
+    }
+    // 停用（软删 enabled，保存后生效；点「↩ 恢复」可取消）
+    if (orig._disabled) entDisables.push({ rowId: orig._rowid, entityId: orig.entity_id });
+  });
+  if (entError) { showToast(entError, false); return; }
+
+  // 6.0) 新增的实体同样先确认存在，避免写入无效 ID
+  for (const a of entAdds) {
+    try {
+      const resp = await fetch(ATTR_STATE_API + '?entity_id=' + encodeURIComponent(a.entityId));
+      const json = await resp.json();
+      if (!json.success) {
+        showToast('实体「' + a.entityId + '」不存在或不可用，未保存', false);
+        return;
+      }
+    } catch (e) { /* 接口异常时不阻断，交由后端约束兜底 */ }
+  }
+
+  // 6.1) 更换实体前确认目标实体存在，避免把配置指向一个不存在的实体
+  for (const r of entRenames) {
+    try {
+      const resp = await fetch(ATTR_STATE_API + '?entity_id=' + encodeURIComponent(r.newId));
+      const json = await resp.json();
+      if (!json.success) {
+        showToast('实体「' + r.newId + '」不存在或不可用，未保存', false);
+        return;
+      }
+    } catch (e) { /* 接口异常时不阻断，交由后端约束兜底 */ }
+    entUpdates.push({ rowId: r.rowId, column: 'entity_id', value: r.newId, ent: r.oldId, renamed: true });
+  }
+
+  if (!defUpdates.length && !addCols.length && !entUpdates.length
+      && !entAdds.length && !entDisables.length) {
+    showToast('没有需要保存的改动', true);
+    return;
+  }
+
+  let msg = '确定保存对「' + ctx.typeName + '」的修改？';
+  if (defUpdates.length) msg += '\n\n类型定义更新：' + defUpdates.map(u => u[0]).join('、');
+  if (addCols.length) msg += '\n\n数据表 ' + ctx.table + ' 新增列：' + addCols.map(c => c.col + '(' + c.type + ')').join('、');
+  if (entUpdates.length) msg += '\n\n实体参数更新：' + entUpdates.length + ' 项';
+  if (entAdds.length) {
+    msg += '\n\n➕ 新增实体：' + entAdds.map(a => a.entityId).join('、')
+      + '\n（同一类型下的多个实体采集到同一张表；新实体从下一轮采集开始写入，'
+      + '字段映射默认继承类型级，保存后可在该行「编辑」里单独覆盖）';
+  }
+  if (entDisables.length) {
+    msg += '\n\n🗑 停用实体：' + entDisables.map(d => d.entityId).join('、')
+      + '\n（软删该实体的本类型采集配置：历史数据保留，再次编辑并保存可恢复）';
+  }
+  if (entRenames.length) {
+    msg += '\n\n⚠ 更换采集实体：'
+      + entRenames.map(r => r.oldId + ' → ' + r.newId).join('、')
+      + '\n（旧数据保留在原表中不迁移；新实体从下一轮采集开始写入。'
+      + '若新实体属性结构与原实体差异较大，记得核对「数组路径 / 唯一键字段 / 字段映射」）';
+  }
+  msg += '\n\n注意：改列名不会删除旧列，旧数据仍保留在旧列中；改动下一轮采集生效。';
+  if (!confirm(msg)) return;
+
+  // 7) 执行：先补列，再写配置（避免采集在“配置已改、列未建”的中间态写入失败）
+  const done = [];
+  setStatus('保存中...');
+  try {
+    for (const c of addCols) {
+      const resp = await fetch(ALTER_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table: ctx.table, action: 'add', column: c.col, type: c.type || 'TEXT' }),
+      });
+      const json = await resp.json();
+      if (!json.success) throw new Error('补列 ' + c.col + ' 失败: ' + (json.error || '未知错误'));
+      done.push('新增列 ' + c.col);
+    }
+    for (const u of defUpdates) {
+      await _aeCellUpdate('attr_type_defs', def._rowid, u[0], u[1]);
+      done.push('更新 ' + u[0]);
+    }
+    // 新增实体：走 /api/ha_data_store/config 的 upsert（新建 entity_configs 行）
+    for (const a of entAdds) {
+      try {
+        const resp = await fetch(ATTR_ENTITY_CONFIG_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            entity_id: a.entityId,
+            attr_type: ctx.typeName,
+            category: 'attribute',
+            enabled: 1,
+            collect_mode: a.collectMode,
+            collect_interval: a.interval,
+            room: a.room,
+          }),
+        });
+        const json = await resp.json();
+        if (!json.success) throw new Error(json.error || '未知错误');
+        // 采集节点 / 唯一键 / 去重窗口 / 小数位是实体级配置，EntityConfigView 不管它们，
+        // 建好行后单独补一次（有任一项非默认值才调）
+        if (a.arrayPath || a.keyField || a.compareLimit > 0 || a.decimalPlaces >= -1) {
+          const mResp = await fetch(ATTR_ENTITY_MAPPING_API, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              entity_id: a.entityId, attr_type: ctx.typeName,
+              array_path: a.arrayPath, key_field: a.keyField,
+              compare_limit: a.compareLimit, decimal_places: a.decimalPlaces,
+            }),
+          });
+          const mJson = await mResp.json();
+          if (!mJson.success) {
+            throw new Error('实体级采集参数设置失败：' + (mJson.error || '未知错误'));
+          }
+        }
+        done.push('新增实体 ' + a.entityId
+          + (a.arrayPath ? '（节点 ' + a.arrayPath + '）' : ''));
+      } catch (err) {
+        throw new Error('新增实体「' + a.entityId + '」失败：'
+          + (err && err.message ? err.message : err)
+          + '（该实体可能已在本类型下存在配置）');
+      }
+    }
+    // 停用实体：软删（enabled=0），历史数据保留
+    for (const d of entDisables) {
+      await _aeCellUpdate('entity_configs', d.rowId, 'enabled', 0);
+      done.push('停用实体 ' + d.entityId);
+    }
+    for (const u of entUpdates) {
+      try {
+        await _aeCellUpdate('entity_configs', u.rowId, u.column, u.value);
+      } catch (err) {
+        if (u.column === 'entity_id') {
+          throw new Error('更换实体「' + u.ent + '」→「' + u.value + '」失败：'
+            + (err && err.message ? err.message : err)
+            + '（该实体可能已存在同类型配置，请先删除它的旧配置）');
+        }
+        throw err;
+      }
+      done.push('实体 ' + u.ent + '.' + u.column);
+    }
+    setStatus('');
+    showToast('修改已保存（' + done.length + ' 项），下一轮采集生效', true);
+    closeAttrEditModal();
+    loadAttrTypes();
+  } catch(e) {
+    setStatus('保存中断，请重新打开核对');
+    showToast('保存失败（已完成 ' + done.length + ' 项）: ' + (e && e.message ? e.message : e), false);
+  }
+}
+
+// ==============================
+//  属性提取：实体级字段映射（多实体共用一张表）
+//    每个实体可指定自己的「源字段 → 目标列」映射；留空 = 继承类型级映射。
+//    写入的始终是同一张 attr_<类型名> 表（列结构为各实体映射的并集）。
+// ==============================
+const ATTR_ENTITY_MAPPING_API = '/api/ha_data_store/attr_entity_mapping';
+
+// -------- 通讯采集内置预设（与后端 comm_presets.py 保持一致） --------
+// 约定：实体 ID 末段以 _calls / _sms / _traffic 结尾时，自动套用对应映射，
+// 使这些实体开箱即用。优先级：实体级配置 > 内置预设 > 类型级配置。
+// 注意：my_number（我方号码）不在这里，由 commPresetOf() 从实体 ID 动态叠加。
+const COMM_PRESETS = [
+  {
+    suffix: '_calls', label: '通话记录', arrayPath: '通话流水清单', keyField: 'call_time',
+    mapping: {
+      phone_number: 'party_number', number_location: 'party_place', call_time: 'time',
+      location: 'location',
+      // 通话的 type 是 呼叫/接听（方向）→ msg_type；源字段 call_type 才是 call_type 列
+      type: 'msg_type', call_type: 'call_type',
+      duration: 'duration', fee: 'cost',
+      location_coordinate: 'location_coordinate', number_isp: 'party_isp',
+      number_location_coordinate: 'party_coordinate',
+      '=语音': 'channel',
+    },
+  },
+  {
+    suffix: '_sms', label: '短信记录', arrayPath: '短信记录', keyField: 'datetime',
+    mapping: {
+      phone_number: 'party_number', datetime: 'time', type: 'msg_type', fee: 'cost',
+      number_isp: 'party_isp', number_location_coordinate: 'party_coordinate',
+      number_location: 'party_place', '=短信': 'channel',
+    },
+  },
+  {
+    suffix: '_traffic', label: '上网流量', arrayPath: '上网会话清单', keyField: 'datetime',
+    mapping: {
+      datetime: 'time', duration_seconds: 'duration', fee: 'cost',
+      volume_mb: 'traffic_usage', business_type: 'traffic_type', '=流量': 'channel',
+    },
+  },
+];
+
+// 从实体 ID 末段提取电话号码（与后端 comm_presets.extract_phone 一致）
+function commExtractPhone(entityId) {
+  const tail = String(entityId || '').trim().split('.').pop() || '';
+  const m = tail.match(/(\d{7,15})/);
+  return m ? m[1] : '';
+}
+
+// 按实体 ID 末段匹配预设（避免 sensor.sms_gateway_temp 这类误命中），
+// 并把 my_number（=号码）动态叠加进映射（返回副本，不污染常量）
+function commPresetOf(entityId) {
+  const eid = String(entityId || '').trim();
+  if (!eid) return null;
+  const tail = (eid.split('.').pop() || '').toLowerCase();
+  const p = COMM_PRESETS.find(x => tail.endsWith(x.suffix));
+  if (!p) return null;
+  const mapping = Object.assign({}, p.mapping);
+  const phone = commExtractPhone(eid);
+  if (phone) mapping['=' + phone] = 'my_number';
+  return Object.assign({}, p, { mapping: mapping, myNumber: phone });
+}
+
+// -------- 实体增删（编辑弹窗内的多实体配置） --------
+// 把表格里当前输入的值同步回 ctx.entities，避免重渲染时丢失未保存的编辑
+function _aeSyncEntityInputs() {
+  const ctx = attrEditCtx;
+  if (!ctx || !Array.isArray(ctx.entities)) return;
+  document.querySelectorAll('#attrEditEntityBody tr[data-idx]').forEach(tr => {
+    const idx = parseInt(tr.getAttribute('data-idx'), 10);
+    const e = ctx.entities[idx];
+    if (!e) return;
+    const idEl = tr.querySelector('input[data-role="entity_id"]');
+    const roomEl = tr.querySelector('input[data-role="room"]');
+    const modeEl = tr.querySelector('select[data-role="collect_mode"]');
+    const intEl = tr.querySelector('input[data-role="interval"]');
+    const apEl = tr.querySelector('select[data-role="array_path"]');
+    const kfEl = tr.querySelector('input[data-role="key_field"]');
+    const clEl = tr.querySelector('input[data-role="compare_limit"]');
+    const dpEl = tr.querySelector('input[data-role="decimal_places"]');
+    if (idEl) e.entity_id = (idEl.value || '').trim();
+    if (roomEl) e.room = (roomEl.value || '').trim();
+    if (modeEl) e.collect_mode = modeEl.value;
+    if (intEl) e.collect_interval = parseInt(intEl.value || '30', 10) || 30;
+    if (apEl) e.array_path = apEl.value || '';
+    if (kfEl) e.key_field = (kfEl.value || '').trim();
+    if (clEl) e.compare_limit = parseInt(clEl.value || '0', 10) || 0;
+    if (dpEl) {
+      const dv = (dpEl.value || '').trim();
+      e.decimal_places = dv === '' ? -2 : (parseInt(dv, 10));
+      if (Number.isNaN(e.decimal_places)) e.decimal_places = -2;
+    }
+  });
+}
+
+// 新增一行（沿用上一行的房间 / 采集方式 / 间隔，减少重复输入）
+function aeAddEntityRow(entityId) {
+  const ctx = attrEditCtx;
+  if (!ctx) return;
+  _aeSyncEntityInputs();
+  if (!Array.isArray(ctx.entities)) ctx.entities = [];
+  const last = ctx.entities[ctx.entities.length - 1] || {};
+  ctx.entities.push({
+    _isNew: true,
+    entity_id: entityId || '',
+    room: last.room || '',
+    collect_mode: last.collect_mode || 'poll',
+    collect_interval: last.collect_interval || 30,
+    field_mapping: '',
+  });
+  _aeRender();
+  const rows = document.querySelectorAll('#attrEditEntityBody tr[data-idx]');
+  const lastRow = rows[rows.length - 1];
+  if (lastRow) {
+    const inp = lastRow.querySelector('input[data-role="entity_id"]');
+    if (inp) { inp.focus(); if (!entityId) inp.select(); }
+  }
+}
+
+// 批量添加：粘贴多个 entity_id（逗号 / 换行 / 空格分隔）
+function aeBatchAddEntities() {
+  const ctx = attrEditCtx;
+  if (!ctx) return;
+  const raw = prompt('粘贴要添加的实体 ID（可用逗号、换行或空格分隔，支持一次多个）：\n'
+    + '例如：sensor.phone_a, sensor.phone_b', '');
+  if (raw === null) return;
+  const ids = String(raw).split(/[\s,，;；]+/).map(s => s.trim()).filter(s => s);
+  if (!ids.length) { showToast('没有解析到实体 ID', false); return; }
+  _aeSyncEntityInputs();
+  if (!Array.isArray(ctx.entities)) ctx.entities = [];
+  const exists = new Set(ctx.entities.map(e => (e.entity_id || '').trim()).filter(Boolean));
+  let added = 0, skipped = 0;
+  ids.forEach(id => {
+    if (exists.has(id)) { skipped++; return; }
+    exists.add(id);
+    const last = ctx.entities[ctx.entities.length - 1] || {};
+    ctx.entities.push({
+      _isNew: true, entity_id: id, room: last.room || '',
+      collect_mode: last.collect_mode || 'poll',
+      collect_interval: last.collect_interval || 30, field_mapping: '',
+    });
+    added++;
+  });
+  _aeRender();
+  showToast('已添加 ' + added + ' 个' + (skipped ? '，跳过重复 ' + skipped + ' 个' : '')
+    + '（点「保存」后生效）', true);
+}
+
+// 删除一行：待新增的直接移除；已存在的标记为「停用」（保存时软删，可再点一次恢复）
+function aeRemoveEntityRow(idx) {
+  const ctx = attrEditCtx;
+  if (!ctx || !Array.isArray(ctx.entities)) return;
+  _aeSyncEntityInputs();
+  const e = ctx.entities[idx];
+  if (!e) return;
+  if (e._isNew) {
+    ctx.entities.splice(idx, 1);
+  } else if (e._disabled) {
+    delete e._disabled;   // 恢复
+  } else {
+    e._disabled = true;
+  }
+  _aeRender();
+}
+let aeEntMapIdx = -1;      // 正在编辑的实体在 ctx.entities 中的下标
+
+// 该类型可用的目标列：通讯模式用固定字段表，其它模式取类型级映射的目标列
+function aeEntTargets() {
+  const ctx = attrEditCtx;
+  if (!ctx) return [];
+  if (ctx.mode === 'comm') {
+    return COMM_FIELD_DEFS.map(d => [d[0], d[2]]);
+  }
+  const out = [];
+  const seen = new Set();
+  Object.values(ctx.mapping || {}).forEach(t => {
+    if (t && !seen.has(t)) { seen.add(t); out.push([t, (ctx.types && ctx.types[t]) || 'TEXT']); }
+  });
+  return out;
+}
+
+// 计算「生效映射」。三层优先级是**整体**关系：上层存在就完全取代下层，
+// 只有上层为空时才看下一层 —— 不能写成「逐列回退」。
+// （曾经写错成逐列回退：流量实体在预设里找不到 party_number 时，
+//   就掉进了类型级的通话映射，面板上串出一堆不相干的源字段。）
+// 返回 {map, scope}，scope 为 entity / preset / type。
+function aeEffectiveMapping(own, presetMapping, typeMap) {
+  if (own && Object.keys(own).length) return { map: own, scope: 'entity' };
+  if (presetMapping && Object.keys(presetMapping).length) {
+    return { map: presetMapping, scope: 'preset' };
+  }
+  return { map: typeMap || {}, scope: 'type' };
+}
+
+// 在生效映射里反向找出某目标列的源字段（同一列有多个来源时取第一个）
+function aeSourceOf(target, effMap) {
+  const keys = Object.keys(effMap || {});
+  for (let i = 0; i < keys.length; i++) {
+    if (effMap[keys[i]] === target) return keys[i];
+  }
+  return '';
+}
+
+async function aeOpenEntityMapping(idx) {
+  const ctx = attrEditCtx;
+  const e = ctx && ctx.entities ? ctx.entities[idx] : null;
+  if (!e) return;
+  aeEntMapIdx = idx;
+  let own = {};
+  try { own = e.field_mapping ? JSON.parse(e.field_mapping) : {}; } catch (err) { own = {}; }
+  const typeMap = ctx.mapping || {};
+  const targets = aeEntTargets();
+
+  // 该实体的采集节点：行内下拉优先（可能刚改还没保存），其次库里读到的
+  const sel = document.querySelector(
+    '#attrEditEntityBody tr[data-idx="' + idx + '"] select[data-role="array_path"]');
+  const nodeRaw = sel ? (sel.value || '').trim() : String(e.array_path || '');
+  // 内置预设：实体级为空时用它作为展示值（真正采集时后端也会套用同一份）
+  const preset = commPresetOf(e.entity_id);
+  const eff = aeEffectiveMapping(own, preset ? preset.mapping : null, typeMap);
+  const effMap = eff.map;
+  const hasOwn = eff.scope === 'entity';
+  const node = nodeRaw || (preset ? preset.arrayPath : '');
+
+  const head = document.getElementById('aeEntMappingHead');
+  if (head) {
+    head.innerHTML = '实体 <code>' + escHtml(e.entity_id || '') + '</code> 的字段映射'
+      + (hasOwn
+          ? '（<span style="color:var(--accent)">自定义</span>）'
+          : (preset
+              ? '（<span style="color:var(--green)">内置预设：'
+                + escHtml(preset.label) + '</span>，按实体 ID 后缀 <code>'
+                + escHtml(preset.suffix) + '</code> 自动套用）'
+              : '（当前<b>继承</b>类型级映射）'))
+      + '<br>采集节点 <code>' + escHtml(node || '（继承类型级）') + '</code>'
+      + (preset && !nodeRaw
+          ? '<span class="hint">（来自内置预设）</span>' : '')
+      + '<br><span class="hint">下方「源字段」候选已按该节点下的字段刷新；'
+      + '留空 = 该列不写值（保留列默认值）；填 <code>=值</code> 表示写固定值。'
+      + '保存后立即生效于该实体的下一轮采集。</span>';
+  }
+  const body = document.getElementById('aeEntMappingBody');
+  if (body) {
+    body.innerHTML = targets.map(([target, type]) =>
+      // 只看**生效映射**（整体三层中的一层）。这里**不能**再逐列回退到类型级，
+      // 否则预设与类型级会串在一起（见 aeEffectiveMapping 的说明）。
+      _aeMappingRowHtml(aeSourceOf(target, effMap), target, type, target)
+    ).join('');
+  }
+  const box = document.getElementById('aeEntMappingBox');
+  if (box) { box.style.display = 'block'; box.scrollIntoView({ block: 'nearest' }); }
+
+  // 关键：按「该实体 + 该采集节点」探测字段，作为这一份映射的源字段候选
+  await aeLoadEntitySourceFields(e, node);
+}
+
+// 按「该实体的采集节点」探测字段，临时替换源字段候选（关闭映射面板时还原）
+async function aeLoadEntitySourceFields(e, node) {
+  const dl = document.getElementById('attrEditFieldList');
+  if (!dl) return;
+  if (!e || !e.entity_id) { dl.innerHTML = ''; return; }
+  let cands = [];
+  try {
+    const resp = await fetch(ATTR_STATE_API + '?entity_id=' + encodeURIComponent(e.entity_id));
+    const json = await resp.json();
+    if (json.success && json.data) {
+      cands = _aeFieldCandidates(json.data.attributes || {}, node || '');
+    }
+  } catch (err) { /* 探测失败时保留原候选 */ }
+  if (cands.length) {
+    dl.innerHTML = cands.map(f => '<option value="' + escAttr(f) + '"></option>').join('');
+  }
+  const head = document.getElementById('aeEntMappingHead');
+  if (head) {
+    head.insertAdjacentHTML('beforeend',
+      '<br><span class="hint">源字段候选：' + (cands.length
+        ? cands.length + ' 个（来自节点 ' + escHtml(node || '顶层标量') + '）'
+        : '探测失败，保留原候选，可直接手工填写') + '</span>');
+  }
+}
+
+function aeCloseEntityMapping() {
+  aeEntMapIdx = -1;
+  const box = document.getElementById('aeEntMappingBox');
+  if (box) box.style.display = 'none';
+  // 还原源字段候选为类型级候选（打开实体映射时被临时替换过）
+  _aeUpdateDatalists();
+}
+
+// 读实体表格某行的「采集节点」下拉当前值（"" = 继承类型级）
+function _aeEntityRowNode(idx) {
+  const sel = document.querySelector(
+    '#attrEditEntityBody tr[data-idx="' + idx + '"] select[data-role="array_path"]');
+  return sel ? (sel.value || '').trim() : '';
+}
+
+// 某行的「采集节点」变了：重新探测该实体在该节点下的字段，刷新该行的字段候选
+// （唯一键字段是源字段名，必须来自该实体自己的节点）
+let aeEntityNodeTimer = null;
+
+function aeOnEntityNodeChanged(sel) {
+  if (!attrEditCtx) return;
+  const tr = sel && sel.closest ? sel.closest('tr') : null;
+  const idx = tr ? parseInt(tr.getAttribute('data-idx'), 10) : -1;
+  if (idx < 0) return;
+  if (aeEntityNodeTimer) clearTimeout(aeEntityNodeTimer);
+  aeEntityNodeTimer = setTimeout(async () => {
+    aeEntityNodeTimer = null;
+    await _aeLoadEntityFields(true);
+    _aeUpdateDatalists();
+  }, 300);
+}
+
+// 读实体表格某行某个输入框的当前值（用于唯一键 / 去重窗口 / 小数位）
+function _aeEntityRowParam(idx, role, fallback) {
+  const tr = document.querySelector('#attrEditEntityBody tr[data-idx="' + idx + '"]');
+  const el = tr ? tr.querySelector('[data-role="' + role + '"]') : null;
+  return el ? (el.value || '') : (fallback === undefined ? '' : fallback);
+}
+
+function _aeCollectEntityMapping() {
+  const out = {};
+  document.querySelectorAll('#aeEntMappingBody tr[data-target]').forEach(tr => {
+    const target = tr.getAttribute('data-target');
+    const input = tr.querySelector('input[data-role="src"]');
+    const src = input ? (input.value || '').trim() : '';
+    if (src && target) out[src] = target;
+  });
+  return out;
+}
+
+async function aeSaveEntityMapping() {
+  const ctx = attrEditCtx;
+  const e = ctx && ctx.entities ? ctx.entities[aeEntMapIdx] : null;
+  if (!e) { showToast('请先在实体表格中点「编辑」', false); return; }
+  const row = document.querySelector('#attrEditEntityBody tr[data-idx="' + aeEntMapIdx + '"]');
+  const idInput = row ? row.querySelector('input[data-role="entity_id"]') : null;
+  const entityId = idInput ? (idInput.value || '').trim() : (e.entity_id || '');
+  if (!entityId) { showToast('实体 ID 不能为空', false); return; }
+  const mapping = _aeCollectEntityMapping();
+  try {
+    const resp = await fetch(ATTR_ENTITY_MAPPING_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        entity_id: entityId, attr_type: ctx.typeName, field_mapping: mapping,
+        array_path: _aeEntityRowNode(aeEntMapIdx),
+        key_field: _aeEntityRowParam(aeEntMapIdx, 'key_field', ''),
+        compare_limit: parseInt(_aeEntityRowParam(aeEntMapIdx, 'compare_limit', '0'), 10) || 0,
+        decimal_places: (() => {
+          const v = String(_aeEntityRowParam(aeEntMapIdx, 'decimal_places', '')).trim();
+          return v === '' ? -2 : parseInt(v, 10);
+        })(),
+      }),
+    });
+    const json = await resp.json();
+    if (!json.success) { showToast('保存失败: ' + (json.error || ''), false); return; }
+    e.field_mapping = Object.keys(mapping).length ? JSON.stringify(mapping) : '';
+    e.array_path = _aeEntityRowNode(aeEntMapIdx);
+    e.key_field = _aeEntityRowParam(aeEntMapIdx, 'key_field', '');
+    e.compare_limit = parseInt(_aeEntityRowParam(aeEntMapIdx, 'compare_limit', '0'), 10) || 0;
+    const _dpv = String(_aeEntityRowParam(aeEntMapIdx, 'decimal_places', '')).trim();
+    e.decimal_places = _dpv === '' ? -2 : parseInt(_dpv, 10);
+    _aeRender();
+    showToast('实体映射已保存（' + (Object.keys(mapping).length
+      ? Object.keys(mapping).length + ' 项' : '继承类型级') + '）', true);
+  } catch (err) {
+    showToast('保存失败: ' + err, false);
+  }
+}
+
+async function aeClearEntityMapping() {
+  if (aeEntMapIdx < 0) { showToast('请先在实体表格中点「编辑」', false); return; }
+  if (!confirm('清除该实体的自定义映射，改回「继承类型级」？')) return;
+  const ctx = attrEditCtx;
+  const e = ctx && ctx.entities ? ctx.entities[aeEntMapIdx] : null;
+  if (!e) return;
+  try {
+    const resp = await fetch(ATTR_ENTITY_MAPPING_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_id: e.entity_id, attr_type: ctx.typeName, field_mapping: {} }),
+    });
+    const json = await resp.json();
+    if (!json.success) { showToast('清除失败: ' + (json.error || ''), false); return; }
+    e.field_mapping = '';
+    _aeRender();
+    showToast('已清除自定义映射（恢复内置预设 / 继承类型级）', true);
+  } catch (err) {
+    showToast('清除失败: ' + err, false);
+  }
 }
 
 // ---------- 加载实体状态 ----------
@@ -7158,7 +9596,11 @@ function selectArrayPath(path) {
     const arr = getNestedValue(attrEntityState.attributes, path);
     if (Array.isArray(arr) && arr.length > 0 && typeof arr[0] === 'object') {
       const firstElem = arr[0];
-      populateFieldMapping(firstElem, 'attrFieldMappingBody');
+      if (attrCurrentMode === 'comm') {
+        populateCommFieldMapping(firstElem);
+      } else {
+        populateFieldMapping(firstElem, 'attrFieldMappingBody');
+      }
       populateKeyFieldSelect(firstElem);
     }
   }
@@ -7195,6 +9637,116 @@ function populateFieldMapping(firstElem, tbodyId) {
   tbody.innerHTML = html;
 }
 
+// ---------- 通讯固定字段定义（与后端 const.py COMM_FIELDS 保持一致） ----------
+const COMM_FIELD_DEFS = [
+  ['my_number',    '我方号码',   'TEXT'],
+  ['party_number', '对方号码',   'TEXT'],
+  ['party_place',  '对方归属地', 'TEXT'],
+  ['party_name',   '对方姓名',   'TEXT'],
+  ['time',         '通讯时间',   'TEXT'],
+  ['location',     '通讯地点',   'TEXT'],
+  ['msg_type',     '消息类型',   'TEXT'],
+  ['channel',      '数据来源',   'TEXT'],
+  ['call_type',    '呼叫类型',   'TEXT'],
+  ['duration',     '时长(秒)',   'INTEGER'],
+  ['cost',         '金额(元)',   'REAL'],
+  ['traffic_usage', '流量(MB)',  'REAL'],
+  ['traffic_type', '流量类型',   'TEXT'],
+  ['content',      '消息内容',   'TEXT'],
+  ['image_path',   '图片路径',   'TEXT'],
+  ['location_coordinate', '我的坐标',   'TEXT'],
+  ['party_isp',           '对方运营商', 'TEXT'],
+  ['party_coordinate',    '对方坐标',   'TEXT'],
+];
+
+// 常见源字段别名 → 自动预选，减轻手工映射负担
+const COMM_SOURCE_ALIASES = {
+  my_number:    ['my_number', 'myNumber', 'self_number', 'local_number', 'owner_number', 'my_phone'],
+  party_number: ['party_number', 'number', 'phone', 'phone_number', 'peer_number', 'other_number', 'address', 'remote_number'],
+  party_place:  ['party_place', 'place', 'area', 'attribution', 'carrier_place', 'home_place'],
+  party_name:   ['party_name', 'name', 'contact_name', 'display_name', 'peer_name'],
+  time:         ['time', 'datetime', 'date', 'timestamp', 'call_time', 'msg_time', 'created_at', 'create_time'],
+  location:     ['location', 'local', 'place_name', 'position'],
+  msg_type:     ['msg_type', 'message_type', 'type', 'content_type'],
+  channel:      ['channel', 'data_type', 'source', 'platform'],
+  call_type:    ['call_type', 'cell_type', 'direction', 'call_direction'],
+  duration:     ['duration', 'duration_sec', 'call_duration', 'seconds', 'talk_time'],
+  cost:         ['cost', 'fee', 'amount', 'price', 'money'],
+  traffic_usage: ['traffic_usage', 'traffic', 'data_usage', 'flow', 'usage',
+                  'total_bytes', 'data_amount', 'net_usage'],
+  traffic_type: ['traffic_type', 'traffic_kind', 'net_type', 'network_type',
+                 'data_network', 'net_mode', 'netmode'],
+  content:      ['content', 'msg', 'message', 'text', 'body', 'snippet'],
+  image_path:   ['image_path', 'image', 'img', 'img_path', 'pic', 'picture',
+                 'photo', 'image_url', 'img_url', 'file_path', 'path', 'local_path'],
+  location_coordinate: ['location_coordinate', 'my_coordinate', 'my_coord', 'my_location',
+                        'my_position', 'coordinate', 'coord', 'lonlat', 'lnglat',
+                        'gps', 'geo', 'position', 'address_coordinate', 'addr_coordinate'],
+  party_isp:    ['party_isp', 'isp', 'carrier', 'operator', 'party_carrier',
+                 'party_operator', 'sim_isp', 'network', 'telecom', 'province_isp'],
+  party_coordinate: ['party_coordinate', 'party_coord', 'party_position', 'party_location',
+                     'party_gps', 'party_geo', 'other_coordinate', 'peer_coordinate',
+                     'peer_position', 'target_coordinate'],
+};
+
+// ---------- 通讯模式：固定字段映射表（支持源字段 + 直接填固定值） ----------
+function populateCommFieldMapping(firstElem) {
+  const tbody = document.getElementById('attrCommMappingBody');
+  if (!tbody) return;
+  const srcFields = Object.keys(firstElem || {});
+  window.__commSrcFields = srcFields;
+  // 字段名候选（datalist 可下拉选择，也可自由输入）
+  const dl = document.getElementById('attrCommSrcList');
+  if (dl) {
+    dl.innerHTML = srcFields.map(sf => '<option value="' + escAttr(sf) + '"></option>').join('');
+  }
+
+  const inputStyle = 'width:100%;background:var(--card);color:var(--text);'
+    + 'border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;box-sizing:border-box';
+  let html = '';
+  COMM_FIELD_DEFS.forEach(item => {
+    const col = item[0], label = item[1], colType = item[2];
+    const required = (col === 'time');
+    // 自动匹配：优先同名字段，其次常见别名；都没有则留空由用户填写
+    let picked = srcFields.includes(col) ? col : '';
+    if (!picked) {
+      const aliases = COMM_SOURCE_ALIASES[col] || [];
+      for (const a of aliases) {
+        if (srcFields.includes(a)) { picked = a; break; }
+      }
+    }
+    html += '<tr>';
+    html += '<td>' + escHtml(label) + ' <span style="color:var(--text2);font-size:11px">' + escHtml(col) + '</span>'
+          + (required ? ' <span style="color:var(--orange)">*</span>' : '') + '</td>';
+    html += '<td><input type="text" list="attrCommSrcList" data-comm-col="' + escAttr(col) + '" '
+          + 'value="' + escAttr(picked) + '" placeholder="选择字段名，或直接填固定值" '
+          + 'oninput="commSrcInputChanged(this)" style="' + inputStyle + '"></td>';
+    html += '<td style="color:var(--text2);font-size:11px">' + escHtml(colType) + '</td>';
+    html += '</tr>';
+  });
+  tbody.innerHTML = html;
+  tbody.querySelectorAll('input[data-comm-col]').forEach(inp => commSrcInputChanged(inp));
+}
+
+// 判定输入内容：命名字段 → 源字段；其余 → 固定值（'=' 前缀可强制固定值）
+function commResolveSource(raw) {
+  return resolveMapValue(raw, window.__commSrcFields || []);
+}
+
+function commSrcInputChanged(inp) {
+  const info = commResolveSource(inp.value);
+  if (info.kind === 'field') {
+    inp.style.borderColor = 'var(--green)';
+    inp.title = '源字段：' + inp.value.trim();
+  } else if (info.kind === 'fixed') {
+    inp.style.borderColor = 'var(--orange)';
+    inp.title = '固定值：' + info.src.slice(1);
+  } else {
+    inp.style.borderColor = 'var(--border)';
+    inp.title = '';
+  }
+}
+
 function populateKeyFieldSelect(firstElem) {
   const sel = document.getElementById('attrKeyField');
   sel.innerHTML = '<option value="">-- 选择 --</option>';
@@ -7215,12 +9767,32 @@ function onAttrModeChange() {
   const entityId = document.getElementById('attrEntityId').value.trim();
   if (!entityId || !attrEntityState) return;
 
-  document.getElementById('attrListConfig').style.display = (attrCurrentMode === 'list' || attrCurrentMode === 'multi') ? 'block' : 'none';
-  document.getElementById('attrFieldsConfig').style.display = (attrCurrentMode === 'fields') ? 'block' : 'none';
-  document.getElementById('attrExtraFieldsStep').style.display = 'block';
-  document.getElementById('attrJsonNodesStep').style.display = 'block';
+  const isComm = (attrCurrentMode === 'comm');
+  const isListLike = (attrCurrentMode === 'list' || attrCurrentMode === 'multi' || isComm);
 
-  if (attrCurrentMode === 'list' || attrCurrentMode === 'multi') {
+  document.getElementById('attrListConfig').style.display = isListLike ? 'block' : 'none';
+  document.getElementById('attrFieldsConfig').style.display = (attrCurrentMode === 'fields') ? 'block' : 'none';
+  // 通讯模式不使用附加标量字段与 JSON 节点
+  document.getElementById('attrExtraFieldsStep').style.display = isComm ? 'none' : 'block';
+  document.getElementById('attrJsonNodesStep').style.display = isComm ? 'none' : 'block';
+
+  // 通讯模式：显示固定字段映射，隐藏自由映射与无意义的参数
+  document.getElementById('attrListConfigTitle').textContent = isComm ? '步骤 4：通讯数据采集配置' : '步骤 4：列表展开配置';
+  document.getElementById('attrFieldMappingWrap').style.display = isComm ? 'none' : 'block';
+  document.getElementById('attrCommMappingWrap').style.display = isComm ? 'block' : 'none';
+  // 对比最近条数 / 小数位数 各模式都需要（通讯模式也生效），不再隐藏
+  document.getElementById('attrCompareLimitHint').style.display = isComm ? 'block' : 'none';
+  // 通讯模式的去重窗口需覆盖单批同步量，默认给更大的值（仍可手动调整）
+  const compareInput = document.getElementById('attrCompareLimit');
+  if (isComm && (!compareInput.value || Number(compareInput.value) < 1000)) {
+    compareInput.value = '1000';
+  }
+  if (isComm) {
+    // 建议值；改用它名也不影响查询——查询侧会自动探测 mode=comm 的类型名
+    document.getElementById('attrTypeName').value = 'comm_records';
+  }
+
+  if (isListLike) {
     // 下拉框中自动选第一个数组节点
     const sel = document.getElementById('attrArrayPath');
     const firstOpt = sel.options[1];  // 跳过 "-- 选择数组 --"
@@ -7371,8 +9943,12 @@ function populateFieldMapping(source, tbodyId, isFieldsMode) {
 }
 
 function autoSuggestTypeName(entityId) {
-  const parts = entityId.replace(/^sensor\./, '').replace(/[^a-zA-Z0-9_]/g, '_');
   const input = document.getElementById('attrTypeName');
+  if (attrCurrentMode === 'comm') {
+    if (!input.value) input.value = 'comm_records';
+    return;
+  }
+  const parts = entityId.replace(/^sensor\./, '').replace(/[^a-zA-Z0-9_]/g, '_');
   if (!input.value) {
     const suffix = attrCurrentMode === 'list' ? '_daily' : (attrCurrentMode === 'multi' ? '_multi' : '_snap');
     input.value = parts + suffix;
@@ -7398,54 +9974,86 @@ async function saveAttrConfig() {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(typeName)) { showToast('类型名只能包含英文、数字和下划线，且不能以数字开头', false); return; }
   if (!mode) { showToast('请选择采集模式', false); return; }
 
-  if (mode === 'list' || mode === 'multi') {
+  const isCommMode = (mode === 'comm');
+
+  if (mode === 'list' || mode === 'multi' || isCommMode) {
     if (!arrayPath) { showToast('请选择数组路径', false); return; }
     if (!keyField) { showToast('请选择唯一键字段', false); return; }
   }
 
   // 收集字段映射
-  const tbodyId = (mode === 'list' || mode === 'multi') ? 'attrFieldMappingBody' : 'attrFieldsMappingBody';
-  const checks = document.querySelectorAll('#' + tbodyId + ' input[type="checkbox"]:checked');
-  if (checks.length === 0) { showToast('请至少勾选一个字段', false); return; }
-
   const fieldMapping = {};
   const fieldTypes = {};
-  checks.forEach(cb => {
-    const src = cb.getAttribute('data-field');
-    const targetInput = document.querySelector('#' + tbodyId + ' input[type="text"][data-field="' + escAttr(src) + '"]');
-    const target = targetInput ? targetInput.value.trim() || src : src;
-    fieldMapping[src] = target;
+  if (isCommMode) {
+    // 通讯模式：收集 源字段/固定值 → 目标列（未匹配到字段名的内容按固定值写入）
+    const usedSrc = {};
+    let duplicateSrc = '';
+    document.querySelectorAll('#attrCommMappingBody input[data-comm-col]').forEach(inp => {
+      const col = inp.getAttribute('data-comm-col');
+      const info = commResolveSource(inp.value);
+      if (!info.src) return;
+      if (usedSrc[info.src]) {
+        duplicateSrc = info.src.startsWith('=') ? info.src.slice(1) : info.src;
+        return;
+      }
+      usedSrc[info.src] = true;
+      fieldMapping[info.src] = col;
+      const def = COMM_FIELD_DEFS.find(d => d[0] === col);
+      fieldTypes[col] = def ? def[2] : 'TEXT';
+    });
+    if (duplicateSrc) {
+      showToast('取值「' + duplicateSrc + '」被多个字段共用，请为每个字段填写不同的字段名或固定值', false);
+      return;
+    }
+    if (!Object.values(fieldMapping).includes('time')) {
+      showToast('「通讯时间」为必填项：请选择字段或填写固定值', false);
+      return;
+    }
+  } else {
+    const tbodyId = (mode === 'list' || mode === 'multi') ? 'attrFieldMappingBody' : 'attrFieldsMappingBody';
+    const checks = document.querySelectorAll('#' + tbodyId + ' input[type="checkbox"]:checked');
+    if (checks.length === 0) { showToast('请至少勾选一个字段', false); return; }
+    checks.forEach(cb => {
+      const src = cb.getAttribute('data-field');
+      const targetInput = document.querySelector('#' + tbodyId + ' input[type="text"][data-field="' + escAttr(src) + '"]');
+      const target = targetInput ? targetInput.value.trim() || src : src;
+      fieldMapping[src] = target;
 
-    const typeSelect = document.querySelector('#' + tbodyId + ' select[data-field-type="' + escAttr(src) + '"]');
-    fieldTypes[target] = typeSelect ? typeSelect.value : 'REAL';
-  });
+      const typeSelect = document.querySelector('#' + tbodyId + ' select[data-field-type="' + escAttr(src) + '"]');
+      fieldTypes[target] = typeSelect ? typeSelect.value : 'REAL';
+    });
+  }
 
-  // 收集附加字段 extra_fields（所有模式，仅独立列）
+  // 收集附加字段 extra_fields（通讯模式不使用）
   const extraFields = {};
   const extraFieldTypes = {};
-  document.querySelectorAll('#attrExtraFieldsBody input[type="checkbox"]:checked').forEach(cb => {
-    const src = cb.getAttribute('data-field');
-    const targetInput = document.querySelector('#attrExtraFieldsBody input[type="text"][data-field="' + escAttr(src) + '"]');
-    const target = targetInput ? targetInput.value.trim() || src.replace(/\./g, '_') : src.replace(/\./g, '_');
-    extraFields[src] = target;
-    const typeSelect = document.querySelector('#attrExtraFieldsBody select[data-field-type="' + escAttr(src) + '"]');
-    extraFieldTypes[target] = typeSelect ? typeSelect.value : 'TEXT';
-  });
+  if (!isCommMode) {
+    document.querySelectorAll('#attrExtraFieldsBody input[type="checkbox"]:checked').forEach(cb => {
+      const src = cb.getAttribute('data-field');
+      const targetInput = document.querySelector('#attrExtraFieldsBody input[type="text"][data-field="' + escAttr(src) + '"]');
+      const target = targetInput ? targetInput.value.trim() || src.replace(/\./g, '_') : src.replace(/\./g, '_');
+      extraFields[src] = target;
+      const typeSelect = document.querySelector('#attrExtraFieldsBody select[data-field-type="' + escAttr(src) + '"]');
+      extraFieldTypes[target] = typeSelect ? typeSelect.value : 'TEXT';
+    });
+  }
   // 合并 fieldTypes
   Object.assign(fieldTypes, extraFieldTypes);
 
-  // 收集JSON节点 extra_json_nodes（所有模式）
+  // 收集JSON节点 extra_json_nodes（通讯模式不使用）
   const extraJsonNodes = [];
-  document.querySelectorAll('#attrJsonNodesBody input[type="checkbox"]:checked').forEach(cb => {
-    extraJsonNodes.push(cb.getAttribute('data-node'));
-  });
+  if (!isCommMode) {
+    document.querySelectorAll('#attrJsonNodesBody input[type="checkbox"]:checked').forEach(cb => {
+      extraJsonNodes.push(cb.getAttribute('data-node'));
+    });
+  }
 
   const body = {
     type_name: typeName,
     mode: mode,
     entity_id: entityId,
-    array_path: (mode === 'list' || mode === 'multi') ? arrayPath : '',
-    key_field: (mode === 'list' || mode === 'multi') ? keyField : '',
+    array_path: (mode === 'list' || mode === 'multi' || isCommMode) ? arrayPath : '',
+    key_field: (mode === 'list' || mode === 'multi' || isCommMode) ? keyField : '',
     compare_limit: compareLimit,
     field_mapping: fieldMapping,
     field_types: fieldTypes,
@@ -10738,7 +13346,7 @@ function apiHideAllParamRows() {
     ['apiDateSingle', 0], ['apiDateRange', 0], ['apiMonthRow', 0], ['apiYearRow', 0],
     ['apiHealthNameRow', 0], ['apiHealthTypeRow', 0], ['apiMediaUserRow', 0],
     ['apiMediaIdRow', 0], ['apiMediaNameRow', 0], ['apiDeviceUserNameRow', 0],
-    ['apiDeviceUserDirRow', 0],
+    ['apiDeviceUserDirRow', 0], ['apiCommRow', 0], ['apiOtdRow', 0],
   ];
   rows.forEach(function (item) {
     const el = document.getElementById(item[0]);
@@ -10762,6 +13370,10 @@ function onApiTypeChange() {
   // 默认隐藏定时精灵参数区；仅 timer_* 分支会重新显示
   const elTimerRow = document.getElementById('apiTimerRow');
   if (elTimerRow) elTimerRow.style.display = 'none';
+  // 通讯数据查询（comm:*）：静态分组，参数区按查询类型动态渲染
+  const isCommApi = qt.startsWith('comm:');
+  const elCommRow = document.getElementById('apiCommRow');
+  if (elCommRow) elCommRow.style.display = 'none';
   // 默认隐藏自定义参数区；仅自定义路由分支会重新显示
   document.getElementById('apiCustomParamsRow').style.display = 'none';
   // 默认隐藏实体→网络的调用方式区；仅 push 分支会重新显示
@@ -10952,6 +13564,27 @@ function onApiTypeChange() {
     const timerRow = document.getElementById('apiTimerRow');
     if (timerRow) timerRow.style.display = 'block';
     renderTimerParams(qt);
+    return;
+  }
+
+  if (isCommApi) {
+    // 通讯数据查询：隐藏所有常规输入行，只显示通讯专属参数区（按类型 + 预设动态渲染）
+    apiHideAllParamRows();
+    if (elCommRow) elCommRow.style.display = 'block';
+    const commParts = qt.slice('comm:'.length).split(':');
+    renderCommParams(commParts[0], commParts[1] || '');
+    // 顺带刷新「自动填写」区里的库状态与待回填统计
+    if (typeof loadCommBackfillStatus === 'function') loadCommBackfillStatus();
+    return;
+  }
+
+  if (qt.startsWith('otd:')) {
+    // 历史今日（设备 / 环境）：独立接口 /onthisday，参数区按数据源渲染
+    apiHideAllParamRows();
+    const elOtdRow = document.getElementById('apiOtdRow');
+    if (elOtdRow) elOtdRow.style.display = 'block';
+    const otdParts = qt.slice('otd:'.length).split(':');
+    renderOtdParams(otdParts[0], otdParts[1] || 'stats');
     return;
   }
 
@@ -11917,6 +14550,52 @@ function generateApiUrl() {
     }
     document.getElementById('apiUrlOutput').value = timerUrl;
     renderTimerApiHint(qt, timerUrl, tValues);
+    return;
+  }
+
+  // 通讯数据查询：独立路径 /comm，参数从 apiCommParamsBox 读取
+  if (qt.startsWith('comm:')) {
+    // 查询类型形如 comm:stats:month_in_year，第二段是预设（只决定参数默认值）
+    const commParts = qt.slice('comm:'.length).split(':');
+    const commType = commParts[0];
+    const commPreset = commParts[1] || '';
+    let commUrl = BASE_PATH + '/api/ha_data_store/comm?type=' + encodeURIComponent(commType);
+    if (selectedApiKey) commUrl += '&key=' + encodeURIComponent(selectedApiKey);
+    document.querySelectorAll('#apiCommParamsBox [data-name]').forEach(inp => {
+      const key = inp.getAttribute('data-name');
+      const val = (inp.value || '').trim();
+      if (key && val !== '') commUrl += '&' + encodeURIComponent(key) + '=' + encodeURIComponent(val);
+    });
+    // 返回字段多选（全不勾选则不带 fields，后端返回全部列）
+    const pickedFields = [];
+    document.querySelectorAll('#apiCommParamsBox input[data-field-check]:checked').forEach(cb => {
+      pickedFields.push(cb.getAttribute('data-field-check'));
+    });
+    if (pickedFields.length) commUrl += '&fields=' + encodeURIComponent(pickedFields.join(','));
+    document.getElementById('apiUrlOutput').value = commUrl;
+    renderCommHint(commType, commPreset);
+    return;
+  }
+
+  // 历史今日（设备 / 环境）：独立路径 /onthisday，参数从 apiOtdParamsBox 读取
+  if (qt.startsWith('otd:')) {
+    const otdParts = qt.slice('otd:'.length).split(':');
+    const otdSource = otdParts[0];
+    const otdMode = otdParts[1] || 'stats';
+    let otdUrl = BASE_PATH + '/api/ha_data_store/onthisday?source=' + encodeURIComponent(otdSource);
+    if (selectedApiKey) otdUrl += '&key=' + encodeURIComponent(selectedApiKey);
+    document.querySelectorAll('#apiOtdParamsBox [data-name]').forEach(inp => {
+      const key = inp.getAttribute('data-name');
+      const val = (inp.value || '').trim();
+      if (key && val !== '') otdUrl += '&' + encodeURIComponent(key) + '=' + encodeURIComponent(val);
+    });
+    const pickedOtdFields = [];
+    document.querySelectorAll('#apiOtdParamsBox input[data-field-check]:checked').forEach(cb => {
+      pickedOtdFields.push(cb.getAttribute('data-field-check'));
+    });
+    if (pickedOtdFields.length) otdUrl += '&fields=' + encodeURIComponent(pickedOtdFields.join(','));
+    document.getElementById('apiUrlOutput').value = otdUrl;
+    renderOtdHint(otdSource, otdMode);
     return;
   }
 
@@ -14258,6 +16937,708 @@ async function extLoadIntoApi() {
       group.appendChild(opt);
     });
   } catch (e) { /* 忽略 */ }
+}
+
+// ---------- 通讯数据查询（comm:*）：参数规格 + 动态渲染 ----------
+// 与后端 comm.py 的过滤/统计参数保持一致
+const COMM_TYPE_HINTS = {
+  records: '明细列表：返回符合条件的通讯记录，支持排序、分页与内容截断。',
+  dates: '哪些日期有数据：按月/年或自定义区间，返回每天的条数、时长、金额与联系人数（可用于日历打点）。',
+  stats: '统计分析：按时间粒度分组汇总，每桶返回条数 / 时长 / 金额 / 去重联系人数 / 活跃天数 / 平均时长，'
+    + '并附合计行（total）与可选的每桶均值（avg_per_bucket）。'
+    + '时间范围留空 = 全部数据；填 year=2026 或 month=2026-09 即「指定年 / 指定年月」；'
+    + '再叠加 party_numbers / party_names 就是「指定号码 / 姓名」的汇总。',
+  ranking: '排行榜：用「时间粒度 + 周期 period」限定年/月/日后再按维度排名，不填 period 则统计全部；排序依据可选 次数/时长/金额。',
+  trend: '趋势序列：按 日/月/年/小时/星期 分桶统计；fill=1 时用 0 补全空缺的日期或月份。',
+  summary: '汇总统计：总量、首末时间、总时长、总金额、联系人数、活跃天数，以及来源/消息类型/呼叫类型分布。',
+  parties: '联系人清单：按对方号码聚合，含姓名、条数、时长、金额与首末通讯时间。',
+  places: '地点清单：按通讯地点聚合。',
+  heatmap: '时段分布：星期 × 小时 的记录数量分布，可用于绘制热力图。',
+  crosstab: '交叉汇总：行维度 × 列维度 的度量矩阵，用于「按消息类型 / 地点 / 呼叫类型汇总某人或某号码的条数、时长」这类分析。'
+    + 'rows 支持 1~3 个维度（逗号分隔），cols 最多 1 个（留空则只输出各行合计）。',
+  compare: '周期对比：当前周期 vs 上一周期（环比）vs 去年同期（同比），直接返回差值与增长率。'
+    + 'period=day|week|month（默认）|quarter|year；date 为基准日（默认今天）；compare=prev|yoy|both。',
+  contact: '联系人档案：以 party_number 或 party_name 为身份，一次拿到总量、首末通讯、多久没联系、'
+    + '平均间隔、按小时 / 星期 / 月份 / 来源分布、联系最多的日子与最近明细。',
+  longest: '单次 Top N：按单条记录的时长（by=duration）或金额（by=cost）取前 N 条，'
+    + '区别于按人聚合的排行榜。',
+  quality: '数据质量检查：时间为空 / 时间格式异常 / 时长与金额异常 / 内容为空 / 图片消息缺路径，'
+    + '并列出疑似重复记录（同时间 + 号码 + 内容）与时间覆盖情况。',
+  meta: '数据概览：表结构、总量、时间跨度、去重联系人数，以及实际存在的渠道 / 消息类型 / 呼叫类型 / '
+    + '归属地 / 地点 / 年份 / 月份清单——可用于填充下拉、判断采集是否正常。',
+  onthisday: '历史上的今日：按「月日相同」筛选历年同一天的数据。'
+    + 'date 可填 09-29 或 2026-09-29（留空 = 今天）；years / min_year / max_year / exclude_current 限定年份范围。'
+    + 'mode=detail 详细明细（逐条记录 + 各年汇总）；'
+    + 'stats 按年 / 年月 / 年月日汇总；ranking 排行榜；parties 对方号码 / 姓名汇总；'
+    + 'records 明细（at=now 即「此刻」）；crosstab 交叉汇总。',
+};
+
+// 交叉汇总 / 分组可用的维度（与后端 _RANK_DIMENSIONS 保持一致）
+const COMM_DIMENSION_KEYS = ['msg_type', 'location', 'party_place', 'call_type',
+  'party_name', 'party_number', 'channel', 'my_number'];
+
+// 「历史上的今日」模式（下拉选项第二段 → mode）
+const COMM_OTD_MODE_LABELS = {
+  stats: '历年今日汇总',
+  detail: '历年今日详细明细',
+  ranking: '历年今日排行榜',
+  parties: '历年今日联系人汇总',
+  records: '历年今日明细',
+  crosstab: '历年今日交叉汇总',
+};
+
+// 统计分析预设入口（下拉选项 → 默认粒度）；参数区仍可自由修改
+const COMM_STATS_PRESETS = {
+  year_all: 'year',
+  month_all: 'month',
+  month_in_year: 'month',
+  day_in_month: 'day',
+  party: 'month',
+};
+
+const COMM_STATS_PRESET_HINTS = {
+  year_all: '全部数据 → 按年汇总：时间范围留空即可，粒度已设为 year。',
+  month_all: '全部数据 → 按年月汇总：时间范围留空即可，粒度已设为 month。',
+  month_in_year: '指定年 → 按月汇总：在「指定年 year」填 2026（月份 / 日期留空），粒度 month。',
+  day_in_month: '指定年月 → 按日汇总：在「指定年月 month」填 2026-09（年份 / 日期留空），粒度 day。',
+  party: '指定号码 / 姓名 → 按年 / 年月 / 年月日汇总：填「对方号码」或「对方姓名」（支持逗号分隔多值），'
+    + '再用「统计粒度 granularity」选 year / month / day；可叠加月份或时间区间收窄范围。',
+};
+
+function _commFieldSpecs(type, preset) {
+  const P = function (name, label, ph, def) {
+    return { name: name, label: label, ph: ph || '', type: 'text', def: def || '' };
+  };
+  const D = function (name, label) {
+    return { name: name, label: label, ph: '', type: 'date', def: '' };
+  };
+  const M = function (name, label) {
+    return { name: name, label: label, ph: '', type: 'month', def: '' };
+  };
+  const S = function (name, label, options, def) {
+    return { name: name, label: label, ph: '', type: 'select', options: options, def: def || '' };
+  };
+  // F：返回字段多选（点选列名；全不勾选 = 全部字段）
+  const F = function (name, label) {
+    return {
+      name: name, label: label, ph: '', type: 'fields', defs: [],
+      options: ['id'].concat(COMM_FIELD_DEFS.map(function (d) { return d[0]; })),
+    };
+  };
+
+  const common = [
+    D('date', '指定日期 date'),
+    M('month', '指定月份 month'),
+    P('year', '指定年份 year', '2026'),
+    P('start', '开始时间 start', '2026-09-01 00:00:00'),
+    P('end', '结束时间 end', '2026-09-30 23:59:59'),
+    P('party_numbers', '对方号码（逗号分隔多值）', '13800000000,13900000000'),
+    P('my_numbers', '我方号码（逗号分隔多值）', '13800000000'),
+    P('numbers', '任一方号码（逗号分隔多值）', '13800000000'),
+    P('party_names', '对方姓名（逗号分隔，模糊匹配）', '张三,李四'),
+    P('places', '通讯地点（逗号分隔，模糊匹配）', '北京,上海'),
+    P('party_places', '归属地（逗号分隔，模糊匹配）', '广东'),
+    P('channels', '数据来源（逗号分隔）', 'call,sms,wechat,qq'),
+    P('msg_types', '消息类型（逗号分隔）', 'text,image,voice'),
+    P('call_types', '呼叫类型（逗号分隔）', 'in,out,missed'),
+    P('keyword', '消息内容关键词 keyword', '关键词'),
+    P('min_duration', '最小时长（秒）', ''),
+    P('max_duration', '最大时长（秒）', ''),
+    P('min_cost', '最小金额（元）', ''),
+    P('max_cost', '最大金额（元）', ''),
+  ];
+
+  if (type === 'records') {
+    return common.concat([
+      S('sort', '排序字段 sort', ['', 'time', 'duration', 'cost', 'party_name', 'party_number', 'id'], 'time'),
+      S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+      P('limit', '条数 limit', '100', '100'),
+      P('offset', '偏移 offset', '0'),
+      P('content_len', '内容截断长度 content_len', '0=不截断'),
+      F('fields', '返回字段 fields（点选需要的列）'),
+    ]);
+  }
+  if (type === 'dates') {
+    return common.concat([P('limit', '最大天数 limit', '400', '400')]);
+  }
+  if (type === 'stats') {
+    // 统计分析：过滤条件 + 粒度 + 汇总开关（granularity 默认值由预设决定）
+    const granDefault = COMM_STATS_PRESETS[preset] || 'month';
+    return [
+      P('year', '指定年 year（留空=全部数据）', '2026'),
+      M('month', '指定年月 month'),
+      D('date', '指定日期 date'),
+      P('start', '开始时间 start', '2026-09-01'),
+      P('end', '结束时间 end', '2026-09-30'),
+      P('party_numbers', '对方号码（逗号分隔多值）', '13800000000,13900000000'),
+      P('party_names', '对方姓名（逗号分隔，模糊匹配）', '张三,李四'),
+      P('my_numbers', '我方号码（逗号分隔多值）', ''),
+      P('numbers', '任一方号码（逗号分隔多值）', ''),
+      P('places', '通讯地点（逗号分隔，模糊匹配）', ''),
+      P('party_places', '归属地（逗号分隔，模糊匹配）', ''),
+      P('channels', '数据来源（逗号分隔）', ''),
+      P('msg_types', '消息类型（逗号分隔）', ''),
+      P('call_types', '呼叫类型（逗号分隔）', ''),
+      P('keyword', '消息内容关键词 keyword', ''),
+      P('min_duration', '最小时长（秒）', ''),
+      P('max_duration', '最大时长（秒）', ''),
+      P('min_cost', '最小金额（元）', ''),
+      P('max_cost', '最大金额（元）', ''),
+      S('granularity', '统计粒度 granularity',
+        ['year', 'quarter', 'month', 'week', 'day', 'hour', 'weekday'], granDefault),
+      S('sort', '排序方式 sort', ['time', 'value'], 'time'),
+      S('order', '排序方向 order（留空=按 sort 自动）', ['', 'desc', 'asc'], ''),
+      S('by', '排序依据 by（sort=value 时生效）', ['count', 'duration', 'cost'], 'count'),
+      P('limit', '最大桶数 limit', '1000', '1000'),
+      S('fill', '补全空缺时间桶 fill', ['0', '1'], '0'),
+      S('with_total', '返回合计行 with_total', ['1', '0'], '1'),
+      S('with_avg', '返回每桶均值 with_avg', ['0', '1'], '0'),
+    ];
+  }
+  if (type === 'onthisday') {
+    // 历史上的今日：输出模式由下拉选项的第二段预设决定（preset = mode）
+    const otdMode = preset || 'stats';
+    const otdCommon = [
+      // 输出模式：默认值来自下拉选项的预设，也可在此直接切换（切换会重建参数区）
+      { name: 'mode', label: '输出模式 mode', ph: '', type: 'select', def: otdMode,
+        options: ['stats', 'detail', 'ranking', 'parties', 'records', 'crosstab'],
+        onchange: 'onCommModeChange(this)' },
+      P('date', '基准日 date（09-29 或 2026-09-29，留空 = 今天）', '留空 = 今天'),
+      P('years', '只看这些年份 years（逗号分隔）', '2024,2025'),
+      P('min_year', '起始年份 min_year', '2020'),
+      P('max_year', '结束年份 max_year', '2026'),
+      S('exclude_current', '排除今年 exclude_current（只看往年）', ['0', '1'], '0'),
+      P('party_numbers', '对方号码（逗号分隔多值）', '13800000000'),
+      P('party_names', '对方姓名（逗号分隔，模糊匹配）', '张三,李四'),
+      P('msg_types', '消息类型（逗号分隔）', 'text,call'),
+      P('places', '通讯地点（逗号分隔，模糊匹配）', '北京'),
+      P('party_places', '归属地（逗号分隔，模糊匹配）', ''),
+      P('call_types', '呼叫类型（逗号分隔）', 'in,out'),
+      P('channels', '数据来源（逗号分隔）', ''),
+      P('keyword', '消息内容关键词 keyword', ''),
+    ];
+    if (otdMode === 'ranking') {
+      return otdCommon.concat([
+        S('dimension', '排行维度 dimension', COMM_DIMENSION_KEYS, 'party_name'),
+        S('by', '排行依据 by', ['count', 'duration', 'cost'], 'count'),
+        P('limit', '条数 limit', '20', '20'),
+        P('offset', '偏移 offset', '0'),
+      ]);
+    }
+    if (otdMode === 'parties') {
+      return otdCommon.concat([
+        S('by', '排序依据 by', ['count', 'duration', 'cost'], 'count'),
+        P('limit', '条数 limit', '50', '50'),
+        P('offset', '偏移 offset', '0'),
+      ]);
+    }
+    if (otdMode === 'records') {
+      return otdCommon.concat([
+        P('at', '时刻 at（HH:MM，或 now = 此刻）', 'now'),
+        S('align', '时刻对齐 align（hour = 整点）', ['', 'hour', '30', '15', '5'], ''),
+        P('hours', '跨度 hours（自对齐起点向后 N 小时）', '1'),
+        P('minutes', '跨度 minutes（自对齐起点向后 N 分钟）', '30'),
+        P('window', '中心窗口 window（以 at 为中心 ± 分钟）', '30'),
+        P('hour', '时段 hour（9 / 9,10 / 9-18）', ''),
+        S('sort', '排序字段 sort', ['time', 'duration', 'cost', 'party_name', 'party_number', 'id'], 'time'),
+        S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+        P('limit', '条数 limit', '100', '100'),
+        P('offset', '偏移 offset', '0'),
+        P('content_len', '内容截断长度 content_len', '0=不截断'),
+        F('fields', '返回字段 fields（点选需要的列）'),
+      ]);
+    }
+    if (otdMode === 'detail') {
+      // 详细明细：逐条记录（扁平列表）+ 各年汇总
+      return otdCommon.concat([
+        P('limit', '明细条数 limit', '100', '100'),
+        P('offset', '偏移 offset', '0'),
+        S('sort', '排序字段 sort', ['time', 'duration', 'cost', 'party_name', 'party_number', 'id'], 'time'),
+        S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+        P('content_len', '内容截断长度 content_len', '0=不截断'),
+        F('fields', '返回字段 fields（点选需要的列）'),
+        S('with_years', '附带各年汇总 with_years', ['1', '0'], '1'),
+        P('years_limit', '最多汇总年数 years_limit', '20', '20'),
+        P('at', '时刻 at（HH:MM 或 now，留空 = 整天）', 'now'),
+        S('align', '时刻对齐 align（hour = 整点）', ['', 'hour', '30', '15', '5'], ''),
+        P('hours', '跨度 hours（自对齐起点向后 N 小时）', '1'),
+        P('minutes', '跨度 minutes', '30'),
+        P('hour', '时段 hour（9 / 9,10 / 9-18）', ''),
+      ]);
+    }
+    if (otdMode === 'crosstab') {
+      return otdCommon.concat([
+        P('rows', '行维度 rows（1~3 个，逗号分隔）', 'msg_type'),
+        P('cols', '列维度 cols（0~1 个，留空 = 只看行合计）', 'party_name'),
+        S('metric', '测度 metric', ['count', 'duration', 'cost'], 'count'),
+        P('limit', '最大行数 limit', '30', '30'),
+        P('col_limit', '最大列数 col_limit', '20', '20'),
+      ]);
+    }
+    // stats（默认）
+    return otdCommon.concat([
+      S('granularity', '汇总粒度 granularity', ['year', 'month', 'day'], 'year'),
+      S('with_total', '返回合计行 with_total', ['1', '0'], '1'),
+      S('with_avg', '返回每桶均值 with_avg', ['0', '1'], '0'),
+      P('limit', '最大桶数 limit', '200', '200'),
+    ]);
+  }
+  if (type === 'crosstab') {
+    return [
+      D('date', '指定日期 date'),
+      M('month', '指定月份 month'),
+      P('year', '指定年份 year', '2026'),
+      P('start', '开始时间 start', '2026-09-01'),
+      P('end', '结束时间 end', '2026-09-30'),
+      P('rows', '行维度 rows（1~3 个，逗号分隔）', 'msg_type'),
+      P('cols', '列维度 cols（0~1 个，留空 = 只看行合计）', 'party_name'),
+      S('metric', '测度 metric', ['count', 'duration', 'cost'], 'count'),
+      P('party_numbers', '对方号码（逗号分隔多值）', ''),
+      P('party_names', '对方姓名（逗号分隔，模糊匹配）', ''),
+      P('my_numbers', '我方号码（逗号分隔多值）', ''),
+      P('msg_types', '消息类型（逗号分隔）', 'text,call'),
+      P('places', '通讯地点（逗号分隔，模糊匹配）', ''),
+      P('party_places', '归属地（逗号分隔，模糊匹配）', ''),
+      P('call_types', '呼叫类型（逗号分隔）', ''),
+      P('channels', '数据来源（逗号分隔）', ''),
+      P('keyword', '消息内容关键词 keyword', ''),
+      P('limit', '最大行数 limit', '30', '30'),
+      P('col_limit', '最大列数 col_limit', '20', '20'),
+    ];
+  }
+  if (type === 'compare') {
+    return [
+      D('date', '基准日 date（决定「当前周期」，留空 = 今天）'),
+      S('period', '对比周期 period', ['day', 'week', 'month', 'quarter', 'year'], 'month'),
+      S('compare', '对比项 compare', ['both', 'prev', 'yoy'], 'both'),
+      P('party_numbers', '对方号码（逗号分隔多值）', ''),
+      P('party_names', '对方姓名（逗号分隔，模糊匹配）', ''),
+      P('my_numbers', '我方号码（逗号分隔多值）', ''),
+      P('places', '通讯地点（逗号分隔，模糊匹配）', ''),
+      P('party_places', '归属地（逗号分隔，模糊匹配）', ''),
+      P('channels', '数据来源（逗号分隔）', ''),
+      P('msg_types', '消息类型（逗号分隔）', ''),
+      P('call_types', '呼叫类型（逗号分隔）', ''),
+      P('keyword', '消息内容关键词 keyword', ''),
+      P('min_duration', '最小时长（秒）', ''),
+      P('min_cost', '最小金额（元）', ''),
+    ];
+  }
+  if (type === 'contact') {
+    return [
+      P('party_number', '对方号码 party_number', '13800000000'),
+      P('party_name', '对方姓名 party_name（单个，支持模糊）', '张三'),
+      D('date', '限定日期 date'),
+      M('month', '限定月份 month'),
+      P('year', '限定年份 year', ''),
+      P('start', '开始时间 start', ''),
+      P('end', '结束时间 end', ''),
+      P('recent', '最近明细条数 recent', '20', '20'),
+      P('top_days', '联系最多日子 top_days', '10', '10'),
+      P('months', '按月分布条数 months', '24', '24'),
+      P('content_len', '明细内容截断 content_len', '80'),
+      P('channels', '限定来源（逗号分隔）', ''),
+      P('msg_types', '限定消息类型（逗号分隔）', ''),
+      P('call_types', '限定呼叫类型（逗号分隔）', ''),
+      P('keyword', '消息内容关键词 keyword', ''),
+    ];
+  }
+  if (type === 'longest') {
+    return common.concat([
+      S('by', '排序依据 by', ['duration', 'cost'], 'duration'),
+      S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+      P('limit', '条数 limit', '20', '20'),
+      P('offset', '偏移 offset', '0'),
+      P('content_len', '内容截断长度 content_len', '0=不截断'),
+      F('fields', '返回字段 fields（点选需要的列）'),
+    ]);
+  }
+  if (type === 'quality') {
+    return common.concat([P('dup_limit', '重复样例条数 dup_limit', '10', '10')]);
+  }
+  if (type === 'meta') {
+    return common;
+  }
+  if (type === 'ranking') {
+    return common.concat([
+      S('granularity', '时间粒度 granularity', ['', 'day', 'month', 'year'], ''),
+      P('period', '周期 period', '2026 / 2026-09 / 2026-09-01'),
+      S('dimension', '排行维度 dimension',
+        ['party_number', 'party_name', 'location', 'party_place', 'my_number', 'channel', 'msg_type', 'call_type'],
+        'party_name'),
+      S('by', '排行依据 by', ['count', 'duration', 'cost'], 'count'),
+      P('limit', '条数 limit', '20', '20'),
+      P('offset', '偏移 offset', '0'),
+    ]);
+  }
+  if (type === 'trend') {
+    return common.concat([
+      S('granularity', '时间粒度 granularity', ['day', 'month', 'year', 'hour', 'weekday'], 'day'),
+      S('fill', '补全空缺桶 fill', ['0', '1'], '0'),
+      P('limit', '最大桶数 limit', '1000', '1000'),
+    ]);
+  }
+  if (type === 'parties') {
+    return common.concat([
+      S('by', '排序依据 by', ['count', 'duration', 'cost'], 'count'),
+      P('limit', '条数 limit', '100', '100'),
+      P('offset', '偏移 offset', '0'),
+    ]);
+  }
+  if (type === 'places') {
+    return common.concat([
+      P('limit', '条数 limit', '100', '100'),
+      P('offset', '偏移 offset', '0'),
+    ]);
+  }
+  return common;
+}
+
+// 通用参数区渲染（通讯查询与历史今日共用）
+function _renderParamSpecs(box, specs) {
+  if (!box) return;
+  const inputStyle = 'width:100%;padding:5px;font-size:12px;background:var(--input-bg);'
+    + 'color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box';
+  let html = '';
+  specs.forEach(function (sp) {
+    // 字段多选：点选需要返回的列（全不勾选 = 返回全部字段）
+    if (sp.type === 'fields') {
+      html += '<div style="grid-column:1/-1">';
+      html += '<label style="font-size:11px">' + escHtml(sp.label) + '</label>';
+      html += '<div style="display:flex;flex-wrap:wrap;gap:4px 12px;padding:4px 2px">';
+      (sp.options || []).forEach(function (op) {
+        const checked = (sp.defs || []).indexOf(op) >= 0 ? ' checked' : '';
+        html += '<label style="font-size:11px;display:inline-flex;align-items:center;gap:3px;cursor:pointer">'
+          + '<input type="checkbox" data-field-check="' + escAttr(op) + '"' + checked
+          + ' onchange="generateApiUrl()">' + escHtml(op) + '</label>';
+      });
+      html += '</div>';
+      html += '<div style="font-size:11px;color:var(--text2)">全不勾选 = 返回全部字段</div>';
+      html += '</div>';
+      return;
+    }
+    html += '<div>';
+    html += '<label style="font-size:11px">' + escHtml(sp.label) + '</label>';
+    if (sp.type === 'select') {
+      html += '<select data-name="' + escAttr(sp.name) + '" onchange="'
+        + escAttr(sp.onchange || 'generateApiUrl()') + '" style="' + inputStyle + '">';
+      (sp.options || []).forEach(function (op) {
+        const label = (op === '') ? '（全部 / 不限）' : op;
+        html += '<option value="' + escAttr(op) + '"' + (op === sp.def ? ' selected' : '') + '>'
+          + escHtml(label) + '</option>';
+      });
+      html += '</select>';
+    } else {
+      html += '<input type="' + escAttr(sp.type) + '" data-name="' + escAttr(sp.name) + '" '
+        + 'value="' + escAttr(sp.def) + '" placeholder="' + escAttr(sp.ph) + '" '
+        + 'oninput="generateApiUrl()" style="' + inputStyle + '">';
+    }
+    html += '</div>';
+  });
+  box.innerHTML = html;
+  generateApiUrl();
+}
+
+function renderCommParams(type, preset) {
+  _renderParamSpecs(document.getElementById('apiCommParamsBox'),
+    _commFieldSpecs(type, preset || ''));
+}
+
+// 切换「历史今日」输出模式：重建参数区（各模式的字段集不同）
+function onCommModeChange(sel) {
+  renderCommParams('onthisday', (sel && sel.value) || 'stats');
+}
+
+// ==============================
+//  通讯字段回填（归属地 / 运营商 / 坐标）
+//    数据源：data/phone2region.zdb（号码归属地/运营商）+ data/city_coordinates.json（城市坐标）
+//    只填空值、不联网；类型名留空时后端自动探测（attr_type_defs 中 mode=comm 者）
+// ==============================
+const COMM_BACKFILL_API = '/api/ha_data_store/comm/backfill';
+let commBackfillBusy = false;
+
+async function loadCommBackfillStatus() {
+  const box = document.getElementById('commBackfillStatus');
+  if (!box) return;
+  box.textContent = '正在读取归属地库状态…';
+  try {
+    const resp = await fetch(COMM_BACKFILL_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    if (!json.success) {
+      box.innerHTML = '⚠ ' + escHtml(json.error || '读取失败');
+      return;
+    }
+    const r = json.region || {}, c = json.coords || {}, t = json.table || {};
+    const parts = [];
+    if (r.available) {
+      parts.push('归属地库 <b>' + escHtml(r.version || '') + '</b>（' + escHtml(r.source || '')
+        + '，' + (r.size_kb || 0) + ' KB）');
+    } else {
+      parts.push('<span style="color:#e67e22">归属地库不可用：请把 phone2region.zdb 放到 data/ 目录</span>');
+    }
+    parts.push('坐标表 <b>' + (c.cities || 0) + '</b> 个城市');
+    if (t.success) {
+      const blanks = t.blanks || {};
+      const blankText = Object.keys(blanks).map(k => k + ' ' + blanks[k]).join('、');
+      parts.push('表 <code>' + escHtml(t.table || '') + '</code> 共 ' + (t.total || 0)
+        + ' 行，待回填 <b>' + (t.pending || 0) + '</b> 行'
+        + (blankText ? '（' + escHtml(blankText) + '）' : ''));
+    } else {
+      parts.push('<span style="color:#e67e22">⚠ ' + escHtml(t.error || '通讯表不可用') + '</span>');
+    }
+    box.innerHTML = parts.join('　|　');
+  } catch (err) {
+    box.innerHTML = '⚠ 读取失败: ' + escHtml(String(err));
+  }
+}
+
+async function runCommBackfill(dry) {
+  if (commBackfillBusy) return;
+  const box = document.getElementById('commBackfillStatus');
+  const overwriteEl = document.getElementById('commBackfillOverwrite');
+  const limitEl = document.getElementById('commBackfillLimit');
+  const limit = limitEl ? (parseInt(limitEl.value || '0', 10) || 0) : 0;
+  const onlyEmpty = !(overwriteEl && overwriteEl.checked);
+  if (!dry && onlyEmpty) {
+    const hinted = box ? (box.textContent || '').trim() : '';
+    if (!confirm('将用本地归属地库补全通讯表中的空字段（不覆盖已有内容、不联网）。\n\n'
+      + hinted + '\n\n继续？')) return;
+  }
+  commBackfillBusy = true;
+  if (box) box.innerHTML = dry ? '🧪 正在预览…' : '⏳ 正在回填…';
+  try {
+    const resp = await fetch(COMM_BACKFILL_API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: dry, only_empty: onlyEmpty, limit }),
+    });
+    const json = await resp.json();
+    if (!json.success) {
+      if (box) box.innerHTML = '⚠ ' + escHtml(json.error || '执行失败');
+      showToast('回填失败: ' + (json.error || ''), false);
+      return;
+    }
+    const filled = json.filled || {};
+    const detail = Object.keys(filled).length
+      ? Object.keys(filled).map(k => k + ' +' + filled[k]).join('、')
+      : '无字段变化';
+    const summary = (dry ? '🧪 预览：' : '✅ 完成：')
+      + '扫描 ' + (json.scanned || 0) + ' 行，'
+      + (dry ? '将更新 ' : '更新 ') + (json.updated || 0) + ' 行（' + detail + '）'
+      + (json.no_region ? '，号码查不到归属地 ' + json.no_region + ' 条' : '')
+      + (json.no_coord ? '，地名查不到坐标 ' + json.no_coord + ' 次' : '')
+      + (json.coords_ready === false ? '（坐标表不可用，已跳过坐标）' : '');
+    if (box) box.innerHTML = summary;
+    showToast(summary, true);
+    if (!dry) loadCommBackfillStatus();
+  } catch (err) {
+    if (box) box.innerHTML = '⚠ 执行失败: ' + escHtml(String(err));
+    showToast('回填失败: ' + err, false);
+  } finally {
+    commBackfillBusy = false;
+  }
+}
+
+function renderCommHint(type, preset) {
+  const el = document.getElementById('apiCommHint');
+  if (!el) return;
+  const isOtd = (type === 'onthisday');
+  let html = (isOtd ? '📜 <b>历史上的今日</b>：' : '📞 <b>通讯数据查询</b>：')
+    + escHtml(COMM_TYPE_HINTS[type] || '');
+  if (type === 'stats') {
+    if (preset && COMM_STATS_PRESET_HINTS[preset]) {
+      html += '<br>💡 <b>当前预设</b>：' + escHtml(COMM_STATS_PRESET_HINTS[preset]);
+    }
+    html += '<br>📊 时间范围留空即「<b>全部数据</b>」；填 year / month / date 即「<b>指定年 / 年月 / 日</b>」；'
+      + '再叠加 party_numbers / party_names 即「<b>指定号码 / 姓名</b>」的汇总。'
+      + '返回体含 <b>total</b>（合计）与可选 <b>avg_per_bucket</b>（每桶均值）。';
+  }
+  if (isOtd) {
+    const modeSel = document.querySelector('#apiCommParamsBox [data-name="mode"]');
+    const mode = (modeSel && modeSel.value) || preset || 'stats';
+    html += '<br>💡 <b>当前模式</b>：' + escHtml(COMM_OTD_MODE_LABELS[mode] || mode)
+      + '（<code>mode=' + escHtml(mode) + '</code>）';
+    if (mode === 'detail') {
+      html += '；<b>rows</b> 是逐条记录（扁平列表，即「每一条历史今日的数据」），'
+        + '另附 <b>year_summaries</b>（各年汇总）与 <b>summary</b>（总体汇总）；'
+        + '用 <b>limit</b> / <b>offset</b> 分页，<b>with_years=0</b> 可关闭年度汇总，'
+        + '并可按 <b>at</b> / <b>align</b> / <b>hour</b> 只看某时刻';
+    }
+    if (mode === 'records') {
+      html += '；<b>at=now</b> 看「此刻」：'
+        + '<b>align=hour</b> 取整点区间（现在 09:02 → 09:00~10:00），'
+        + '<b>hours</b> / <b>minutes</b> 指定跨度（align=hour&amp;hours=2 → 09:00~11:00），'
+        + '<b>window</b> 为以 at 为中心的分钟窗口，<b>hour</b> 可写 9 / 9,10 / 9-18';
+    }
+    html += '<br>📅 参数区里的 month / start / end（时间区间）在「历史今日」中不生效，'
+      + '请改用 <b>date</b>（基准日，09-29 或 2026-09-29）与 '
+      + '<b>years</b> / <b>min_year</b> / <b>max_year</b> / <b>exclude_current</b>（年份范围）。';
+  }
+  if (type === 'crosstab') {
+    html += '<br>📊 可选维度：' + escHtml(COMM_DIMENSION_KEYS.join(' / '));
+  }
+  html += '<br>数据来自「系统配置 → 属性提取」中的「<b>通讯数据采集</b>」配置。'
+    + '数据表类型名<b>自动探测</b>（取 attr_type_defs 中 mode=comm 且数据表已存在者），'
+    + '无需在本页填写；如需明确指定，请设置 HA 实体 '
+    + '<code>text.ha_data_store_comm_type_name</code>。';
+  el.innerHTML = html;
+}
+
+// ---------- 历史今日 · 设备 / 环境（通用模块 onthisday.py）----------
+const OTD_SOURCE_DEFS = {
+  comm: {
+    label: '通讯数据',
+    dims: ['party_name', 'party_number', 'location', 'party_place', 'msg_type',
+      'call_type', 'channel', 'my_number'],
+    metrics: ['count', 'duration', 'cost'],
+    hint: '数据来自属性提取的通讯数据采集（类型名自动探测，可用 text.ha_data_store_comm_type_name 指定）。',
+  },
+  device: {
+    label: '设备开关',
+    dims: ['entity_id', 'name', 'room'],
+    metrics: ['count', 'duration', 'energy', 'avg_duration'],
+    hint: '数据来自 device_history（设备开关记录）：一次开关一行，进行中的记录 off_time 为空。',
+  },
+  env: {
+    label: '环境数据',
+    dims: ['entity_id', 'name', 'room'],
+    metrics: ['count', 'avg_value', 'max_value', 'min_value'],
+    hint: '数据来自 env_<metric>（temperature / humidity / pm25 / co2 / power / sensor）；'
+      + '不指定 env_metric 时会合并所有存在的指标表，均值按采样数加权。'
+      + '注意：交叉汇总的「测度 metric」与环境指标不是同一个参数，环境指标请用 env_metric。',
+  },
+};
+
+const OTD_METRIC_LABELS = [
+  'count（条数 / 次数 / 采样数）', 'duration（时长，秒）', 'cost（金额，元）',
+  'energy（用电，kWh）', 'avg_duration（平均时长，秒）',
+  'avg_value（平均值）', 'max_value（最大值）', 'min_value（最小值）',
+];
+
+// detail 模式可点选的列（与各表实际列对应）
+const OTD_DETAIL_COLUMNS = {
+  comm: ['time', 'my_number', 'party_number', 'party_place', 'party_name', 'location',
+    'msg_type', 'channel', 'call_type', 'duration', 'cost', 'content', 'image_path'],
+  device: ['on_time', 'off_time', 'entity_id', 'name', 'room', 'duration',
+    'energy_consumed', 'on_power', 'off_power', 'cross_day'],
+  env: ['datetime', 'entity_id', 'name', 'room', 'value'],
+};
+
+function _otdFieldSpecs(source, mode) {
+  const src = OTD_SOURCE_DEFS[source] || OTD_SOURCE_DEFS.device;
+  const P = function (name, label, ph, def) {
+    return { name: name, label: label, ph: ph || '', type: 'text', def: def || '' };
+  };
+  const D = function (name, label) {
+    return { name: name, label: label, ph: '', type: 'date', def: '' };
+  };
+  const S = function (name, label, options, def) {
+    return { name: name, label: label, ph: '', type: 'select', options: options, def: def || '' };
+  };
+
+  const common = [
+    { name: 'mode', label: '输出模式 mode', ph: '', type: 'select', def: mode || 'stats',
+      options: ['stats', 'detail', 'ranking', 'crosstab'],
+      onchange: 'onOtdModeChange(this)' },
+    D('date', '基准日 date（09-29 或 2026-09-29，留空 = 今天）'),
+    P('years', '只看这些年份 years（逗号分隔）', '2024,2025'),
+    P('min_year', '起始年份 min_year', ''),
+    P('max_year', '结束年份 max_year', ''),
+    S('exclude_current', '排除今年 exclude_current（只看往年）', ['0', '1'], '0'),
+    P('at', '时刻 at（HH:MM 或 now = 此刻）', 'now'),
+    S('align', '时刻对齐 align（hour = 整点）', ['', 'hour', '30', '15', '5'], ''),
+    P('hours', '跨度 hours（自对齐起点向后 N 小时）', '1'),
+    P('minutes', '跨度 minutes（自对齐起点向后 N 分钟）', '30'),
+    P('window', '中心窗口 window（以 at 为中心 ± 分钟）', ''),
+    P('hour', '时段 hour（9 / 9,10 / 9-18）', ''),
+  ];
+
+  const sourceFields = {
+    comm: [
+      P('party_numbers', '对方号码（逗号分隔多值）', ''),
+      P('party_names', '对方姓名（逗号分隔，模糊）', ''),
+      P('msg_types', '消息类型（逗号分隔）', ''),
+      P('places', '通讯地点（逗号分隔，模糊）', ''),
+      P('call_types', '呼叫类型（逗号分隔）', ''),
+    ],
+    device: [
+      P('entity_ids', '设备实体 entity_ids（逗号分隔）', 'switch.ac'),
+      P('rooms', '房间 rooms（逗号分隔）', '客厅'),
+      P('names', '设备名称 names（逗号分隔，模糊）', '空调'),
+    ],
+    env: [
+      P('env_metric', '环境指标 env_metric（留空 = 全部）', 'temperature'),
+      P('entity_ids', '实体 entity_ids（逗号分隔）', 'sensor.t1'),
+      P('rooms', '房间 rooms（逗号分隔）', '客厅'),
+    ],
+  }[source] || [];
+
+  const statsFields = [
+    S('granularity', '汇总粒度 granularity',
+      ['year', 'quarter', 'month', 'week', 'day', 'hour', 'weekday'], 'year'),
+    P('limit', '最大桶数 limit', '1000', '1000'),
+    S('fill', '补全空缺桶 fill', ['0', '1'], '0'),
+    S('with_avg', '返回每桶均值 with_avg', ['0', '1'], '0'),
+  ];
+  const detailFields = [
+    P('limit', '明细条数 limit', '100', '100'),
+    P('offset', '偏移 offset', '0'),
+    S('sort', '排序字段 sort', ['', 'time', 'on_time', 'datetime', 'value'], ''),
+    S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+    P('content_len', '内容截断 content_len', '0=不截断'),
+    { name: 'fields', label: '返回字段 fields（点选需要的列）', ph: '', type: 'fields',
+      defs: [], options: ['id'].concat(OTD_DETAIL_COLUMNS[source] || []) },
+    S('with_years', '附带各年汇总 with_years', ['1', '0'], '1'),
+    P('years_limit', '最多汇总年数 years_limit', '30', '30'),
+  ];
+  const rankingFields = [
+    S('dimension', '排行维度 dimension', src.dims, src.dims[0] || ''),
+    S('by', '排行依据 by', src.metrics, 'count'),
+    S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+    P('limit', '条数 limit', '20', '20'),
+    P('offset', '偏移 offset', '0'),
+  ];
+  const crosstabFields = [
+    P('rows', '行维度 rows（1~3 个，逗号分隔）', 'room'),
+    P('cols', '列维度 cols（0~1 个，留空 = 只看行合计）', 'name'),
+    S('metric', '测度 metric', src.metrics, 'count'),
+    P('limit', '最大行数 limit', '30', '30'),
+    P('col_limit', '最大列数 col_limit', '20', '20'),
+  ];
+
+  // 只给当前模式需要的字段：同名字段（limit / order / metric）若同时出现会互相覆盖
+  const modeFields = {
+    stats: statsFields, detail: detailFields,
+    ranking: rankingFields, crosstab: crosstabFields,
+  };
+  return common.concat(sourceFields, modeFields[mode] || modeFields.stats);
+}
+
+function renderOtdParams(source, mode) {
+  window.__otdSource = source;
+  _renderParamSpecs(document.getElementById('apiOtdParamsBox'), _otdFieldSpecs(source, mode));
+  renderOtdHint(source, mode);
+}
+
+// 切换输出模式：重建参数区（各模式字段不同）
+function onOtdModeChange(sel) {
+  renderOtdParams(window.__otdSource || 'device', (sel && sel.value) || 'stats');
+}
+
+function renderOtdHint(source, mode) {
+  const el = document.getElementById('apiOtdHint');
+  if (!el) return;
+  const src = OTD_SOURCE_DEFS[source] || OTD_SOURCE_DEFS.device;
+  const modeSel = document.querySelector('#apiOtdParamsBox [data-name="mode"]');
+  const current = (modeSel && modeSel.value) || mode || 'stats';
+  el.innerHTML = '📜 <b>历史上的今日 · ' + escHtml(src.label) + '</b>：'
+    + '按「月日相同」筛选历年同一天的数据，基准日由 <b>date</b> 决定（留空 = 今天）。'
+    + '<br>' + escHtml(src.hint)
+    + '<br>💡 当前模式 <code>mode=' + escHtml(current) + '</code>；'
+    + '可用指标：' + escHtml(src.metrics.join(' / '))
+    + '；可用维度：' + escHtml(src.dims.join(' / '))
+    + '<br>接口：<code>/api/ha_data_store/onthisday?source=' + escHtml(source) + '</code>';
 }
 
 // 渲染 ext 接口的参数输入框（基于定义中的动态参数 params 结构）

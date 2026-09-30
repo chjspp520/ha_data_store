@@ -20,11 +20,11 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta
 
+from .app_settings import get_list, set_list
 from .const import (
     DEFAULT_TIMEZONE,
     RECENT_DAYS_ENTITY_ID,
@@ -32,7 +32,6 @@ from .const import (
     RECENT_WINDOW_DAYS_DEFAULT,
     RECENT_WINDOW_DAYS_MAX,
     RECENT_WINDOW_DAYS_MIN,
-    TABLE_API_SETTINGS,
     TABLE_DEVICE_HISTORY,
 )
 
@@ -79,52 +78,16 @@ def get_window_days(hass=None) -> int:
 
 
 def get_exclude_entities(db_path: str) -> list[str]:
-    """读取排除实体列表（api_settings.recent_exclude_entities，JSON 数组）。
+    """读取排除实体列表（api_settings.recent_exclude_entities）。
 
-    兼容逗号/换行分隔的纯文本写法（便于前端手输）。
+    容错与兼容逻辑统一在 app_settings.get_list（JSON 数组 + 纯文本写法 + 全角逗号）。
     """
-    try:
-        conn = sqlite3.connect(db_path)
-        try:
-            row = conn.execute(
-                f"SELECT svalue FROM {TABLE_API_SETTINGS} WHERE skey = ?",
-                (RECENT_EXCLUDE_SETTING_KEY,),
-            ).fetchone()
-        finally:
-            conn.close()
-    except Exception:
-        return []
-    raw = (row[0] if row else "") or ""
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return [str(x).strip() for x in data if str(x).strip()]
-    except Exception:
-        pass
-    return [p.strip() for p in raw.replace("\n", ",").split(",") if p.strip()]
+    return get_list(db_path, RECENT_EXCLUDE_SETTING_KEY)
 
 
 def set_exclude_entities(db_path: str, entity_ids) -> list[str]:
     """保存排除实体列表（去重、去空），返回实际保存的列表。"""
-    out: list[str] = []
-    seen: set[str] = set()
-    for x in entity_ids or []:
-        s = str(x or "").strip()
-        if s and s not in seen:
-            seen.add(s)
-            out.append(s)
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            f"INSERT OR REPLACE INTO {TABLE_API_SETTINGS} (skey, svalue) VALUES (?, ?)",
-            (RECENT_EXCLUDE_SETTING_KEY, json.dumps(out, ensure_ascii=False)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return out
+    return set_list(db_path, RECENT_EXCLUDE_SETTING_KEY, entity_ids)
 
 
 def _range_conds(entities, start, end, date, month, year, window_days):

@@ -41,6 +41,7 @@ from .const import (
     TABLE_API_SOURCE_CONFIGS,
     TABLE_API_KEYS,
     TABLE_API_SETTINGS,
+    TODAY_IN_HISTORY_EXCLUDE_SETTING_KEY,
     TABLE_VACUUM_TYPE_DEFS,
     TABLE_VACUUM_CONFIGS,
     TABLE_VACUUM_HISTORY,
@@ -66,8 +67,15 @@ from .const import (
     ATTR_MODE_FIELDS,
     ATTR_MODE_LIST,
     ATTR_MODE_MULTI,
+    ATTR_MODE_COMM,
     EXTRA_JSON_COLUMN,
     ATTR_TABLE_PREFIX,
+    COMM_FIELDS,
+    COMM_COLUMNS,
+    COMM_COLUMN_TYPES,
+    COMM_REQUIRED_COLUMNS,
+    COMM_INDEX_DEFS,
+    COMM_DEFAULT_TYPE_NAME,
     get_attr_table_name,
     VALID_METRICS,
     get_env_table_name,
@@ -88,6 +96,7 @@ from .recent_devices import (
     get_window_days,
     set_exclude_entities,
 )
+from .app_settings import get_list, set_list
 from .insights import build_timeline_sync, compute_room_occupancy_sync
 from .metrics import (
     compute_metrics_query_sync,
@@ -9339,6 +9348,145 @@ class RecentEntitiesView(_BaseDBView):
 
 
 # ========================================================================== #
+#  10.5b ★ 历史今日 — 排除实体配置 ★                                           #
+#     挂载路径: GET/POST /api/ha_data_store/onthisday/exclude                  #
+#              GET      /api/ha_data_store/onthisday/entities                 #
+#     存储: api_settings.today_in_history_exclude_entities（JSON 数组）         #
+#     作用: 与「历史今日」设置项一起，同时控制 API 与传感器                        #
+# ========================================================================== #
+class OnThisDayExcludeView(_BaseDBView):
+    """「历史今日」排除实体配置（被排除的 entity_id 不进入任何 source / mode 的统计）。
+
+    GET  /api/ha_data_store/onthisday/exclude
+      → {success, count, exclude: ["sensor.a", "switch.b"]}
+    POST /api/ha_data_store/onthisday/exclude
+      Body: {"exclude": ["sensor.a", "switch.b"]} 或 {"text": "sensor.a,switch.b\\nsensor.c"}
+      → 去重去空后保存，返回保存后的列表（并立即刷新「历史今日」传感器）
+
+    说明：本设置对「历史今日」API 与传感器同时生效；单次查询还可用参数
+    `exclude_entities` 临时追加排除项，两者取并集。
+    """
+
+    url = "/api/ha_data_store/onthisday/exclude"
+    name = "api:ha_data_store:onthisday_exclude"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        items = await self._exec_in_executor(
+            hass, get_list, db_path, TODAY_IN_HISTORY_EXCLUDE_SETTING_KEY
+        )
+        return self.json({"success": True, "count": len(items), "exclude": items})
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        raw = body.get("exclude")
+        if raw is None:
+            raw = body.get("text") or ""
+        if isinstance(raw, str):
+            raw = raw.replace("，", ",").replace("\n", ",").split(",")
+        if not isinstance(raw, (list, tuple)):
+            return self.json(
+                {"success": False, "error": "exclude 需为数组，或逗号/换行分隔的文本"},
+                status_code=400,
+            )
+        items = await self._exec_in_executor(
+            hass, set_list, db_path, TODAY_IN_HISTORY_EXCLUDE_SETTING_KEY, list(raw)
+        )
+
+        # 保存后立即刷新「历史今日」传感器（失败不影响保存结果）
+        try:
+            sensor = hass.data.get(DOMAIN, {}).get("today_in_history_sensor")
+            if sensor is not None:
+                await sensor._async_refresh()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[onthisday] 排除实体保存后刷新传感器失败: %s", exc)
+
+        _LOGGER.info("[onthisday] 历史今日排除实体已保存: %d 个", len(items))
+        return self.json({"success": True, "count": len(items), "exclude": items})
+
+
+class OnThisDayEntitiesView(_BaseDBView):
+    """历史今日：数据表内出现过的 entity_id 唯一值（供 db_viewer 选择排除项用）。
+
+    GET /api/ha_data_store/onthisday/entities
+      → {success, count, rows: [{entity_id, name, room, table}]}
+
+    扫描 device_history、env_*、attr_* 三类表（历史今日的三个数据源），
+    合并 entity_id 并集；同一条 entity_id 取首个出现表的 name / room。
+    """
+
+    url = "/api/ha_data_store/onthisday/entities"
+    name = "api:ha_data_store:onthisday_entities"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+
+        def _load() -> list[dict]:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            out: list[dict] = []
+            seen: set[str] = set()
+            try:
+                tables = [r["name"] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND ("
+                    f"name = '{TABLE_DEVICE_HISTORY}' OR name GLOB 'env_*' OR name GLOB 'attr_*')"
+                ).fetchall()]
+                for tbl in tables:
+                    cols = {r["name"] for r in conn.execute(f'PRAGMA table_info("{tbl}")')}
+                    if "entity_id" not in cols:
+                        continue
+                    name_expr = 'MAX("name")' if "name" in cols else "''"
+                    room_expr = 'MAX("room")' if "room" in cols else "''"
+                    try:
+                        rows = conn.execute(
+                            f'SELECT "entity_id" AS entity_id, {name_expr} AS name, '
+                            f'{room_expr} AS room FROM "{tbl}" '
+                            f"WHERE IFNULL(\"entity_id\", '') <> '' GROUP BY \"entity_id\""
+                        ).fetchall()
+                    except sqlite3.OperationalError:
+                        continue
+                    for r in rows:
+                        eid = str(r["entity_id"] or "").strip()
+                        if not eid or eid in seen:
+                            continue
+                        seen.add(eid)
+                        out.append({
+                            "entity_id": eid,
+                            "name": str(r["name"] or ""),
+                            "room": str(r["room"] or ""),
+                            "table": tbl,
+                        })
+            except sqlite3.OperationalError:
+                pass
+            finally:
+                conn.close()
+            out.sort(key=lambda x: x["entity_id"])
+            return out
+
+        rows = await self._exec_in_executor(hass, _load)
+        return self.json({"success": True, "count": len(rows), "rows": rows})
+
+
+# ========================================================================== #
 #  10.6 ★ 指标管理（元数据 + 通用指标引擎）★                                   #
 #      GET/POST/DELETE /api/ha_data_store/metrics                            #
 #      GET  /api/ha_data_store/metrics_schema                                #
@@ -10475,6 +10623,24 @@ def _normalize_extra_fields_api(extra_fields) -> dict:
     return result
 
 
+def _comm_columns_sql() -> list:
+    """生成通讯固定字段的列定义片段列表。"""
+    defs = []
+    for col, col_type, _label, _required in COMM_FIELDS:
+        default = "''" if col_type == "TEXT" else "0"
+        defs.append(f'"{col}" {col_type} NOT NULL DEFAULT {default}')
+    return defs
+
+
+def _ensure_comm_indexes_api(conn: sqlite3.Connection, tbl: str) -> None:
+    """为通讯数据表补齐查询索引（幂等）：时间/号码/姓名/地点。"""
+    for suffix, cols in COMM_INDEX_DEFS:
+        col_sql = ", ".join(f'"{c}"' for c in cols)
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{tbl}_{suffix} ON {tbl} ({col_sql});"
+        )
+
+
 class TableColumnsView(_BaseDBView):
     """获取指定数据表的列名。"""
 
@@ -10537,21 +10703,51 @@ class AttrConfigView(_BaseDBView):
         collect_mode = body.get("collect_mode", "poll").strip()
         room = body.get("room", "").strip()
 
+        if mode == ATTR_MODE_COMM and not type_name:
+            # 通讯模式：未指定类型名时使用约定的默认类型
+            type_name = COMM_DEFAULT_TYPE_NAME
         if not type_name:
             return self.json({"success": False, "error": "type_name 不能为空"}, status_code=400)
         if not entity_id:
             return self.json({"success": False, "error": "entity_id 不能为空"}, status_code=400)
         if not field_mapping:
             return self.json({"success": False, "error": "field_mapping 不能为空"}, status_code=400)
-        if mode not in (ATTR_MODE_FIELDS, ATTR_MODE_LIST, ATTR_MODE_MULTI):
-            return self.json({"success": False, "error": f"mode 必须是 {ATTR_MODE_FIELDS}、{ATTR_MODE_LIST} 或 {ATTR_MODE_MULTI}"}, status_code=400)
+        if mode not in (ATTR_MODE_FIELDS, ATTR_MODE_LIST, ATTR_MODE_MULTI, ATTR_MODE_COMM):
+            return self.json({"success": False, "error": f"mode 必须是 {ATTR_MODE_FIELDS}、{ATTR_MODE_LIST}、{ATTR_MODE_MULTI} 或 {ATTR_MODE_COMM}"}, status_code=400)
         if collect_mode not in ("poll", "event"):
             return self.json({"success": False, "error": "collect_mode 必须是 poll 或 event"}, status_code=400)
-        if mode in (ATTR_MODE_LIST, ATTR_MODE_MULTI):
+        if mode in (ATTR_MODE_LIST, ATTR_MODE_MULTI, ATTR_MODE_COMM):
             if not array_path:
-                return self.json({"success": False, "error": "list/multi 模式必须指定 array_path"}, status_code=400)
+                return self.json({"success": False, "error": "list/multi/comm 模式必须指定 array_path"}, status_code=400)
             if not key_field:
-                return self.json({"success": False, "error": "list/multi 模式必须指定 key_field"}, status_code=400)
+                return self.json({"success": False, "error": "list/multi/comm 模式必须指定 key_field"}, status_code=400)
+
+        if mode == ATTR_MODE_COMM:
+            # 通讯模式：目标列必须落在固定字段白名单内，且必填列（time）必须映射
+            if not isinstance(field_mapping, dict):
+                return self.json({"success": False, "error": "通讯模式的 field_mapping 必须是 源字段→目标列 的映射对象"}, status_code=400)
+            invalid_cols = sorted({str(c) for c in field_mapping.values() if str(c) not in COMM_COLUMNS})
+            if invalid_cols:
+                return self.json({
+                    "success": False,
+                    "error": "通讯模式目标列仅支持固定字段："
+                             + "、".join(COMM_COLUMNS)
+                             + f"；非法列：{'、'.join(invalid_cols)}",
+                }, status_code=400)
+            mapped_cols = {str(c) for c in field_mapping.values()}
+            missing_cols = [c for c in COMM_REQUIRED_COLUMNS if c not in mapped_cols]
+            if missing_cols:
+                return self.json({
+                    "success": False,
+                    "error": f"通讯模式缺少必填字段映射：{'、'.join(missing_cols)}",
+                }, status_code=400)
+            # 列类型固定为约定类型，忽略前端传入
+            field_types = {c: COMM_COLUMN_TYPES[c] for c in mapped_cols}
+            # 去重窗口由用户配置（前端默认 1000），这里只兜底一个下限
+            compare_limit = max(compare_limit, 100)
+            # 通讯模式不使用附加标量字段 / JSON 节点
+            extra_fields = {}
+            extra_json_nodes = []
 
         field_mapping_json = json.dumps(field_mapping, ensure_ascii=False)
         field_types_json = json.dumps(field_types, ensure_ascii=False) if isinstance(field_types, dict) else "{}"
@@ -10583,9 +10779,26 @@ class AttrConfigView(_BaseDBView):
                     # 已存在：校验 field_mapping 一致性
                     existing_fm = existing_type_row[1]
                     if existing_fm != field_mapping_json:
-                        raise ValueError(
-                            f"类型 '{type_name}' 已存在，字段定义为 {existing_fm}，"
-                            f"与当前定义 {field_mapping_json} 不一致"
+                        if mode == ATTR_MODE_COMM:
+                            # 通讯模式列结构固定，允许直接调整映射（含改为固定值）
+                            conn.execute(
+                                f"UPDATE {TABLE_ATTR_TYPE_DEFS} "
+                                f"SET field_mapping = ?, field_types = ?, updated_at = ? "
+                                f"WHERE type_name = ?",
+                                (field_mapping_json, field_types_json, now, type_name),
+                            )
+                        else:
+                            raise ValueError(
+                                f"类型 '{type_name}' 已存在，字段定义为 {existing_fm}，"
+                                f"与当前定义 {field_mapping_json} 不一致"
+                            )
+                    if mode == ATTR_MODE_COMM:
+                        # 通讯模式：数组路径 / 唯一键 / 去重窗口 / 小数位等采集参数允许随时调整
+                        conn.execute(
+                            f"UPDATE {TABLE_ATTR_TYPE_DEFS} "
+                            f"SET array_path = ?, key_field = ?, compare_limit = ?, "
+                            f"decimal_places = ?, updated_at = ? WHERE type_name = ?",
+                            (array_path, key_field, compare_limit, decimal_places, now, type_name),
                         )
                     # 更新 extra_fields 和/或 extra_json_nodes（允许追加附加字段）
                     if extra_fields_json or extra_json_nodes_json:
@@ -10619,14 +10832,18 @@ class AttrConfigView(_BaseDBView):
                         "datetime TEXT NOT NULL DEFAULT ''",
                         "room TEXT NOT NULL DEFAULT ''",
                     ]
-                    for target_col in field_mapping.values():
-                        safe_name = f'"{target_col.replace(".", "_")}"'
-                        col_type = "REAL"
-                        if isinstance(field_types, dict) and target_col in field_types:
-                            ft = str(field_types[target_col]).upper()
-                            if ft in valid_types:
-                                col_type = ft
-                        columns_defs.append(f"{safe_name} {col_type}")
+                    if mode == ATTR_MODE_COMM:
+                        # 通讯模式：固定字段列（列名与类型不受用户配置影响）
+                        columns_defs.extend(_comm_columns_sql())
+                    else:
+                        for target_col in field_mapping.values():
+                            safe_name = f'"{target_col.replace(".", "_")}"'
+                            col_type = "REAL"
+                            if isinstance(field_types, dict) and target_col in field_types:
+                                ft = str(field_types[target_col]).upper()
+                                if ft in valid_types:
+                                    col_type = ft
+                            columns_defs.append(f"{safe_name} {col_type}")
                     # extra_fields 列（所有 extra_fields 均建独立列）
                     normalized_extra = _normalize_extra_fields_api(extra_fields)
                     if normalized_extra:
@@ -10648,9 +10865,21 @@ class AttrConfigView(_BaseDBView):
                         f"CREATE INDEX IF NOT EXISTS idx_{tbl}_entity_time "
                         f"ON {tbl} (entity_id, datetime);"
                     )
+                    if mode == ATTR_MODE_COMM:
+                        _ensure_comm_indexes_api(conn, tbl)
                 else:
                     # 表已存在：添加 extra_fields 列 + 确保 extra_json 列
                     existing_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({tbl})")}
+                    if mode == ATTR_MODE_COMM:
+                        # 补齐通讯固定字段列（幂等）
+                        for _col, _col_type, _label, _required in COMM_FIELDS:
+                            if _col in existing_cols:
+                                continue
+                            _default = "''" if _col_type == "TEXT" else "0"
+                            conn.execute(
+                                f'ALTER TABLE {tbl} ADD COLUMN "{_col}" {_col_type} NOT NULL DEFAULT {_default}'
+                            )
+                            existing_cols.add(_col)
                     if normalized_extra:
                         for src_path, info in normalized_extra.items():
                             safe_name = info["target_col"].replace(".", "_")
@@ -10663,6 +10892,8 @@ class AttrConfigView(_BaseDBView):
                         conn.execute(
                             f'ALTER TABLE {tbl} ADD COLUMN {EXTRA_JSON_COLUMN} TEXT NOT NULL DEFAULT ""'
                         )
+                    if mode == ATTR_MODE_COMM:
+                        _ensure_comm_indexes_api(conn, tbl)
 
                 # 4. 写入 entity_configs（联合唯一 entity_id+attr_type）
                 conn.execute(
@@ -11345,6 +11576,247 @@ class BatchEntityStateView(_BaseDBView):
 # ========================================================================== #
 #  属性提取：手动触发采集                                                        #
 # ========================================================================== #
+def _json_or(raw: Any, default: Any) -> Any:
+    """把 JSON 字符串解析为对象；空值 / 非法 JSON 时返回 default。"""
+    text = str(raw or "").strip()
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except Exception:  # noqa: BLE001 - 配置损坏时按「未设置」处理，不阻断页面
+        return default
+
+
+class AttrEntityMappingView(_BaseDBView):
+    """实体级字段映射：多个实体共用一张表时，为单个实体单独指定源字段映射。
+
+    GET  /api/ha_data_store/attr_entity_mapping?entity_id=&attr_type=
+      → {success, entity_id, attr_type, scope, field_mapping, field_types,
+         type_field_mapping, type_field_types}
+        scope = "entity"（该实体有自己的映射）| "type"（继承类型级）
+
+    POST /api/ha_data_store/attr_entity_mapping
+      Body: {entity_id, attr_type, field_mapping: {...}, field_types: {...}}
+      · field_mapping 为空（{} / "" / null）→ **清除**实体级映射，回退类型级
+      · 通讯模式（mode=comm）下目标列必须在 COMM_COLUMNS 白名单内，
+        且必填列（COMM_REQUIRED_COLUMNS，即 time）必须映射；列类型强制使用固定类型
+
+    说明：实体级映射只影响该实体写入的行；列结构仍是全表并集（各实体采集时各自补列），
+    未映射的列在该实体写入时取默认值。留空即完全沿用类型级映射（旧行为）。
+    """
+
+    url = "/api/ha_data_store/attr_entity_mapping"
+    name = "api:ha_data_store:attr_entity_mapping"
+
+    async def get(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_viewer_enabled(hass)):
+            return resp
+
+        entity_id = (request.query.get("entity_id") or "").strip()
+        attr_type = (request.query.get("attr_type") or "").strip()
+        if not entity_id or not attr_type:
+            return self.json(
+                {"success": False, "error": "缺少 entity_id / attr_type 参数"}, status_code=400
+            )
+
+        def _load() -> dict:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    f"SELECT field_mapping, field_types, array_path, key_field, "
+                    f"  compare_limit, decimal_places FROM {TABLE_ENTITY_CONFIGS} "
+                    f"WHERE entity_id = ? AND attr_type = ?",
+                    (entity_id, attr_type),
+                ).fetchone()
+                type_row = conn.execute(
+                    f"SELECT field_mapping, field_types, array_path, key_field, "
+                    f"  compare_limit, decimal_places, mode FROM {TABLE_ATTR_TYPE_DEFS} "
+                    f"WHERE type_name = ?", (attr_type,),
+                ).fetchone()
+                rd = dict(row) if row else {}
+                td = dict(type_row) if type_row else {}
+                # 内置预设：通讯模式下按实体 ID 后缀匹配（供前端展示 / 一键应用）
+                preset: dict = {"available": False}
+                if str(td.get("mode") or "") == ATTR_MODE_COMM:
+                    try:
+                        from .comm_presets import preset_summary
+                        preset = preset_summary(entity_id)
+                    except Exception:  # noqa: BLE001
+                        preset = {"available": False}
+                ec_fm = str(rd.get("field_mapping") or "")
+                ec_ft = str(rd.get("field_types") or "")
+                ec_ap = str(rd.get("array_path") or "")
+                ec_kf = str(rd.get("key_field") or "")
+                ec_cl = int(rd.get("compare_limit") or 0)
+                ec_dp = int(rd.get("decimal_places", -2))
+                return {
+                    "entity_id": entity_id,
+                    "attr_type": attr_type,
+                    "scope": "entity" if (ec_fm.strip() or ec_ap.strip() or ec_kf.strip()
+                                          or ec_cl > 0 or ec_dp >= -1) else "type",
+                    "field_mapping": _json_or(ec_fm, {}),
+                    "field_types": _json_or(ec_ft, {}),
+                    # 实体级采集参数；留空 / 哨兵值 = 继承类型级
+                    "array_path": ec_ap,
+                    "key_field": ec_kf,
+                    "compare_limit": ec_cl,
+                    "decimal_places": ec_dp,
+                    "type_field_mapping": _json_or(str(td.get("field_mapping") or ""), {}),
+                    "type_field_types": _json_or(str(td.get("field_types") or ""), {}),
+                    "type_array_path": str(td.get("array_path") or ""),
+                    "type_key_field": str(td.get("key_field") or ""),
+                    "type_compare_limit": int(td.get("compare_limit") or 30),
+                    "type_decimal_places": int(td.get("decimal_places", 2)),
+                    "mode": str(td.get("mode") or ""),
+                    "preset": preset,
+                }
+            finally:
+                conn.close()
+
+        try:
+            data = await self._exec_in_executor(hass, _load)
+        except Exception as exc:  # noqa: BLE001
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+        return self.json({"success": True, **data})
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+        if (resp := self._check_db_edit_enabled(hass)):
+            return resp
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+
+        entity_id = str(body.get("entity_id") or "").strip()
+        attr_type = str(body.get("attr_type") or "").strip()
+        if not entity_id or not attr_type:
+            return self.json(
+                {"success": False, "error": "缺少 entity_id / attr_type 参数"}, status_code=400
+            )
+
+        raw_fm = body.get("field_mapping")
+        if raw_fm is None or (isinstance(raw_fm, str) and not raw_fm.strip()) or raw_fm == {}:
+            field_mapping: dict = {}
+        elif isinstance(raw_fm, dict):
+            field_mapping = {str(k): str(v) for k, v in raw_fm.items() if str(k).strip()}
+        else:
+            return self.json(
+                {"success": False, "error": "field_mapping 需为「源字段 → 目标列」的对象"},
+                status_code=400,
+            )
+
+        raw_ft = body.get("field_types")
+        field_types: dict = raw_ft if isinstance(raw_ft, dict) else {}
+
+        # 采集节点（数组路径）：可选；空 = 清除实体级、回退类型级
+        raw_ap = body.get("array_path")
+        array_path = str(raw_ap or "").strip()
+        if array_path in ("none", "-"):
+            array_path = ""
+
+        # 唯一键字段：同上
+        key_field = str(body.get("key_field") or "").strip()
+        if key_field in ("none", "-"):
+            key_field = ""
+
+        # 去重窗口 / 小数位：用哨兵值表示「未设置」（compare_limit 用 0、decimal_places 用 -2）
+        def _opt_int(value, default: int) -> int:
+            if value is None or value == "":
+                return default
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        compare_limit = _opt_int(body.get("compare_limit"), 0)
+        decimal_places = _opt_int(body.get("decimal_places"), -2)
+
+        now = _get_local_iso(
+            hass.data.get(DOMAIN, {}).get("timezone", DEFAULT_TIMEZONE)
+        )
+
+        def _save() -> dict:
+            conn = sqlite3.connect(db_path)
+            try:
+                type_row = conn.execute(
+                    f"SELECT mode FROM {TABLE_ATTR_TYPE_DEFS} WHERE type_name = ?", (attr_type,),
+                ).fetchone()
+                if not type_row:
+                    raise ValueError(f"类型「{attr_type}」不存在，请先在属性提取中创建")
+
+                if field_mapping and str(type_row[0] or "") == ATTR_MODE_COMM:
+                    # 通讯模式：目标列受固定白名单约束，且必填列必须映射
+                    invalid = sorted({str(c) for c in field_mapping.values()
+                                      if str(c) not in COMM_COLUMNS})
+                    if invalid:
+                        raise ValueError(
+                            "通讯模式目标列仅支持固定字段：" + "、".join(COMM_COLUMNS)
+                            + "；非法列：" + "、".join(invalid)
+                        )
+                    mapped = {str(c) for c in field_mapping.values()}
+                    missing = [c for c in COMM_REQUIRED_COLUMNS if c not in mapped]
+                    if missing:
+                        raise ValueError("通讯模式缺少必填字段映射：" + "、".join(missing))
+                    field_types_use = {c: COMM_COLUMN_TYPES[c] for c in mapped}
+                else:
+                    field_types_use = {str(k): str(v) for k, v in field_types.items()} \
+                        if field_mapping else {}
+
+                cursor = conn.execute(
+                    f"UPDATE {TABLE_ENTITY_CONFIGS} SET field_mapping = ?, field_types = ?, "
+                    f"array_path = ?, key_field = ?, compare_limit = ?, decimal_places = ?, "
+                    f"updated_at = ? WHERE entity_id = ? AND attr_type = ?",
+                    (
+                        json.dumps(field_mapping, ensure_ascii=False) if field_mapping else "",
+                        json.dumps(field_types_use, ensure_ascii=False) if field_types_use else "",
+                        array_path, key_field, compare_limit, decimal_places,
+                        now, entity_id, attr_type,
+                    ),
+                )
+                if not cursor.rowcount:
+                    raise ValueError(
+                        f"未找到实体「{entity_id}」的类型「{attr_type}」采集配置，请先添加该实体"
+                    )
+                conn.commit()
+                return {
+                    "scope": ("entity" if (field_mapping or array_path or key_field
+                                           or compare_limit > 0 or decimal_places >= -1)
+                              else "type"),
+                    "field_mapping": field_mapping,
+                    "field_types": field_types_use,
+                    "array_path": array_path,
+                    "key_field": key_field,
+                    "compare_limit": compare_limit,
+                    "decimal_places": decimal_places,
+                }
+            finally:
+                conn.close()
+
+        try:
+            result = await self._exec_in_executor(hass, _save)
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.exception("[attr] 实体级字段映射保存失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        _LOGGER.info(
+            "[attr] 实体级字段映射已保存 entity=%s type=%s scope=%s fields=%d",
+            entity_id, attr_type, result["scope"], len(result["field_mapping"]),
+        )
+        return self.json({"success": True, "entity_id": entity_id, "attr_type": attr_type, **result})
+
+
 class AttrManualTriggerView(_BaseDBView):
     """手动立即触发属性采集（无需密码）。"""
 
@@ -11479,6 +11951,124 @@ def _verify_admin(db_path: str, password: str) -> bool:
         return False
     finally:
         conn.close()
+
+
+# ========================================================================== #
+#  清空数据表 ClearTableView                                                    #
+#  用途：清空指定表的全部数据并把自增 ID 归零（等价于 TRUNCATE TABLE）。          #
+#        危险操作：必须提供管理员密码；核心配置表与 sqlite_* 系统表禁止清空。      #
+# ========================================================================== #
+class ClearTableView(_BaseDBView):
+    """清空数据表内容并重置自增 ID。
+
+    POST /api/ha_data_store/clear_table
+        body:  {"table": "xxx", "admin_password": "xxx", "vacuum": false}
+        或 query: ?table=xxx&admin_password=xxx
+    """
+
+    url = "/api/ha_data_store/clear_table"
+    name = "api:ha_data_store:clear_table"
+
+    # 与「删表」保持同一份核心表保护名单
+    _PROTECTED = {
+        TABLE_ENTITY_CONFIGS, TABLE_CUSTOM_ROUTES,
+        TABLE_ATTR_TYPE_DEFS, TABLE_API_KEYS, TABLE_API_SETTINGS,
+        TABLE_EXPORT_CONFIGS, TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS,
+        TABLE_VACUUM_TYPE_DEFS, TABLE_VACUUM_CONFIGS,
+    }
+
+    async def post(self, request: web.Request) -> web.Response:
+        db_path = self._db_path
+        hass: HomeAssistant = request.app["hass"]
+        if (resp := self._check_master_switch(hass)):
+            return resp
+
+        table = request.query.get("table", "").strip()
+        admin_pw = request.query.get("admin_password", "").strip()
+        want_vacuum = False
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                table = str(body.get("table") or table).strip()
+                admin_pw = str(body.get("admin_password") or admin_pw).strip()
+                want_vacuum = bool(body.get("vacuum"))
+        except Exception:
+            pass
+
+        if not table:
+            return self.json({"success": False, "error": "缺少 table 参数"}, status_code=400)
+        if table.startswith("sqlite_") or table in self._PROTECTED:
+            return self.json(
+                {"success": False, "error": f"核心表 '{table}' 不允许清空"}, status_code=400
+            )
+        if not admin_pw:
+            return self.json({"success": False, "error": "管理员密码不能为空"}, status_code=400)
+        if not _verify_admin(db_path, admin_pw):
+            return self.json({"success": False, "error": "管理员密码错误"}, status_code=403)
+
+        def _clear() -> dict:
+            conn = sqlite3.connect(db_path)
+            try:
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                if not exists:
+                    raise ValueError(f"表 '{table}' 不存在")
+
+                deleted = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                conn.execute(f'DELETE FROM "{table}"')
+
+                # 重置自增 ID：只有 AUTOINCREMENT 表在 sqlite_sequence 里有对应行；
+                # 普通 INTEGER PRIMARY KEY 表在清空后会自动从 1 重新分配。
+                reset_id = False
+                try:
+                    has_seq = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
+                    ).fetchone()
+                    if has_seq:
+                        cur = conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
+                        reset_id = bool(cur.rowcount and cur.rowcount > 0)
+                except sqlite3.Error:
+                    pass
+
+                conn.commit()
+            finally:
+                conn.close()
+
+            if want_vacuum:
+                vac = sqlite3.connect(db_path)
+                try:
+                    vac.execute("PRAGMA journal_mode=DELETE")
+                    vac.execute("VACUUM")
+                except sqlite3.Error:
+                    pass
+                finally:
+                    vac.close()
+
+            return {"deleted": deleted, "reset_auto_increment": reset_id}
+
+        try:
+            result = await self._exec_in_executor(hass, _clear)
+        except ValueError as exc:
+            return self.json({"success": False, "error": str(exc)}, status_code=400)
+        except Exception as exc:
+            _LOGGER.exception("清空表失败")
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        _LOGGER.warning(
+            "[db] 已清空表 %s（删除 %s 行，自增重置：%s）",
+            table, result["deleted"], result["reset_auto_increment"],
+        )
+        return self.json({
+            "success": True,
+            "table": table,
+            "deleted": result["deleted"],
+            "reset_auto_increment": result["reset_auto_increment"],
+            "message": (
+                f"表 '{table}' 已清空：删除 {result['deleted']} 行"
+                + ("，自增 ID 已重置" if result["reset_auto_increment"] else "")
+            ),
+        })
 
 
 # ========================================================================== #

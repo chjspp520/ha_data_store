@@ -12,12 +12,14 @@ from homeassistant.core import EVENT_STATE_CHANGED, HomeAssistant
 from homeassistant.helpers import entity_registry as er, network as hass_network
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_time_change, async_track_time_interval
 
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
     TABLE_USER_ACTIONS, TABLE_AUTOMATIONS, TABLE_AUTOMATION_LOGS,
-    CATEGORY_ATTRIBUTE, VERSION, RECENT_DAYS_ENTITY_ID)
+    CATEGORY_ATTRIBUTE, VERSION, RECENT_DAYS_ENTITY_ID,
+    TODAY_IN_HISTORY_SENSOR_ID, TODAY_IN_HISTORY_RANGE_ENTITY_ID,
+    COMM_TYPE_NAME_ENTITY_ID)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 from .daily_summary import build_daily_summary_sync
 from .recent_devices import compute_device_last_used_sync, get_window_days
@@ -33,6 +35,169 @@ _WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "�
 #   True  → 每 30 秒都写状态（generated_at/last_updated 持续更新，刷新节奏可见）
 #   False → 内容签名（忽略 generated_at）未变化时跳过写入，减轻 recorder 压力
 FAMILY_STATUS_FORCE_WRITE = True
+
+
+class TodayInHistorySensor(SensorEntity):
+    """历史今日：按「月日相同」汇总通讯 / 设备 / 环境三类数据。
+
+    状态值 = 三类数据在「历年今日」（可按设置实体的时间范围收窄）下的记录总数。
+
+    状态属性为三个节点（分别对应一类数据源），每个节点含：
+        count      匹配到的总记录数
+        summary    总体汇总（含各指标）
+        years      各年汇总列表（便于做年度对比）
+        detail     逐条明细（最多 DETAIL_LIMIT 条）
+        metrics    该数据源可用的指标说明
+        dimensions 该数据源可用的分组维度
+
+    实现直接复用历史今日接口（onthisday.run_onthisday_query），
+    时间范围取自 text.ha_data_store_today_in_history_set，写法 `<时间>,<前后分钟>`
+    （如 "01,80" = 01:00 前后 80 分钟、"now,60" = 此刻前后 60 分钟）；留空 = 全部数据。
+    通讯类型名取自 text.ha_data_store_comm_type_name，留空则自动探测
+    attr_type_defs 中 mode=comm 的类型名（见 comm.resolve_comm_type_name）。
+    排除实体取自 api_settings（db_viewer → 系统配置 → 📜 历史今日）。
+
+    刷新时机：
+        1) 每整点（分钟 0、秒 0）定时刷新一次
+        2) 上述任一设置实体变化时立即刷新三个节点
+        3) HA 启动后延迟 5 秒首次刷新
+    """
+
+    _attr_has_entity_name = False
+    _attr_name = "历史今日"
+    _attr_icon = "mdi:calendar-star"
+    _attr_unique_id = f"{DOMAIN}_today_in_history"
+    # 不使用 HA 轮询：刷新完全由「每整点定时 + 设置变化 + 启动首次」三种方式驱动
+    _attr_should_poll = False
+    # 每类数据源最多返回多少条明细（控制状态属性体积，避免 recorder 截断）
+    DETAIL_LIMIT = 10
+    # 各年汇总最多保留多少年
+    YEARS_LIMIT = 10
+    # 明细字段裁剪——通讯：剔除属性提取的通用元数据列（保留全部通讯业务字段）
+    DETAIL_DROP_FIELDS = "id,datetime,extra_json,name,room,updated_at"
+    # 环境明细：按「房间 × 时间点」聚合（一个房间一行、多种指标成列）；
+    # False = 退回逐条平铺（此时各指标混在同一个 value 列，难以区分）
+    DETAIL_ENV_BY_ROOM = True
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_device_info = device_info
+        self._attr_native_value = 0
+        self._attr_extra_state_attributes = {}
+        self.entity_id = TODAY_IN_HISTORY_SENSOR_ID
+
+    def _read_window(self) -> tuple[str, int] | None:
+        """读取设置实体的时间范围；缺失/非法/留空一律返回 None（= 全部数据）。"""
+        from .onthisday import parse_window_setting  # 延迟导入，避免模块互相导入
+
+        state = self._hass.states.get(TODAY_IN_HISTORY_RANGE_ENTITY_ID)
+        raw = getattr(state, "state", "") if state else ""
+        return parse_window_setting(raw)
+
+    def _read_comm_type_name(self) -> str:
+        """读取通讯数据表类型名设置（与通讯 / 历史今日 API 共用同一实现，避免口径不一致）。"""
+        from .comm import read_comm_type_name_setting  # 延迟导入，避免模块互相导入
+
+        return read_comm_type_name_setting(self._hass)
+
+    def _load_data(self, parsed: tuple[str, int] | None, comm_type_name: str = ""):
+        from .onthisday import describe_window_setting, run_onthisday_query
+
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        if not db_path:
+            return {"total": 0, "error": "数据库路径未就绪"}
+
+        now = datetime.now()
+        params = {
+            "date": now.strftime("%Y-%m-%d"),
+            "mode": "detail",          # detail 同时给出明细与汇总
+            "limit": self.DETAIL_LIMIT,
+            "content_len": 60,
+            "with_years": 1,
+            "years_limit": self.YEARS_LIMIT,
+        }
+        if parsed:
+            # 设置形如 "01,80" / "now,60" → 接口的 at=<时间>&window=<前后分钟>
+            at, window = parsed
+            params["at"] = at
+            if window:
+                params["window"] = window
+        # 通讯数据表类型名：留空则由 onthisday 自动探测 attr_type_defs 中 mode=comm 的类型名
+        if comm_type_name:
+            params["type_name"] = comm_type_name
+
+        nodes: dict[str, Any] = {}
+        total = 0
+        warnings: list[str] = []
+        exclude_ids: list[str] = []
+        resolved_type_name = ""
+        for source in ("comm", "device", "env"):
+            node: dict[str, Any] = {}
+            query = {**params, "source": source}
+            # 明细字段裁剪（只影响 detail，汇总/各年统计不受影响）
+            if source == "comm":
+                query["drop_fields"] = self.DETAIL_DROP_FIELDS
+            elif source == "env" and self.DETAIL_ENV_BY_ROOM:
+                # 一个房间一行、多种指标成列（温度/湿度/… 不再混在同一个 value 里）
+                query["env_by_room"] = 1
+            try:
+                result = run_onthisday_query(db_path, query)
+            except Exception as exc:  # noqa: BLE001 - 某类无数据/表未建不影响其它两类
+                node["error"] = str(exc)
+                nodes[source] = node
+                warnings.append(f"{source}: {exc}")
+                continue
+            if not exclude_ids:
+                # 三个数据源读到的是同一份设置，取其一即可
+                exclude_ids = list(result.get("exclude_entities") or [])
+            if source == "comm":
+                # 回显实际生效的类型名（可能来自设置，也可能是自动探测的结果）
+                resolved_type_name = str(result.get("type_name") or "")
+            count = int(result.get("total") or 0)
+            node.update({
+                "count": count,
+                "returned": int(result.get("count") or 0),
+                "tables": result.get("tables", []),
+                "metrics": result.get("metrics", {}),
+                "dimensions": result.get("dimensions", []),
+                "summary": result.get("summary", {}),
+                "years": result.get("year_summaries", []),
+                "detail": result.get("rows", []),
+            })
+            nodes[source] = node
+            total += count
+
+        data: dict[str, Any] = {
+            "on_this_day": now.strftime("%m-%d"),
+            "base_date": now.strftime("%Y-%m-%d"),
+            "range": describe_window_setting(parsed),
+            "at": parsed[0] if parsed else "",
+            "window": parsed[1] if parsed else 0,
+            "exclude_entities": exclude_ids,
+            "exclude_count": len(exclude_ids),
+            "comm_type_name": resolved_type_name or comm_type_name or "（自动探测）",
+            "total": total,
+            "comm": nodes.get("comm", {}),
+            "device": nodes.get("device", {}),
+            "env": nodes.get("env", {}),
+        }
+        if warnings:
+            data["warnings"] = warnings
+        return data
+
+    async def _async_refresh(self, now=None):
+        # hass.states 只能在事件循环线程访问，先取设置值再进 executor 查库
+        parsed = self._read_window()
+        comm_type_name = self._read_comm_type_name()
+        try:
+            data = await self._hass.async_add_executor_job(
+                self._load_data, parsed, comm_type_name)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 历史今日传感器刷新失败: %s", exc)
+            return
+        self._attr_native_value = data.get("total", 0)
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
 
 
 class MonitoredEntitiesSensor(SensorEntity):
@@ -1413,6 +1578,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     mem_sensor = MemoryUsageSensor(hass, device_info)
     disk_sensor = DiskUsageSensor(hass, device_info)
     timer_elves_sensor = TimerElvesSensor(hass, device_info)
+    today_in_history_sensor = TodayInHistorySensor(hass, device_info)
     # 存引用，供按钮/服务触发按需刷新
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
     hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
@@ -1423,7 +1589,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 automation_status_sensor, db_viewer_url_sensor,
                 helper_summary_sensor, power_all_sensor, whole_usage_sensor,
                 all_entities_sensor,
-                cpu_sensor, mem_sensor, disk_sensor, timer_elves_sensor]
+                cpu_sensor, mem_sensor, disk_sensor, timer_elves_sensor,
+                today_in_history_sensor]
     # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
     url, attrs = await db_viewer_url_sensor._fetch_url()
     db_viewer_url_sensor._attr_native_value = url
@@ -1579,6 +1746,37 @@ async def async_setup_entry(hass, entry, async_add_entities):
         _LOGGER.info("[bridge] sensor 创建 %d 个实体", len(bridge_entities))
 
     async_add_entities(entities)
+    # 供配置端（如「历史今日」排除实体保存后）主动触发刷新
+    hass.data.setdefault(DOMAIN, {})["today_in_history_sensor"] = today_in_history_sensor
+    # 历史今日：每整点刷新一次（分钟 0、秒 0）；设置实体变化时另有即时刷新
+    async_track_time_change(hass, today_in_history_sensor._async_refresh, minute=0, second=0)
+
+    async def _on_otd_range_changed(event):
+        """历史今日相关设置实体变化时，立即重算传感器的三个节点。"""
+        entity_id = event.data.get("entity_id")
+        if entity_id not in (TODAY_IN_HISTORY_RANGE_ENTITY_ID, COMM_TYPE_NAME_ENTITY_ID):
+            return
+        new_state = event.data.get("new_state")
+        raw = getattr(new_state, "state", "") or ""
+        if entity_id == COMM_TYPE_NAME_ENTITY_ID:
+            _LOGGER.info("[HDS] 通讯数据表类型名已变更为 %s，立即刷新传感器",
+                         raw or "（空 = 自动探测）")
+        else:
+            _LOGGER.info("[HDS] 历史今日时间范围已变更为 %s，立即刷新传感器",
+                         raw or "（空 = 全部数据）")
+        await today_in_history_sensor._async_refresh()
+
+    hass.bus.async_listen(EVENT_STATE_CHANGED, _on_otd_range_changed)
+
+    async def _first_otd_refresh():
+        try:
+            await asyncio.sleep(5)
+            await today_in_history_sensor._async_refresh()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 历史今日传感器首次刷新失败: %s", e)
+
+    hass.async_create_task(_first_otd_refresh())
+
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
     # 定时精灵：信号推送为主，30 秒轮询兜底（防止信号丢失导致状态滞留）
     async_track_time_interval(hass, timer_elves_sensor._async_refresh, timedelta(seconds=30))

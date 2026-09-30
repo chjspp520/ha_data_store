@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -65,9 +66,12 @@ from .const import (
     ATTR_MODE_FIELDS,
     ATTR_MODE_LIST,
     ATTR_MODE_MULTI,
+    ATTR_MODE_COMM,
     COLLECT_MODE_POLL,
     COLLECT_MODE_EVENT,
     EXTRA_JSON_COLUMN,
+    COMM_FIELDS,
+    COMM_INDEX_DEFS,
     VALID_METRICS,
     METRIC_SENSOR,
     get_env_table_name,
@@ -405,6 +409,12 @@ def _init_database(db_path: str) -> None:
                 room             TEXT NOT NULL DEFAULT '',
                 attr_type        TEXT NOT NULL DEFAULT '',
                 collect_mode     TEXT NOT NULL DEFAULT '{COLLECT_MODE_POLL}',
+                field_mapping    TEXT NOT NULL DEFAULT '',
+                field_types      TEXT NOT NULL DEFAULT '',
+                array_path       TEXT NOT NULL DEFAULT '',
+                key_field        TEXT NOT NULL DEFAULT '',
+                compare_limit    INTEGER NOT NULL DEFAULT 0,
+                decimal_places   INTEGER NOT NULL DEFAULT -2,
                 created_at       TEXT NOT NULL DEFAULT '',
                 updated_at       TEXT NOT NULL DEFAULT '',
                 UNIQUE(entity_id, attr_type)
@@ -916,6 +926,8 @@ def _init_database(db_path: str) -> None:
 
         conn.commit()
         _migrate_database(conn)
+        # 通讯表字段兜底升级：覆盖「采集配置记录已丢失、但表和数据仍在」的情况
+        _ensure_all_comm_tables(conn)
         if local_logger:
             local_logger.info("[db] 数据库初始化完成 path=%s", db_path)
         _LOGGER.warning("[HDS] 数据库初始化完成: %s", db_path)
@@ -947,6 +959,12 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 "room TEXT NOT NULL DEFAULT ''",
                 "attr_type TEXT NOT NULL DEFAULT ''",
                 f"collect_mode TEXT NOT NULL DEFAULT '{COLLECT_MODE_POLL}'",
+                "field_mapping TEXT NOT NULL DEFAULT ''",
+                "field_types TEXT NOT NULL DEFAULT ''",
+                "array_path TEXT NOT NULL DEFAULT ''",
+                "key_field TEXT NOT NULL DEFAULT ''",
+                "compare_limit INTEGER NOT NULL DEFAULT 0",
+                "decimal_places INTEGER NOT NULL DEFAULT -2",
                 "created_at TEXT NOT NULL DEFAULT ''",
                 "updated_at TEXT NOT NULL DEFAULT ''",
                 "UNIQUE(entity_id, attr_type)",
@@ -964,6 +982,8 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 if c in ["entity_id", "enabled", "category", "metric_type", "collect_interval",
                           "round_minute", "power_entity", "power_rating", "friendly_name",
                           "device_name", "room", "attr_type", "collect_mode",
+                          "field_mapping", "field_types", "array_path",
+                          "key_field", "compare_limit", "decimal_places",
                           "created_at", "updated_at"]:
                     copy_cols.append(c)
 
@@ -1032,6 +1052,23 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 f"ALTER TABLE {TABLE_ENTITY_CONFIGS} "
                 f"ADD COLUMN device_name TEXT NOT NULL DEFAULT ''"
             )
+
+        # 实体级字段映射：允许多个实体共用一张表、各自独立映射
+        # （留空 = 继承 attr_type_defs 的类型级映射；两者始终兼容）
+        ec_columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_ENTITY_CONFIGS})")]
+        for _col, _ddl in (
+            ("field_mapping", "TEXT NOT NULL DEFAULT ''"),
+            ("field_types", "TEXT NOT NULL DEFAULT ''"),
+            ("array_path", "TEXT NOT NULL DEFAULT ''"),
+            ("key_field", "TEXT NOT NULL DEFAULT ''"),
+            # 数值类用哨兵默认值表示「未设置」（0 对 decimal_places 是合法值，故用 -2）
+            ("compare_limit", "INTEGER NOT NULL DEFAULT 0"),
+            ("decimal_places", "INTEGER NOT NULL DEFAULT -2"),
+        ):
+            if _col not in ec_columns:
+                conn.execute(
+                    f"ALTER TABLE {TABLE_ENTITY_CONFIGS} ADD COLUMN {_col} {_ddl}"
+                )
 
         # device_history 表：补充 cross_day / room 列
         dh_columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_DEVICE_HISTORY})")]
@@ -2594,6 +2631,17 @@ def _extract_nested_value(attrs: dict, path: str) -> Any | None:
     return value
 
 
+def _resolve_field_value(source: Any, src_field: str) -> Any | None:
+    """解析字段取值。
+
+    src_field 以 '=' 开头表示固定值（不使用源数据，直接返回等号后的字面量），
+    例如 '=wechat' → 'wechat'；其余按点号路径从源数据中提取。
+    """
+    if isinstance(src_field, str) and src_field.startswith("="):
+        return src_field[1:]
+    return _extract_nested_value(source, src_field)
+
+
 def _infer_sqlite_type(value: Any) -> str:
     """根据 Python 值推断 SQLite 列类型。"""
     if isinstance(value, bool):
@@ -2667,15 +2715,405 @@ def _normalize_extra_fields(extra_fields: dict | None) -> dict:
     return result
 
 
+def _comm_column_ddl(col: str, col_type: str) -> str:
+    """生成通讯固定字段的列定义片段（含 NOT NULL 默认值）。"""
+    default = "''" if col_type == "TEXT" else "0"
+    return f"{_safe_column_name(col)} {col_type} NOT NULL DEFAULT {default}"
+
+
+def _ensure_comm_columns(conn: sqlite3.Connection, tbl: str, existing_cols: set) -> set:
+    """为通讯数据表补齐固定字段列（幂等）。返回新增的列名集合。"""
+    added: set = set()
+    for col, col_type, _label, _required in COMM_FIELDS:
+        if col in existing_cols:
+            continue
+        default = "''" if col_type == "TEXT" else "0"
+        conn.execute(
+            f'ALTER TABLE {tbl} ADD COLUMN "{col}" {col_type} NOT NULL DEFAULT {default}'
+        )
+        added.add(col)
+    return added
+
+
+def _ensure_comm_indexes(conn: sqlite3.Connection, tbl: str) -> None:
+    """为通讯数据表补齐查询索引（幂等）：时间/号码/姓名/地点。"""
+    for suffix, cols in COMM_INDEX_DEFS:
+        col_sql = ", ".join(f'"{c}"' for c in cols)
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{tbl}_{suffix} ON {tbl} ({col_sql});"
+        )
+
+
+def _ensure_all_comm_tables(conn: sqlite3.Connection) -> list[str]:
+    """启动时为**所有**通讯表补齐固定字段列与索引（幂等）。返回有新增列的表描述。
+
+    识别通讯表有两条途径，缺一不可：
+      1. `attr_type_defs` 中 `mode=comm` 的 type_name —— 正常配置的表；
+      2. **结构符合通讯表特征**的表（含 `my_number` / `party_number` / `time` 三列）——
+         即使采集配置记录已被删除，表与数据仍在，不能因此漏掉字段升级。
+
+    此前只在 `_ensure_attr_table()` 里补列，而该函数要求 `attr_type_defs` 存在对应记录；
+    配置记录丢失（或从未存库）时，表结构就永远停在旧版本——老库升级会踩到。
+    """
+    local_logger = get_logger()
+    names: list[str] = []
+    try:
+        for row in conn.execute(
+            f"SELECT type_name FROM {TABLE_ATTR_TYPE_DEFS} "
+            "WHERE LOWER(IFNULL(mode, '')) = ?", (ATTR_MODE_COMM,)
+        ).fetchall():
+            name = str(row[0] or "").strip()
+            if name and name not in names:
+                names.append(name)
+    except sqlite3.OperationalError:
+        pass
+
+    for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?",
+        (f"{ATTR_TABLE_PREFIX}%",),
+    ).fetchall():
+        tbl = str(row[0] or "")
+        if not tbl or tbl == TABLE_ATTR_TYPE_DEFS:
+            continue
+        try:
+            cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{tbl}")')}
+        except sqlite3.OperationalError:
+            continue
+        if {"my_number", "party_number", "time"} <= cols:
+            name = tbl[len(ATTR_TABLE_PREFIX):]
+            if name and name not in names:
+                names.append(name)
+
+    touched: list[str] = []
+    for name in names:
+        tbl = get_attr_table_name(name)
+        try:
+            cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{tbl}")')}
+        except sqlite3.OperationalError:
+            continue
+        if not cols:
+            continue
+        added = _ensure_comm_columns(conn, tbl, cols)
+        _ensure_comm_indexes(conn, tbl)
+        if added:
+            touched.append(f"{tbl} += {','.join(sorted(added))}")
+    if touched:
+        conn.commit()
+        if local_logger:
+            local_logger.info("[db] 通讯表字段已补齐：%s", "；".join(touched))
+    return touched
+
+
+def _normalize_comm_time(value: Any) -> str:
+    """将通讯时间规范化为 'YYYY-MM-DD HH:MM:SS'（无法识别时原样转字符串）。"""
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e11:      # 毫秒时间戳
+            ts /= 1000.0
+        try:
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            return str(value)
+    text = str(value).strip()
+    if not text:
+        return ""
+    # 数字字符串（时间戳）
+    if text.isdigit() and len(text) >= 10:
+        return _normalize_comm_time(int(text))
+    # 已是目标格式
+    if len(text) >= 19 and text[4] == "-" and text[10] == " ":
+        return text[:19]
+    # ISO8601：2026-09-01T17:24:33(+08:00)
+    candidate = text.replace("T", " ")
+    if len(candidate) >= 19 and candidate[4] == "-" and candidate[10] == " ":
+        return candidate[:19]
+    # 仅日期：2026-09-01
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return f"{text} 00:00:00"
+    # 其他格式交给解析器
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return text
+
+
+# 通讯时长：数值 + 可选单位（顺序敏感，"小时/分钟" 必须排在 "时/分" 之前）
+_COMM_DURATION_TOKEN_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(小时|时|分钟|分|h|H|m|M|s|S)?"
+)
+
+# 时长单位 → 秒
+_COMM_DURATION_UNITS = {
+    "小时": 3600, "时": 3600, "h": 3600,
+    "分钟": 60, "分": 60, "m": 60,
+    "秒": 1, "s": 1,
+}
+
+
+def _comm_unit_seconds(unit: str) -> int:
+    """把时长单位换算为秒，无法识别返回 0。"""
+    if not unit:
+        return 0
+    return _COMM_DURATION_UNITS.get(unit.strip().lower(), 0)
+
+
+def _parse_colon_duration(text: str) -> int | None:
+    """解析冒号格式时长：'3:53' → 233（分:秒），'1:02:03' → 3723（时:分:秒）。"""
+    parts = [p.strip() for p in text.split(":")]
+    if not 2 <= len(parts) <= 3:
+        return None
+    if any(not p for p in parts):
+        return None
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 2:
+        return int(round(nums[0] * 60 + nums[1]))
+    return int(round(nums[0] * 3600 + nums[1] * 60 + nums[2]))
+
+
+def _parse_comm_duration(value: Any) -> int:
+    """把通讯时长解析为秒（无法识别或无值时返回 0）。
+
+    支持的形式（中英文单位、允许空格）：
+        233 / 233.5            纯数字按秒
+        '27秒' / '27s'         → 27
+        '3分53秒' / '3m53s'    → 233
+        '1小时2分3秒' / '1h2m3s' → 3723
+        '3分53'（省略"秒"）    → 233
+        '1小时30'              → 5400（省略单位时按上一单位降一级推断）
+        '3:53'                 → 233（分:秒）
+        '1:02:03' / '00:03:53' → 3723 / 233（时:分:秒）
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(round(float(value)))
+
+    text = str(value).strip()
+    if not text:
+        return 0
+
+    # 1) 冒号分隔：分:秒 或 时:分:秒
+    colon_value = _parse_colon_duration(text)
+    if colon_value is not None:
+        return colon_value
+
+    # 2) 单位扫描：'3分53秒' / '1小时2分3秒' / '27s'
+    total = 0.0
+    last_unit_sec = 0
+    matched = False
+    for match in _COMM_DURATION_TOKEN_RE.finditer(text):
+        number = float(match.group(1))
+        unit_sec = _comm_unit_seconds(match.group(2) or "")
+        if unit_sec:
+            last_unit_sec = unit_sec
+        else:
+            # 省略单位：按上一个单位降一级推断（时→分），其余按秒
+            unit_sec = 60 if last_unit_sec == 3600 else 1
+        total += number * unit_sec
+        matched = True
+    if matched:
+        return int(round(total))
+
+    # 3) 纯数字字符串
+    try:
+        return int(round(float(text)))
+    except ValueError:
+        return 0
+
+
+def _comm_to_number(value: Any) -> float | int:
+    """把通讯数值字段转为数值，无法识别时返回 0。"""
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    text = str(value).strip()
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return 0
+
+
+# 流量单位 → 换算为 MB 的系数（大小写不敏感，兼容单个字母写法）
+_TRAFFIC_UNITS: dict[str, float] = {
+    "b": 1 / (1024 * 1024),
+    "kb": 1 / 1024, "k": 1 / 1024,
+    "mb": 1.0, "m": 1.0,
+    "gb": 1024.0, "g": 1024.0,
+    "tb": 1024.0 * 1024, "t": 1024.0 * 1024,
+}
+
+
+def _parse_comm_traffic(value: Any) -> float:
+    """把流量解析为 MB（无法识别或无值时返回 0）。
+
+    支持的形式（中英文单位、允许空格、大小写不敏感）：
+        123 / '123.5'     纯数字按 MB
+        '512MB' / '200kb' → 512 / 0.1953（MB）
+        '1.5GB' / '2G'    → 1536 / 2048
+        '1T' / '1TB'      → 1048576
+    结果保留 4 位小数。
+    """
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return round(float(value), 4)
+
+    text = str(value).strip().lower()
+    if not text:
+        return 0.0
+    match = re.match(r"^([0-9]*\.?[0-9]+)\s*([a-z]*)$", text)
+    if not match:
+        return 0.0
+    num = float(match.group(1))
+    unit = match.group(2)
+    if not unit:
+        return round(num, 4)
+    factor = _TRAFFIC_UNITS.get(unit)
+    if factor is None:
+        return 0.0
+    return round(num * factor, 4)
+
+
+def _normalize_comm_row(row_data: dict) -> None:
+    """就地规范化通讯行：时间转标准格式，时长转秒，金额/流量转数值。"""
+    if "time" in row_data:
+        row_data["time"] = _normalize_comm_time(row_data.get("time"))
+    if "duration" in row_data:
+        row_data["duration"] = _parse_comm_duration(row_data.get("duration"))
+    if "cost" in row_data:
+        row_data["cost"] = float(_comm_to_number(row_data.get("cost")))
+    if "traffic_usage" in row_data:
+        row_data["traffic_usage"] = _parse_comm_traffic(row_data.get("traffic_usage"))
+
+
+def _resolve_collect_key(field_mapping: dict, key_field: str) -> tuple[str, str, bool]:
+    """确定去重键在「本实体映射」下对应的源字段与目标列。
+
+    背景：`key_field` 是**类型级**配置，而 `field_mapping` 可以被实体级覆盖。
+    多实体共用一张表、各写各的源字段名时（如手机 A 用 `a_time`、手机 B 用 `b_when`
+    都映射到 `time`），类型级的 `key_field` 对 B 而言根本不存在——若不处理，
+    B 的数组元素会因取不到 key 而被**整批静默跳过**（一条都不写）。
+
+    回退顺序：
+
+      1. `key_field` 本身就在本实体映射的源字段中 → 直接用
+      2. 本实体映射中有源字段指向 `time` 列 → 用该源字段（comm 模式 time 必填，必命中）
+      3. 退化为映射中的第一个目标列（保证是表中真实存在的列，避免取列时抛异常）
+
+    返回 `(源字段, 目标列, 是否发生了回退)`；第 3 种情况同样置回退标记，
+    由调用方记录警告提示用户显式配置 `key_field`。
+    """
+    name = str(key_field or "").strip()
+    if name and name in field_mapping:
+        return name, field_mapping[name], False
+    for src, target in field_mapping.items():
+        if target == "time":
+            return src, "time", True
+    for src, target in field_mapping.items():
+        return src, target, True
+    return name, name, True
+
+
+def _merge_entity_mapping(row: dict[str, Any], mode: str = "") -> dict[str, Any]:
+    """把查询行里的「实体级配置」合并进 row。
+
+    优先级：**实体级配置 → 内置预设（按实体 ID 后缀）→ 类型级配置**。
+
+    多实体共用一张表时，各实体往往有不同的数据形状（同一类型下的
+    `xxx_traffic` / `xxx_sms` / `xxx_calls` 三个实体，数组节点就各不相同），
+    因此这几项都支持实体级覆盖：
+
+    - `field_mapping`：源字段 → 目标列
+    - `field_types`：目标列类型
+    - `array_path`：要采集的数组节点
+    - `key_field` / `compare_limit` / `decimal_places`：唯一键 / 去重窗口 / 小数位
+
+    中间那层「内置预设」只对**通讯模式**生效（预设的映射项都是通讯固定列），
+    由 `comm_presets.detect_preset(entity_id)` 按实体 ID 后缀（`_calls` / `_sms` /
+    `_traffic`）匹配，让这些实体**开箱即用**；实体级一旦配了就优先于预设。
+    """
+    # 内置预设：仅通讯模式、且按后缀命中时才有值
+    preset: dict[str, Any] = {}
+    preset_fm: dict[str, str] = {}
+    if mode == ATTR_MODE_COMM:
+        try:
+            from .comm_presets import detect_preset, preset_field_mapping  # 延迟导入
+            _eid = row.get("entity_id")
+            preset = detect_preset(_eid) or {}
+            # 含按实体 ID 动态生成的 my_number（=号码 固定值）
+            preset_fm = preset_field_mapping(_eid) if preset else {}
+        except Exception:  # noqa: BLE001 - 预设不可用不应影响采集
+            preset, preset_fm = {}, {}
+
+    ec_fm = str(row.pop("ec_field_mapping", "") or "").strip()
+    ec_ft = str(row.pop("ec_field_types", "") or "").strip()
+    ec_ap = str(row.pop("ec_array_path", "") or "").strip()
+    ec_kf = str(row.pop("ec_key_field", "") or "").strip()
+
+    if ec_fm:
+        row["field_mapping"] = ec_fm
+    elif preset_fm:
+        row["field_mapping"] = json.dumps(preset_fm, ensure_ascii=False)
+    if ec_ft:
+        row["field_types"] = ec_ft
+    if ec_ap:
+        row["array_path"] = ec_ap
+    elif preset.get("array_path"):
+        row["array_path"] = preset["array_path"]
+    if ec_kf:
+        row["key_field"] = ec_kf
+    elif preset.get("key_field"):
+        row["key_field"] = preset["key_field"]
+
+    # 数值项：用哨兵值表示「未设置」—— compare_limit 用 <=0、decimal_places 用 <-1
+    # （decimal_places 的 -1 是合法值「不限小数位」，0~6 也是合法值，故哨兵取 -2）
+    try:
+        _cl = int(row.pop("ec_compare_limit", 0) or 0)
+    except (TypeError, ValueError):
+        _cl = 0
+    if _cl > 0:
+        row["compare_limit"] = _cl
+    elif preset.get("compare_limit"):
+        row["compare_limit"] = int(preset["compare_limit"])
+    try:
+        _dp = int(row.pop("ec_decimal_places", -2))
+    except (TypeError, ValueError):
+        _dp = -2
+    if _dp >= -1:
+        row["decimal_places"] = _dp
+    return row
+
+
 def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
-                        extra_fields: dict | None = None) -> str:
-    """确保 attr_{type_name} 表存在，不存在则根据 field_mapping 和 attr_type_defs.field_types 创建。
+                        extra_fields: dict | None = None,
+                        field_types_override: dict | None = None) -> str:
+    """确保 attr_{type_name} 表存在，不存在则根据 field_mapping 和 field_types 创建。
 
     field_mapping: {"源字段": "目标列名", ...}
     extra_fields: {"源路径": {"target_col": "目标列名"}, ...}
                    所有 extra_fields 条目均为独立列；extra_json 列始终创建（供 extra_json_nodes 使用）。
                    兼容旧格式: {"源路径": "目标列名"} → 默认 column 模式
-    field_types 从 attr_type_defs 表中读取。
+    field_types_override: 实体级列类型。多实体共用一张表、各自映射不同时由调用方传入；
+                   为空则回退 attr_type_defs 的类型级定义。
     返回表名。
     """
     tbl = get_attr_table_name(type_name)
@@ -2683,6 +3121,28 @@ def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
     try:
         # 解析 extra_fields 为统一格式
         normalized_extra = _normalize_extra_fields(extra_fields)
+
+        # 读取类型定义（mode / field_types）：comm 模式使用固定通讯字段列
+        mode = ATTR_MODE_FIELDS
+        field_types: dict = {}
+        try:
+            type_row = conn.execute(
+                f"SELECT mode, field_types FROM {TABLE_ATTR_TYPE_DEFS} WHERE type_name = ?",
+                (type_name,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            type_row = None
+        if type_row:
+            mode = type_row[0] or ATTR_MODE_FIELDS
+            if type_row[1]:
+                try:
+                    field_types = json.loads(type_row[1])
+                except json.JSONDecodeError:
+                    pass
+        if field_types_override:
+            # 实体级类型优先（多实体各写自己的列，列类型不应被类型级定义覆盖）
+            field_types = dict(field_types_override)
+        is_comm = mode == ATTR_MODE_COMM
 
         # 检查表是否已存在
         existing = [
@@ -2695,6 +3155,8 @@ def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
         if existing:
             # 表已存在：检查是否需要添加列
             existing_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({tbl})")}
+            if is_comm:
+                existing_cols |= _ensure_comm_columns(conn, tbl, existing_cols)
             if normalized_extra:
                 for src_path, info in normalized_extra.items():
                     unquoted_name = info["target_col"].replace(".", "_")
@@ -2708,22 +3170,12 @@ def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
                 conn.execute(
                     f'ALTER TABLE {tbl} ADD COLUMN {EXTRA_JSON_COLUMN} TEXT NOT NULL DEFAULT ""'
                 )
+            if is_comm:
+                _ensure_comm_indexes(conn, tbl)
             conn.commit()
             return tbl
 
-        # 从 attr_type_defs 读取 field_types
-        field_types: dict = {}
-        row = conn.execute(
-            f"SELECT field_types FROM {TABLE_ATTR_TYPE_DEFS} WHERE type_name = ?",
-            (type_name,),
-        ).fetchone()
-        if row and row[0]:
-            try:
-                field_types = json.loads(row[0])
-            except json.JSONDecodeError:
-                pass
-
-        # 构建列定义：元数据列 + 属性字段列
+        # 构建列定义：元数据列 + 属性字段列（comm 模式使用固定通讯字段列）
         columns_defs = [
             "id INTEGER PRIMARY KEY AUTOINCREMENT",
             "entity_id TEXT NOT NULL",
@@ -2732,14 +3184,19 @@ def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
             "room TEXT NOT NULL DEFAULT ''",
         ]
         valid_types = {"TEXT", "INTEGER", "REAL"}
-        for target_col in field_mapping.values():
-            safe_name = _safe_column_name(target_col)
-            col_type = "REAL"  # 默认
-            if field_types and target_col in field_types:
-                ft = str(field_types[target_col]).upper()
-                if ft in valid_types:
-                    col_type = ft
-            columns_defs.append(f"{safe_name} {col_type}")
+        if is_comm:
+            # 通讯模式：固定字段列（列名与类型不受用户配置影响）
+            for col, col_type, _label, _required in COMM_FIELDS:
+                columns_defs.append(_comm_column_ddl(col, col_type))
+        else:
+            for target_col in field_mapping.values():
+                safe_name = _safe_column_name(target_col)
+                col_type = "REAL"  # 默认
+                if field_types and target_col in field_types:
+                    ft = str(field_types[target_col]).upper()
+                    if ft in valid_types:
+                        col_type = ft
+                columns_defs.append(f"{safe_name} {col_type}")
 
         # 附加标量字段列：所有 extra_fields 均建独立列
         if normalized_extra:
@@ -2766,6 +3223,8 @@ def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
             f"CREATE INDEX IF NOT EXISTS idx_{tbl}_entity_time "
             f"ON {tbl} (entity_id, datetime);"
         )
+        if is_comm:
+            _ensure_comm_indexes(conn, tbl)
         conn.commit()
 
         local_logger = get_logger()
@@ -2832,22 +3291,40 @@ def _attr_collect_for_entity(db_path: str, entity_id: str, cfg: dict, state_obj,
     # 将 extra_fields 统一为新格式
     normalized_extra = _normalize_extra_fields(extra_fields)
 
-    # 读取小数位数配置
+    # 读取小数位数配置（实体级优先；未设置时回退类型级定义）
     decimal_places = 2
+    _dp_cfg = cfg.get("decimal_places")
+    if _dp_cfg is None:
+        try:
+            conn2 = sqlite3.connect(db_path)
+            row = conn2.execute(
+                f"SELECT decimal_places FROM {TABLE_ATTR_TYPE_DEFS} WHERE type_name = ?",
+                (type_name,),
+            ).fetchone()
+            if row and row[0] is not None:
+                _dp_cfg = int(row[0])
+            conn2.close()
+        except Exception:
+            pass
     try:
-        conn2 = sqlite3.connect(db_path)
-        row = conn2.execute(
-            f"SELECT decimal_places FROM {TABLE_ATTR_TYPE_DEFS} WHERE type_name = ?",
-            (type_name,),
-        ).fetchone()
-        if row and row[0] is not None:
-            decimal_places = int(row[0])
-        conn2.close()
-    except Exception:
-        pass
+        if _dp_cfg is not None:
+            decimal_places = int(_dp_cfg)
+    except (TypeError, ValueError):
+        decimal_places = 2
 
-    # 确保表存在（传入 extra_fields 以便建列）
-    _ensure_attr_table(db_path, type_name, field_mapping, normalized_extra or None)
+    # 确保表存在（传入 extra_fields 以便建列；实体级 field_types 优先）
+    raw_types = cfg.get("field_types")
+    if isinstance(raw_types, str):
+        try:
+            cfg_types = json.loads(raw_types) if raw_types else {}
+        except json.JSONDecodeError:
+            cfg_types = {}
+    elif isinstance(raw_types, dict):
+        cfg_types = raw_types
+    else:
+        cfg_types = {}
+    _ensure_attr_table(db_path, type_name, field_mapping, normalized_extra or None,
+                       cfg_types if isinstance(cfg_types, dict) and cfg_types else None)
 
     # 提取独立列附加字段的值（从父实体属性中提取）
     extra_column_values: dict = {}   # {target_col: value}
@@ -2883,11 +3360,21 @@ def _attr_collect_for_entity(db_path: str, entity_id: str, cfg: dict, state_obj,
 
     conn = sqlite3.connect(db_path)
     try:
-        if mode in (ATTR_MODE_LIST, ATTR_MODE_MULTI):
-            # --- 列表展开模式（含 multi 模式的列表部分）---
+        if mode in (ATTR_MODE_LIST, ATTR_MODE_MULTI, ATTR_MODE_COMM):
+            # --- 列表展开模式（含 multi 模式的列表部分、comm 通讯模式）---
             array_path = cfg.get("array_path", "")
             key_field = cfg.get("key_field", "")
             compare_limit = int(cfg.get("compare_limit", 30))
+            # 去重键按「本实体映射」解析：类型级 key_field 可能不适用于本实体
+            # （多实体各写各的源字段名时），否则会因取不到 key 而整批被跳过。
+            key_field, key_target_col, key_fallback = _resolve_collect_key(
+                field_mapping, key_field)
+            if key_fallback and local_logger:
+                local_logger.warning(
+                    "[attr] key_field=%r 不在实体 %s 的字段映射中，已自动改用 %r"
+                    "（映射到 %s 列）；如需精确控制请在「属性提取」中调整该类型的 key_field",
+                    cfg.get("key_field"), entity_id, key_field, key_target_col,
+                )
 
             array = _extract_nested_value(attrs, array_path) if array_path else None
             if not isinstance(array, list) or not array:
@@ -2898,12 +3385,14 @@ def _attr_collect_for_entity(db_path: str, entity_id: str, cfg: dict, state_obj,
                     )
                 return 0
 
-            # 查询 DB 中全部记录用于去重（按 entity_id 过滤，数据量可控）
-            key_target_col = field_mapping.get(key_field, key_field)
+            # 查询 DB 中最近 N 条记录用于去重（避免全表加载：通讯数据会累积到数十万条）
+            # 窗口至少覆盖「本次数组全部元素 + 上一次的」，防止旧键漏比对导致重复插入
+            # 注：去重按 entity_id 隔离，因此不同实体的 time 相同也不会互相干扰
             conn.row_factory = sqlite3.Row
+            lookup_limit = min(max(int(compare_limit), len(array) * 2, 100), 200000)
             existing_rows = conn.execute(
-                f"SELECT * FROM {tbl} WHERE entity_id = ? ORDER BY datetime DESC",
-                (entity_id,),
+                f"SELECT * FROM {tbl} WHERE entity_id = ? ORDER BY id DESC LIMIT ?",
+                (entity_id, lookup_limit),
             ).fetchall()
 
             lookup: dict[str, dict] = {}
@@ -2932,10 +3421,12 @@ def _attr_collect_for_entity(db_path: str, entity_id: str, cfg: dict, state_obj,
                 if latest_key_str is None or key_str > latest_key_str:
                     latest_key_str = key_str
 
-                # 构建行数据
+                # 构建行数据（源字段以 '=' 开头表示固定值，直接写入字面量）
                 row_data = {"entity_id": entity_id, "name": name, "room": room, "datetime": dt_str}
                 for src_field, target_col in field_mapping.items():
-                    row_data[target_col] = _extract_nested_value(element, src_field)
+                    row_data[target_col] = _resolve_field_value(element, src_field)
+                if mode == ATTR_MODE_COMM:
+                    _normalize_comm_row(row_data)
                 _apply_decimal_places(row_data, decimal_places)
 
                 is_new_row = key_str not in lookup
@@ -3067,7 +3558,7 @@ def _attr_collect_for_entity(db_path: str, entity_id: str, cfg: dict, state_obj,
                 if src_field == "$state":
                     row_data[target_col] = state_value
                 else:
-                    row_data[target_col] = _extract_nested_value(attrs, src_field)
+                    row_data[target_col] = _resolve_field_value(attrs, src_field)
             _apply_decimal_places(row_data, decimal_places)
             # 非首次采集：独立列随新行写入
             if not is_first_collect_fields:
@@ -3190,6 +3681,9 @@ def _get_all_attr_entities(db_path: str, collect_mode: str | None = None) -> lis
         query = (
             f"SELECT ec.entity_id, ec.attr_type, ec.collect_mode, ec.collect_interval, "
             f"  ec.round_minute, ec.friendly_name, ec.room, "
+            f"  ec.field_mapping AS ec_field_mapping, ec.field_types AS ec_field_types, "
+            f"  ec.array_path AS ec_array_path, ec.key_field AS ec_key_field, "
+            f"  ec.compare_limit AS ec_compare_limit, ec.decimal_places AS ec_decimal_places, "
             f"  atd.mode, atd.array_path, atd.key_field, atd.compare_limit, atd.field_mapping, "
             f"  atd.field_types, atd.decimal_places, atd.extra_fields, atd.extra_json_nodes "
             f"FROM {TABLE_ENTITY_CONFIGS} ec "
@@ -3198,7 +3692,13 @@ def _get_all_attr_entities(db_path: str, collect_mode: str | None = None) -> lis
         )
         params = (collect_mode,) if collect_mode else ()
         cursor = conn.execute(query, params)
-        return [dict(row) for row in cursor.fetchall()]
+        # 实体级映射非空则覆盖类型级（多实体共用一张表、各自独立映射）；
+        # 通讯模式还会在两者之间插入「按实体 ID 后缀匹配的内置预设」
+        out: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            data = dict(row)
+            out.append(_merge_entity_mapping(data, str(data.get("mode") or "")))
+        return out
     except Exception:
         return []
     finally:
@@ -3420,14 +3920,44 @@ async def _async_attr_event(hass: HomeAssistant, db_path: str, entity_id: str,
     if not type_def:
         return
 
+    # 内置预设（仅通讯模式、按实体 ID 后缀匹配）：实体级没配的项由它兜底
+    _preset: dict = {}
+    _pfm: dict = {}
+    if str(type_def.get("mode") or "") == ATTR_MODE_COMM:
+        try:
+            from .comm_presets import detect_preset, preset_field_mapping  # 延迟导入
+
+            _preset = detect_preset(entity_id) or {}
+            # 含按实体 ID 动态生成的 my_number（=号码 固定值）
+            _pfm = preset_field_mapping(entity_id) if _preset else {}
+        except Exception:  # noqa: BLE001 - 预设不可用不影响采集
+            _preset, _pfm = {}, {}
+
     # 合并配置
     cfg = {
         "attr_type": attr_type,
         "mode": type_def.get("mode", ATTR_MODE_FIELDS),
-        "array_path": type_def.get("array_path", ""),
-        "key_field": type_def.get("key_field", ""),
-        "compare_limit": type_def.get("compare_limit", 30),
-        "field_mapping": type_def.get("field_mapping", ""),
+        # 采集节点也支持实体级覆盖（各实体数据形状不同时用各自的节点）
+        "array_path": (str(info.get("array_path") or "").strip()
+                       or _preset.get("array_path")
+                       or type_def.get("array_path", "")),
+        # 唯一键 / 去重窗口 / 小数位同样支持实体级覆盖
+        "key_field": (str(info.get("key_field") or "").strip()
+                      or _preset.get("key_field")
+                      or type_def.get("key_field", "")),
+        "compare_limit": (int(info.get("compare_limit") or 0)
+                          or int(_preset.get("compare_limit") or 0)
+                          or int(type_def.get("compare_limit") or 30)),
+        "decimal_places": (int(info.get("decimal_places"))
+                           if info.get("decimal_places") is not None
+                           and int(info.get("decimal_places")) >= -1
+                           else None),
+        # 实体级映射优先 → 内置预设 → 类型级
+        "field_mapping": (str(info.get("field_mapping") or "").strip()
+                          or (json.dumps(_pfm, ensure_ascii=False) if _pfm else "")
+                          or type_def.get("field_mapping", "")),
+        "field_types": (str(info.get("field_types") or "").strip()
+                        or type_def.get("field_types", "")),
         "extra_fields": type_def.get("extra_fields", ""),
         "extra_json_nodes": type_def.get("extra_json_nodes", ""),
         "room": info.get("room", ""),
@@ -4434,6 +4964,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         EntityStateView,
         AttrTypesView,
         AttrConfigView,
+        AttrEntityMappingView,
         ExportConfigView,
         FileSourceConfigView,
         ApiSourceConfigView,
@@ -4445,6 +4976,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         VacuumConfigsView,
         AttrManualTriggerView,
         DbMaintainView,
+        ClearTableView,
         DbAlterTableView,
         BatchEntityStateView,
         PushTargetsView,
@@ -4496,6 +5028,8 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         AutomationStatsView,
         RecentExcludeView,
         RecentEntitiesView,
+        OnThisDayExcludeView,
+        OnThisDayEntitiesView,
         MetricsListView,
         MetricsSchemaView,
         MetricsTestView,
@@ -4514,6 +5048,9 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     # 近期使用设备：排除项配置（api_settings.recent_exclude_entities）+ 实体唯一值
     hass.http.register_view(RecentExcludeView(db_path))
     hass.http.register_view(RecentEntitiesView(db_path))
+    # 历史今日：排除实体配置（api_settings.today_in_history_exclude_entities）+ 实体候选列表
+    hass.http.register_view(OnThisDayExcludeView(db_path))
+    hass.http.register_view(OnThisDayEntitiesView(db_path))
     # 指标管理（元数据 + 通用指标引擎 metrics_catalog）
     hass.http.register_view(MetricsListView(db_path))
     hass.http.register_view(MetricsSchemaView(db_path))
@@ -4524,6 +5061,8 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(EntityStateView(db_path, hass))
     hass.http.register_view(AttrTypesView(db_path))
     hass.http.register_view(AttrConfigView(db_path))
+    # 实体级字段映射：多实体共用一张表时各实体独立映射
+    hass.http.register_view(AttrEntityMappingView(db_path))
     hass.http.register_view(ExportConfigView(db_path))
     hass.http.register_view(FileSourceConfigView(db_path))
     hass.http.register_view(ApiSourceConfigView(db_path))
@@ -4535,6 +5074,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(VacuumConfigsView(db_path))
     hass.http.register_view(AttrManualTriggerView(db_path))
     hass.http.register_view(DbMaintainView(db_path))
+    hass.http.register_view(ClearTableView(db_path))
     hass.http.register_view(DbAlterTableView(db_path))
     hass.http.register_view(QueryCatalogView(db_path))
     hass.http.register_view(RoutesTestView(db_path))
@@ -4599,6 +5139,18 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     # 整库备份 API（独立模块）
     from .backup import register_api_views as _backup_register_api_views
     _backup_register_api_views(hass, db_path)
+
+    # 通讯数据查询 API（独立模块）
+    from .comm import register_api_views as _comm_register_api_views
+    _comm_register_api_views(hass, db_path)
+
+    # 历史今日查询 API（独立模块；支持通讯 / 设备 / 环境三类数据源）
+    from .onthisday import register_api_views as _onthisday_register_api_views
+    _onthisday_register_api_views(hass, db_path)
+
+    # 数据导入 / 导出 API（独立模块）
+    from .data_import import register_api_views as _data_import_register_api_views
+    _data_import_register_api_views(hass, db_path)
 
 
 # =========================================================================== #
