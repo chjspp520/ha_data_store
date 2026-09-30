@@ -4,14 +4,15 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 
 | 环节 | 能力 |
 |---|---|
-| **采集** | 设备开关记录（含跨午夜拆分、启动恢复、用电量核算）、传感器环境数据、实体属性提取、扫地机轨迹、健康记录、打印机用量、小爱对话 |
+| **采集** | 设备开关记录（含跨午夜拆分、启动恢复、用电量核算）、传感器环境数据、实体属性提取（含**通讯数据采集**）、扫地机轨迹、健康记录、打印机用量、小爱对话 |
 | **存储** | 统一落库 SQLite（WAL 模式）；支持整库备份与「排队 + 重启后原子应用」式恢复 |
+| **导入导出** | 数据浏览页把 CSV / JSON 导入任意表（字段映射 + 固定值、追加 / Upsert、自动建表与补列），并把表数据或空模板导出为 CSV |
 | **对外** | 完整 HTTP API（API Key 鉴权、安全沙箱下的自定义 SQL 路由）、**实体→网络（读数据 / 控制设备）**、实体→JSON 文件、文件源 / API 源 ↔ 实体映射 |
 | **交互** | 远程 HA 设备桥接（WebSocket）、虚拟设备、原生辅助元素自管实体化、轻量自动化引擎 |
 | **分析展示** | 内置数据库浏览器、可视化查询构造器、通用指标引擎、家庭洞察、今日家庭状态中文总结、系统健康监控传感器 |
 | **安全** | API 访问 / 数据库浏览 / 数据库修改 / 实体网络控制 等独立开关，控制类接口另有读写凭证分离、动作白名单、参数锁定与审计日志 |
- 
---- 
+
+---
 
 ## 目录
 
@@ -40,6 +41,8 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
   - [18. 通用指标引擎（元数据驱动 · `metrics_catalog`）](#18-通用指标引擎元数据驱动--metrics_catalog)
   - [19. 实体→网络（读数据 / 控制）](#19-实体网络读数据--控制)
   - [20. 整库备份](#20-整库备份)
+  - [21. 通讯数据（采集 + 查询）](#21-通讯数据采集--查询)
+  - [22. 数据导入 / 导出（CSV · JSON）](#22-数据导入--导出csv--json)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -92,6 +95,8 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 | 🏠 **全屋用电/用时** | `whole_house_usage` 查询按 年/月/日 返回 总计→房间→设备 三级统计（时长/用电/开启次数/运行中设备/设备数量/单纯房间名列表），API 工具含查询分组；汇总传感器 `sensor.ha_data_store_all_room_usage` 输出 本年/本月/今日 三级（状态=今日用电 kWh），每分钟刷新 |
 | 🗂️ **全屋实体** | 传感器 `sensor.ha_data_store_all_entities` 按 `report_entities.entity_type` 分组展示全部上报实体（支持多值逗号拆分、跨节点归属），状态值=去重实体个数，表变化才更新 |
 | 🕘 **家庭洞察** | 统一事件流 `timeline`（设备/操作/自动化/扫地机/小爱/健康/打印机合并成一条时间线，设备记录展开 on/off）+ 房间占用排行 `room_occupancy`（严谨区间并集、含门户事件与日/小时分解）；均按天/日期/时间段查询、不分页 |
+| 📞 **通讯数据** | 属性提取新增 `comm` 采集模式：按数组展开写入 **18 个固定字段**（我方/对方号码、归属地、姓名、通讯时间、地点、消息类型、数据来源、呼叫类型、时长、金额、流量、流量类型、内容、图片路径、我的坐标、对方运营商、对方坐标），列名与类型由系统固定，目标列可选源字段或**直接填固定值**；`2026/9/1 17:24` 自动规范化为 `2026-09-01 17:24:00`，`3分53秒` 等中文时长自动换算为秒，`1.5GB` / `512MB` 等流量自动换算为 MB；`comm.py` 提供明细/日期/排行/趋势/汇总/联系人/地点/时段 8 类查询，API 工具含专属分组 |
+| 📥 **数据导入 / 导出** | 数据浏览页把 CSV / JSON 导入任意表：字段映射 + 固定值、**追加 / Upsert**（多列唯一键）、自动建表与补列、🧪 试运行、分批进度与错误明细；基础值转换（`¥1,234.5`→`1234.5`、`2026/9/1`→`2026-09-01`）；导出表数据或空模板为 CSV（UTF-8 BOM，Excel 友好） |
 
 ---
 
@@ -967,6 +972,570 @@ db_viewer：「API 工具 → **家庭洞察**」分组提供上面两个接口�
 避免 SQLite 直接在网络盘上做 journal / 依赖文件锁（官方不建议），
 也避免网络中断在共享上留下半个损坏文件。挂载点需确保在 HA 启动时就已就绪。
 
+### 21. 通讯数据（采集 + 查询）
+
+把手机端同步过来的通讯记录（通话 / 短信 / 微信 / QQ 等）落库并查询。
+
+#### 21.1 采集：属性提取新增「通讯数据采集」模式
+
+「系统配置 → 📊 属性提取」的第四种模式 **通讯数据采集**（`mode=comm`）：
+选实体 → 选数组路径 → 选唯一键字段（通常是 `id`）→ 把源字段对应到 16 个固定列。
+
+**固定字段表 `attr_comm_records`：**
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `my_number` | TEXT | 我方号码（微信 / QQ 场景可留空） |
+| `party_number` | TEXT | 对方号码 |
+| `party_place` | TEXT | 对方号码归属地 |
+| `party_name` | TEXT | 对方姓名 |
+| `time` | TEXT | 通讯时间 `YYYY-MM-DD HH:MM:SS` |
+| `location` | TEXT | 通讯地点 |
+| `msg_type` | TEXT | 消息类型 |
+| `channel` | TEXT | 数据来源（call / sms / wechat / qq …） |
+| `call_type` | TEXT | 呼叫类型 |
+| `duration` | INTEGER | 时长（秒） |
+| `cost` | REAL | 金额（元） |
+| `content` | TEXT | 消息内容 |
+| `image_path` | TEXT | 图片路径（图片消息的文件路径 / URL） |
+| `location_coordinate` | TEXT | 我的坐标 |
+| `party_isp` | TEXT | 对方运营商 |
+| `party_coordinate` | TEXT | 对方坐标 |
+
+**列名与类型由系统固定**（不受前端勾选影响），因此 `duration` 恒为整数、`cost` 恒为数值，
+聚合查询不会因列类型被勾错而失效；建表时自动创建 `time`、`(party_number,time)`、
+`(party_name,time)`、`(location,time)` 四个索引。
+
+**配置要点：**
+
+- 每个目标列既可以**选数组里的字段名**，也可以**直接填固定值**
+  （如 `channel` 填 `wechat`、`my_number` 填自己的号码）；输入框边框绿=源列 / 橙=固定值，
+  也可加 `=` 前缀强制指定固定值
+- `time` 为唯一必填映射项；未填写的目标列保持为空
+- 值转换：`2026-09-01T17:24:33+08:00` / `2026/9/1 17:24` / 时间戳 → `YYYY-MM-DD HH:MM:SS`；
+  时长支持 `27秒`、`3分53秒`、`1小时2分3秒`、`3分53`、`1小时30`、`3:53`（分:秒）、
+  `1:02:03`（时:分:秒）、`233`、`27s`、`3m53s` 等写法，自动换算为**秒**
+- **「对比最近条数」是去重窗口**：每次采集回查最近 N 条历史记录并按唯一键比对，
+  命中则更新、未命中才插入（通讯模式默认 1000）。采集时还会自动放大到至少 2 倍本次条数，
+  所以即使设小也不会重复写入本次数据
+
+#### 21.2 查询 API（`comm.py`）
+
+```
+GET|POST /api/ha_data_store/comm?type=xxx&key=你的APIKey
+```
+
+| type | 说明 | 关键参数 |
+|---|---|---|
+| `records` | 明细列表 | `sort` / `order` / `limit` / `offset` / `content_len` |
+| `dates` | 哪些日期有数据（每天条数 / 时长 / 金额 / 联系人数） | 任意过滤 |
+| `stats` | ★ **统计分析**：按时间粒度分组汇总，每桶含条数 / 时长 / 金额 / 去重联系人数 / 活跃天数 / 平均时长，并附 `total`（合计）与可选 `avg_per_bucket`（每桶均值） | `granularity=year\|quarter\|month\|week\|day\|hour\|weekday`、`sort=time\|value`、`order`、`by`、`limit`、`fill`、`with_total`、`with_avg` |
+| `crosstab` | ★ **交叉汇总**：行维度 × 列维度 的度量矩阵（如「按消息类型汇总各联系人的条数与时长」） | `rows`（1~3 个维度，逗号分隔）、`cols`（0~1 个，留空只输出行合计）、`metric=count\|duration\|cost`、`limit` / `col_limit` |
+| `onthisday` | ★ **历史上的今日**：按「月日相同」筛选历年同一天的数据，再按 `mode` 输出（详见下节） | `mode=stats\|ranking\|parties\|records\|crosstab`、`date`（基准日）、`years` / `min_year` / `max_year` / `exclude_current`、`at` / `window` / `hour` |
+| `compare` | ★ **周期对比**：当前周期 vs 上一周期（环比）vs 去年同期（同比），直接返回差值与增长率 | `period=day\|week\|month\|quarter\|year`、`date`（基准日）、`compare=prev\|yoy\|both` |
+| `contact` | ★ **联系人档案**：某号码 / 姓名的完整画像（总量 / 首末通讯 / 多久没联系 / 平均间隔 / 各维度分布 / 最近明细） | `party_number` 或 `party_name`（必填其一）、`recent` / `top_days` / `months` |
+| `longest` | **单次 Top N**：最长通话 / 最高金额（按单条记录排序，区别于按人聚合的排行榜） | `by=duration\|cost`、`order`、`limit` / `offset` |
+| `quality` | **数据质量检查**：时间为空 / 格式异常 / 时长与金额异常 / 内容为空 / 图片缺路径 + 疑似重复 + 时间覆盖 | `dup_limit` |
+| `meta` | **数据概览**：表结构、总量、时间跨度、去重联系人数、维度取值清单（供前端下拉与健康检查） | 任意过滤 |
+| `ranking` | 排行榜：`granularity` 指定粒度 + `period` 指定年/月/日后按维度排名；不填 `period` 即全部数据排名 | `dimension`、`by=count\|duration\|cost` |
+| `trend` | 趋势序列（按时间桶统计，`fill=1` 补零） | `granularity=day\|month\|year\|hour\|weekday` |
+| `summary` | 汇总统计（总量 / 首末时间 / 总时长 / 总金额 / 联系人数 / 活跃天数 + 各维度分布） | 任意过滤 |
+| `parties` | 联系人清单（按对方号码聚合，含首末通讯时间） | `by`、`limit` / `offset` |
+| `places` | 通讯地点清单 | `limit` / `offset` |
+| `heatmap` | 星期 × 小时分布 | 任意过滤 |
+
+**通用过滤参数**（所有 type 均支持，多值参数逗号分隔）：
+
+| 参数 | 说明 |
+|---|---|
+| `date` / `month` / `year` | 单日 / 单月 / 单年 |
+| `start` / `end` | 自定义区间（含边界，`YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM:SS`） |
+| `party_numbers` / `my_numbers` / `numbers` | 对方号码 / 我方号码 / 任一方号码（多值） |
+| `party_names` / `places` / `party_places` | 姓名 / 通讯地点 / 归属地（多值，模糊匹配） |
+| `channels` / `msg_types` / `call_types` | 数据来源 / 消息类型 / 呼叫类型（多值） |
+| `keyword` | 消息内容模糊匹配 |
+| `min_duration` / `max_duration` / `min_cost` / `max_cost` | 时长（秒）与金额（元）区间 |
+| `fields` | **只返回指定列**（逗号分隔，如 `time,party_number,duration,content`）；留空 = 全部列。对 `records` / `onthisday&mode=detail` / `longest` / `contact` 的明细生效 |
+| `type_name` | 数据表对应的属性类型名。**一般无需填写**——留空时自动解析（顺序见 [21.7](#217-历史今日--ha-实体)）；仅在需要明确指向某张表时才显式传参 |
+
+**示例：**
+
+```
+# 某天某人
+/api/ha_data_store/comm?type=records&date=2026-09-01&party_names=张三&key=xxx
+
+# 指定号码在 9 月哪些日期有数据
+/api/ha_data_store/comm?type=dates&month=2026-09&party_numbers=13800000000&key=xxx
+
+# 2026-09 按姓名排行（按通话时长）
+/api/ha_data_store/comm?type=ranking&granularity=month&period=2026-09&dimension=party_name&by=duration&limit=20&key=xxx
+
+# 9 月每日趋势（缺失日期补 0）
+/api/ha_data_store/comm?type=trend&granularity=day&month=2026-09&fill=1&key=xxx
+
+# 全部数据按年汇总 / 按年月汇总
+/api/ha_data_store/comm?type=stats&granularity=year&key=xxx
+/api/ha_data_store/comm?type=stats&granularity=month&key=xxx
+
+# 指定年 → 按月汇总（缺失月份补 0）
+/api/ha_data_store/comm?type=stats&granularity=month&year=2026&fill=1&key=xxx
+
+# 指定年月 → 按日汇总（并返回每桶均值）
+/api/ha_data_store/comm?type=stats&granularity=day&month=2026-09&with_avg=1&key=xxx
+
+# 指定号码 / 姓名（支持多值）按年 / 按年月 / 按年月日汇总
+/api/ha_data_store/comm?type=stats&granularity=year&party_numbers=13800000000,13900000000&key=xxx
+/api/ha_data_store/comm?type=stats&granularity=month&party_names=张三,李四&key=xxx
+/api/ha_data_store/comm?type=stats&granularity=day&month=2026-09&party_names=张三&key=xxx
+
+# 通讯时长最多的前 5 个月（sort=value 默认降序）
+/api/ha_data_store/comm?type=stats&granularity=month&sort=value&by=duration&limit=5&key=xxx
+```
+
+**`stats` 与 `trend` 的区别**：`trend` 只给「时间桶 + 条数/时长/金额」，用于画折线；
+`stats` 额外给「去重联系人数 / 活跃天数 / 平均时长」，并在响应里返回合计行与每桶均值，
+`sort=value` 时可按指标（`by=count|duration|cost`）取 Top N 时间桶。
+`granularity` 支持别名与中文（`年` / `月` / `日` / `季度` / `周` / `yyyy` / `ym` / `ymd`），
+也支持 `period` 参数（如 `period=2026-Q3`、`period=2026-W35`）。
+
+#### 21.3 历史上的今日（`onthisday`）
+
+按「月日相同」筛选**历年同一天**的记录，再按 `mode` 输出五种视角：
+
+| mode | 用途 |
+|---|---|
+| `stats` | 历年今日汇总：`granularity=year`（每年今日）/ `month`（每年该月）/ `day`（每年该日），默认 `year` |
+| `detail` | ★ **详细明细**：返回跨年份的**逐条记录**（扁平列表），并附带 `total`（匹配总数）、`year_summaries`（各年汇总）与 `summary`（总体汇总） |
+| `ranking` | 历年今日排行榜：`dimension` + `by` |
+| `parties` | 历年今日联系人汇总：对方号码 / 姓名 + 条数 / 时长 / 金额 / 首末时间 |
+| `records` | 历年今日明细：可用 `at` / `window` / `hour` 限定时刻，如「此刻」 |
+| `crosstab` | 历年今日交叉汇总：`rows` × `cols` |
+
+专用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `date` | 基准日：`09-29` 或 `2026-09-29`；留空 = 今天 |
+| `years` | 只看这些年份，多值：`2024,2025` |
+| `min_year` / `max_year` | 年份范围 |
+| `exclude_current=1` | 排除今年，只看往年 |
+| `at` | 只看某时刻：`17:24`，或 `now`（此刻） |
+| `align` | 时刻**对齐**：`hour`（整点）/ `30` / `15` / `5` / `min`。`at=now&align=hour` → 现在 09:02 取 **09:00~10:00** |
+| `hours` / `minutes` | 自对齐后起点向后的**跨度**：`align=hour&hours=2` → 09:00~11:00；`at=09:02&minutes=30` → 09:02~09:32 |
+| `window` | 以 `at` 为中心的分钟窗口：`at=17:24&window=30` → 17:24 ± 30 分钟 |
+| `hour` | 按时段筛选：`9` / `9,10` / `9-18` |
+| `limit` / `offset` | `detail` 模式：明细条数与偏移（默认 100 / 0，上限 1000） |
+| `sort` / `order` | `detail` 模式：明细排序字段与方向（默认 `time` / `desc`） |
+| `with_years=0` / `years_limit` | `detail` 模式：不附带各年汇总 / 最多汇总年数（默认 20） |
+
+> 注意：`month` / `start` / `end` 这类时间区间参数在「历史今日」中**不生效**（`date` 已被用作基准日），
+> 请改用 `years` / `min_year` / `max_year`。其余通用过滤（号码 / 姓名 / 消息类型 / 地点 / 归属地 /
+> 呼叫类型 / 关键词等）均可叠加。`type=anniversary` 与 `type=onthisday` 等价。
+
+```
+# 历年今日逐条明细（rows 即每条记录，另附各年汇总与总体汇总）
+/api/ha_data_store/comm?type=onthisday&mode=detail&key=xxx
+
+# 分页取明细，每条内容截断到 200 字
+/api/ha_data_store/comm?type=onthisday&mode=detail&limit=50&offset=50&content_len=200&key=xxx
+
+# 只看和张三有关的历年今日明细
+/api/ha_data_store/comm?type=onthisday&mode=detail&party_names=张三&key=xxx
+
+# 历年今日按年汇总（每年一条）
+/api/ha_data_store/comm?type=onthisday&key=xxx
+
+# 2025 年的今日，按日看
+/api/ha_data_store/comm?type=onthisday&granularity=day&year=2025&key=xxx
+
+# 历年今日，谁联系得最多（按通话时长）
+/api/ha_data_store/comm?type=onthisday&mode=ranking&dimension=party_name&by=duration&key=xxx
+
+# 历年今日的联系人汇总（只看张李二人）
+/api/ha_data_store/comm?type=onthisday&mode=parties&party_names=张三,李四&key=xxx
+
+# 「此刻」历年今天都在做什么
+/api/ha_data_store/comm?type=onthisday&mode=records&at=now&window=60&key=xxx
+
+# 历年今日的「本小时」（现在 09:02 → 09:00~10:00）
+/api/ha_data_store/comm?type=onthisday&mode=records&at=now&align=hour&key=xxx
+
+# 历年今日「最近 2 小时」／ 指定起点起算的 30 分钟
+/api/ha_data_store/comm?type=onthisday&mode=records&at=now&align=hour&hours=2&key=xxx
+/api/ha_data_store/comm?type=onthisday&mode=records&at=09:02&minutes=30&key=xxx
+
+# 历年今日：按消息类型 × 联系人 交叉汇总通话时长
+/api/ha_data_store/comm?type=onthisday&mode=crosstab&rows=msg_type&cols=party_name&metric=duration&key=xxx
+```
+
+#### 21.4 交叉汇总（`crosstab`）
+
+不限「历史今日」，对全部（或指定范围的）数据生效，用于「按某维度汇总另一维度」：
+
+```
+/api/ha_data_store/comm?type=crosstab&rows=msg_type&cols=party_name&metric=count&key=xxx
+/api/ha_data_store/comm?type=crosstab&rows=location,call_type&metric=duration&key=xxx
+```
+
+可用维度（`rows` / `cols` 通用）：`msg_type`、`location`、`party_place`、`call_type`、
+`party_name`、`party_number`、`channel`、`my_number`。
+`rows` 支持 1~3 个（多维度用 ` | ` 拼接为键），`cols` 最多 1 个（留空则只输出各行合计）。
+返回 `row_keys` / `col_keys` / `matrix` / `row_metric` / `col_metric` / `grand_total`，可直接渲染表格。
+
+#### 21.5 分析类接口（compare / contact / longest / quality / meta）
+
+**周期对比 `compare`** —— 环比与同比一次拿全：
+
+```
+# 本月 vs 上月 vs 去年同期
+/api/ha_data_store/comm?type=compare&period=month&key=xxx
+
+# 指定基准日、只看同比
+/api/ha_data_store/comm?type=compare&period=day&date=2026-09-29&compare=yoy&key=xxx
+
+# 只看与张三的对比
+/api/ha_data_store/comm?type=compare&period=month&party_name=张三&key=xxx
+```
+
+返回 `current` / `previous` / `yoy`（各含 `count` / `duration` / `cost` / `party_count` /
+`active_days` / `label` / `start` / `end`）与 `diff`（差值与增长率 `*_pct`）。
+`period=year` 时同比不适用，返回 `yoy: null`。
+
+**联系人档案 `contact`** —— 给号码或姓名，拿完整画像：
+
+```
+/api/ha_data_store/comm?type=contact&party_number=13800000000&key=xxx
+/api/ha_data_store/comm?type=contact&party_name=张三&month=2026-09&key=xxx
+```
+
+返回 `total`（总量 / 首末通讯 / 平均时长 / 活跃天数）、`days_since_last`（多久没联系）、
+`span_days`、`avg_interval_days`（平均联系间隔）、`by_hour` / `by_weekday` / `by_month` /
+`by_channel` / `by_msg_type` / `by_call_type`、`top_days`（联系最多的日子）与 `recent`（最近明细）。
+
+**单次 Top N `longest`** —— 单条记录排行，区别于按人聚合的排行榜：
+
+```
+/api/ha_data_store/comm?type=longest&by=duration&limit=20&key=xxx
+/api/ha_data_store/comm?type=longest&by=cost&party_name=张三&key=xxx
+```
+
+**数据质量 `quality`**：
+
+```
+/api/ha_data_store/comm?type=quality&key=xxx
+```
+
+`issues` 每项含条数与占比：时间为空、时间格式异常、既无号码也无姓名、时长为 0 / 为负 /
+超 24 小时、金额为负、内容为空、图片消息缺路径；另有 `duplicates`（疑似重复：同 时间 +
+号码 + 内容 出现多次）、`coverage`（活跃天数 / 跨度天数 / 覆盖率）与 `ok`（严重项是否全为 0）。
+
+**数据概览 `meta`**：
+
+```
+/api/ha_data_store/comm?type=meta&key=xxx
+```
+
+返回表名、列清单、总量、时间跨度、`days_since_last`，以及 `values`（实际存在的渠道 /
+消息类型 / 呼叫类型 / 归属地 / 地点及各自条数）与 `years` / `months` 清单——
+适合给前端下拉当数据源，也能快速判断采集是否正常。
+
+#### 21.6 历史今日（`onthisday`）· 通讯 / 设备 / 环境
+
+「历史今日」已抽为独立模块 `onthisday.py`，一套代码同时服务三类数据源：
+
+| source | 数据表 | 时间列 | 指标 | 维度 |
+|---|---|---|---|---|
+| `comm` | `attr_<type_name>` | `time` | 条数 / 通话时长 / 金额 | 对方姓名 / 号码、地点、归属地、消息类型、呼叫类型、来源、我方号码 |
+| `device` | `device_history` | `on_time` | 开关次数 / 运行时长 / 用电(kWh) / 平均时长 | 实体 / 名称 / 房间 |
+| `env` | `env_<metric>` | `datetime` | 采样数 / 平均值 / 最大值 / 最小值 | 实体 / 名称 / 房间 |
+
+```
+GET|POST /api/ha_data_store/onthisday?source=comm|device|env&key=你的APIKey
+```
+
+**通用参数**（三类通用）：
+
+| 参数 | 说明 |
+|---|---|
+| `source` | 数据源：`comm`（默认）/ `device` / `env` |
+| `date` | 基准日：`09-29` 或 `2026-09-29`；留空 = 今天 |
+| `years` / `min_year` / `max_year` / `exclude_current` | 只看指定年份 / 年份范围 / 排除今年 |
+| `at` / `align` / `hours` / `minutes` / `window` / `hour` | 时刻筛选（`at=now&align=hour` → 09:00~10:00） |
+| `mode` | `stats`（默认）/ `detail` / `ranking` / `crosstab` |
+| `limit` / `offset` / `sort` / `order` / `fields` / `content_len` | 明细分页、排序与字段筛选 |
+| `drop_fields` | **黑名单**：从明细中剔除指定列（逗号分隔）。优先级低于 `fields`（两者同时给出时以 `fields` 为准）；未裁剪时默认返回全部列 |
+| `env_by_room` | **仅 env 源**：`1`（默认）= 明细按「房间 × 时间点」聚合（一个房间一行、多种指标成列）；`0` = 平铺，此时每行附带 `metric` 字段。详见 21.7.1 |
+| `limit` | 分页条数：**只设默认值、不设上限**。缺省 = 默认条数（明细类 100），`0` 或负数 = **不限条数**，其余按传入值返回 |
+| `room_bucket` | 配合 `env_by_room`：时间聚合精度（分钟，默认 `1`）；`0` = 精确到秒不合并 |
+
+**数据源专属**：`comm` 的类型名一般无需填写（自动解析，见 21.7）；`device` 用 `entity_ids` / `rooms` / `names`；
+`env` 用 `env_metric`（`temperature` / `humidity` / `pm25` / `co2` / `power` / `sensor`；
+留空 = 合并所有存在的指标表，均值按采样数加权）与 `entity_ids` / `rooms`。
+
+> ⚠️ **`metric` 是交叉汇总的「测度」参数**（`count` / `duration` / `max_value` …），
+> 与环境指标不是同一个东西——环境指标请用 `env_metric`。
+> （为兼容，`metric` 的取值恰好是环境指标名时也会生效；取 `count` 之类的测度值会被忽略。）
+
+```
+# 去年今天设备开了多久、用了多少电（按日）
+/api/ha_data_store/onthisday?source=device&date=2025-09-29&mode=stats&granularity=day
+
+# 历年今日的设备排行（按用电）
+/api/ha_data_store/onthisday?source=device&mode=ranking&dimension=name&by=energy
+
+# 历年今日客厅温度的平均值与极值
+/api/ha_data_store/onthisday?source=env&env_metric=temperature&room=客厅
+
+# 「此刻」历年今日的设备开关明细（只取三列）
+/api/ha_data_store/onthisday?source=device&mode=detail&at=now&align=hour&fields=on_time,name,duration
+```
+
+> **与通讯版的兼容**：`/api/ha_data_store/comm?type=onthisday&...` 仍然可用，内部会委托到
+> 同一个模块（固定 `source=comm`）。旧的 `mode=records` / `mode=parties` 会自动映射为
+> `detail` / `ranking`（`dimension=party_number`）。
+
+#### 21.7 历史今日 · HA 实体
+
+| 实体 | 说明 |
+|---|---|
+| `sensor.ha_data_store_today_in_history` | 状态 = 三类数据的记录总数。属性含 **`comm` / `device` / `env` 三个节点**，每个节点有 `count`（总数）、`summary`（总体汇总）、`years`（各年汇总）、`detail`（逐条明细，每类最多 10 条）、`metrics` / `dimensions`（可用指标与维度说明）。**每整点自动刷新一次**，设置实体变化时立即刷新（不参与 HA 轮询） |
+| `text.ha_data_store_today_in_history_set` | 时间范围设置，写法 **`<时间>,<前后分钟>`**：`01,80` = 01:00 前后 80 分钟、`now,60` = 此刻前后 60 分钟、`09:02,30` = 09:02 前后 30 分钟；**留空 = 全部数据**。等价于接口的 `at=<时间>&window=<分钟>`。写入后传感器**立即重算三个节点**；重启后由 `RestoreEntity` 保持设置 |
+| `text.ha_data_store_comm_type_name` | 通讯数据表类型名（对应表名 `attr_<类型名>`）。**留空 = 自动探测** `attr_type_defs` 中 `mode=comm` 的类型名（优先取数据表已存在者），通常无需设置；存在多张通讯表时用它明确指向其中一张。影响历史今日（`comm` 源）、传感器与通讯查询 API 的默认类型名 |
+
+传感器直接复用本模块的查询实现（`run_onthisday_query`），因此与 API 口径完全一致。
+某一类数据源的表不存在时，该节点只返回 `error`，不影响其它两类（`warnings` 会列出原因）。
+
+**明细呈现方式**（只作用于 `detail`，`summary` / `years` 等汇总不受影响）：
+
+| 数据源 | 排序字段 | 明细形态 |
+|---|---|---|
+| `comm` | `time` | 剔除 `id` / `datetime` / `extra_json` / `name` / `room` / `updated_at` 六个通用元数据列，保留全部通讯业务字段（含 `entity_id`） |
+| `device` | `on_time` | 不裁剪（保留全部列） |
+| `env` | `datetime` | **按「房间 × 时间点」聚合**——一个房间一行，各指标独立成列（见下） |
+
+通讯用**排除列表**（`drop_fields`）而非白名单，因此将来表里新增列会自动保留。
+
+#### 21.7.1 环境明细：一个房间的多种数据
+
+环境数据分布在多张表（`env_temperature` / `env_humidity` / `env_pm25` / `env_co2` /
+`env_power` / `env_sensor`）。若逐条平铺，不同指标的值会混在同一个 `value` 列里而
+**无法区分指标**：
+
+```yaml
+# 平铺（API 默认）：哪个是温度、哪个是湿度看不出来
+- {datetime: '2026-09-29 10:00:00', room: 客厅, value: 25.0}
+- {datetime: '2026-09-29 10:00:00', room: 客厅, value: 58.0}
+```
+
+传感器改为按「房间 × 时间点」聚合，每个指标独立成列：
+
+```yaml
+env:
+  count: 535          # 采样总数（与聚合前口径一致）
+  group_count: 54     # 聚合后的行数（房间 × 时间点）
+  room_count: 10
+  rooms: [主卧, 次卧, 客厅, 厨房, ...]
+  metric_names: [temperature, humidity, pm25, co2]
+  summary:                        # 按指标分组——各指标量纲不同，混算没有意义
+    count: 535                    # 采样总数（跨指标求和仍有意义：采了多少条）
+    by_metric:
+      temperature: {count: 90, avg_value: 24.5, max_value: 26.1, min_value: 19.8}
+      humidity:    {count: 90, avg_value: 57.2, max_value: 68.0, min_value: 45.0}
+      pm25:        {count: 90, avg_value: 35.1, max_value: 52.0, min_value: 18.0}
+  years:
+    - year: '2026'
+      count: 400
+      by_metric: {temperature: {...}, humidity: {...}, pm25: {...}}
+  detail:
+    - {room: 客厅, datetime: '2026-09-29 10:00:00', temperature: 25.0, humidity: 58.0, pm25: 35.0}
+    - {room: 次卧, datetime: '2026-09-29 10:00:00', temperature: 24.3, humidity: 56.0, pm25: 28.0}
+```
+
+**`summary` / `years` 同样按指标分组**（无论明细是否聚合）。温度 25、湿度 58、CO₂ 800
+混在一起求平均得到 46.99——这个数字不代表任何东西，所以顶层只保留 `count`（采样总数），
+`avg_value` / `max_value` / `min_value` 一律放进各指标内部。comm / device 各表量纲一致，
+沿用原有结构不变。
+
+**分页与截断**：`count` 是**本页**行数，`total` 是采样总数，`group_count` 是聚合后的总行数
+（房间 × 时间点）。响应含 `truncated`（是否还有未返回的行）与 `remaining`（未返回行数），
+不必再靠数数判断。
+
+> **`limit` 只设默认值、不设上限**：
+> - 不传 → 用默认条数（明细类 100）
+> - 传 `limit=0`（或负数）→ **不限条数，一次返回全部**
+> - 传其它值 → 按该值返回，**不会被钳制**
+>
+> 响应里的 `limit_max` 恒为 `null`，表示无上限。数据量大时可配合 `offset` 翻页。
+
+> ⚠️ **低频指标容易被挤出窗口**：温度湿度每批 12 条、`power` 每批只有 1 条（它是「全屋」总表）。
+> 时间倒序排列时，`limit` 偏小的查询会先被高频指标占满，看起来像"power 少了"——实际是分页截断。
+> 只想看某个指标时用 `env_metric` 筛选（如 `env_metric=power`），或把 `limit` 调大（上限 1000）。
+
+**`summary.by_metric` 的键与 `tables` 一一对应**——包括**存在但当前筛选下无数据**的指标，
+它们以 `{count: 0, avg_value: null, max_value: null, min_value: null}` 占位。
+这样一眼就能区分"这个指标没采到数据"和"它被漏统计了"（后者曾经发生过：空指标被静默跳过）。
+聚合值用 `null` 而非 `0`：没有采样 ≠ 采样值恰好是 0（温度 0℃ 是有效读数）。
+
+按年的 `years[].by_metric` 则**只列该年有数据的指标**——年份维度上补空没有意义。
+
+- **`room_bucket`**：时间聚合精度（分钟，默认 1）。同一房间同一分钟内的多条采样取平均，
+  因此各指标表的时间戳差几秒也能对齐到同一行；设 `0` = 精确到秒不合并
+- 同一房间有多个同类传感器时，该指标取这些采样的**平均值**
+- `room` 为空的环境记录单独成行（房间显示为空字符串）
+- `total` / `count` 仍是**采样总数**，与聚合前一致；`returned` 才是聚合行数
+- 排序为「时间倒序，同一时刻按房间名正序」
+
+**API 与传感器默认都用聚合格式**，直接请求即可：
+
+```
+/api/ha_data_store/onthisday?source=env&mode=detail&key=xxx
+```
+
+需要旧的平铺格式时传 `env_by_room=0`，此时每行会附带 **`metric`** 字段标明指标名，
+否则同一条记录的 `value` 看不出是温度还是湿度：
+
+```json
+{"datetime": "...12:30:00", "room": "次卧", "value": 24.8, "metric": "temperature"}
+```
+
+`metric` 在平铺模式下**总会附带**（即使指定了 `fields` 白名单），因为缺了它就无法分辨指标。
+聚合模式下 `fields` / `drop_fields` 不适用（列由数据动态决定）。
+
+传感器的开关是类常量 `DETAIL_ENV_BY_ROOM`（默认 `True`）。
+
+**通讯类型名的解析顺序**（见 `comm.resolve_comm_type_name`）：
+
+1. 显式 `type_name` 参数（**一般无需填写**，需要明确指向某张表时才传）
+2. `text.ha_data_store_comm_type_name` 实体的设置值
+3. **自动探测**：`attr_type_defs` 中 `mode='comm'` 且**数据表已存在**的类型名（按名称排序取首个）
+4. `attr_type_defs` 中 `mode='comm'` 的类型名（表尚未建，至少给出正确的名字）
+5. 默认 `comm_records`
+
+第 3 步意味着：在「属性提取」里用了自定义类型名（如 `my_phone`）也**无需任何额外配置**即可查询；
+若表确实不存在，报错信息会列出已登记的通讯类型名，便于定位。
+
+前两步由 **传感器、通讯查询 API（`/api/ha_data_store/comm`）、历史今日 API
+（`/api/ha_data_store/onthisday`）共用同一实现**（`comm.read_comm_type_name_setting` 读实体、
+`comm.resolve_comm_type_name` 做探测），因此三处口径必然一致——不会出现「传感器认得设置、
+API 却不认」的情况。响应体里的 `type_name` 回显的是**实际生效值**（含自动探测结果）。
+
+属性结构示例：
+
+```yaml
+state: 7                     # 三类记录总数
+on_this_day: "09-29"
+base_date: "2026-09-29"
+range: "全天（不限定）"        # 或 "01:00 ± 80 分钟"（随设置实体变化）
+at: ""                       # 设置解析出的时刻（"01:00" / "now"）
+window: 0                    # 设置解析出的前后分钟数
+exclude_entities: []         # 生效的排除实体（见 21.8）
+exclude_count: 0
+comm:
+  count: 3
+  summary: {count: 3, duration: 443, cost: 0, ...}
+  years: [{year: "2026", count: 1, ...}, ...]
+  detail: [{time: "...", party_name: "...", duration: 90, ...}, ...]
+  metrics: {count: "条数", duration: "通话时长(秒)", cost: "金额(元)"}
+  dimensions: [party_name, party_number, ...]
+device:
+  count: 2
+  summary: {count: 2, duration: 7200, energy: 1.5, ...}
+  detail: [...]
+env:
+  count: 2
+  summary: {count: 2, avg_value: 25.5, max_value: 26, min_value: 25}
+  detail: [...]
+```
+
+**DB 浏览器入口**：API 工具 → 查询类型新增两个分组：
+- 「📞 通讯数据查询」除明细 / 日期 / 排行 / 趋势 / 汇总 / 联系人 / 地点 / 时段外，另有
+  6 个统计分析入口、交叉汇总、周期对比、联系人档案、单次 Top N、数据质量、数据概览
+- 「📜 历史上的今日」5 个入口（汇总 / 排行榜 / 联系人汇总 / 明细 / 交叉汇总）
+- 「📜 历史今日 · 设备 / 环境」8 个入口（设备 / 环境 × 汇总 / 明细 / 排行 / 交叉汇总）
+
+选中后参数区按类型（及预设）动态渲染，粒度与条件均可再改。
+
+#### 21.8 排除实体（传感器与 API 共用）
+
+在 **系统配置 → 📜 历史今日** 中维护一份**排除实体**清单
+（存 `api_settings.today_in_history_exclude_entities`），被排除的 `entity_id`
+不参与历史今日的**任何数据源、任何 mode** 的统计：
+
+- 对 **API**（`/api/ha_data_store/onthisday`）与 **传感器**
+  （`sensor.ha_data_store_today_in_history`）**同时生效**
+- 三类数据源（`comm` / `device` / `env`）都按各自的 `entity_id` 列过滤
+- `entity_id` 为空的历史记录**不受影响**（不会被误排除）
+
+页面提供三种添加方式：手动输入（逗号 / 换行，支持一次粘贴多个）、chips 列表点 ✕ 删除、
+从候选实体列表（来源为 `device_history` / `env_*` / `attr_*` 的 `entity_id` 并集）搜索后 ➕ 添加。
+保存后传感器立即刷新。
+
+单次查询还可用参数 `exclude_entities` 临时追加排除项（多值，逗号分隔），与设置取**并集**：
+
+```
+# 临时排除某实体（不改变持久化设置）
+/api/ha_data_store/onthisday?source=device&exclude_entities=switch.ac&key=xxx
+
+# 与 entity_ids 叠加：先按 entity_ids 收窄，再剔除排除项（取交集）
+/api/ha_data_store/onthisday?source=device&entity_ids=switch.a,light.b&exclude_entities=light.b&key=xxx
+```
+
+配置读写接口：
+
+```
+GET|POST /api/ha_data_store/onthisday/exclude      # 读 / 写排除清单
+                                                   # POST body: {"exclude":[...]} 或 {"text":"a,b"}
+GET      /api/ha_data_store/onthisday/entities     # 候选实体列表（供页面选择）
+```
+
+响应体会回显 `exclude_entities` / `exclude_count`，便于确认当前口径；传感器属性同样带这两项。
+
+---
+
+### 22. 数据导入 / 导出（CSV · JSON）
+
+数据浏览页工具栏：**📥 导入数据**（把外部数据写进任意数据表）、**⬇️ 导出CSV**（导出当前表）。
+
+#### 22.1 导入流程（5 步）
+
+| 步骤 | 说明 |
+|---|---|
+| ① 数据源 | 选择 CSV / JSON 文件（自动识别 UTF-8 与 GBK）或直接粘贴文本。CSV 自动嗅探分隔符（`,` `;` `\t` `\|`）、正确处理引号内的逗号与换行、可指定「首行是表头」；JSON 支持对象数组、`{"data":[...]}`、数组的数组。**大文本自动按行分片提交，无需自己拆分文件** |
+| ② 目标表 | 任选已有表；可勾选「表不存在时自动建表」（按数据推断列类型）与「缺少的列自动创建」 |
+| ③ 字段映射 | 以**目标列为基准**，每行填源列名或固定值（与通讯采集同一套交互，绿=源列 / 橙=固定值）。留空的目标列不写入 |
+| ④ 写入模式 | **追加** / **Upsert**（勾选唯一键列，可多列组合）+ 日期时间规范化、数值清洗开关 |
+| ⑤ 执行 | 🧪 试运行（不写库，只回报将新增/更新多少行、会建哪些表列）/ ▶ 开始导入 / ⬇️ 下载目标表空模板 |
+
+结果报告包含新增 / 更新 / 失败数、耗时、建表与补列明细，以及最多 50 条错误行（带行号）。
+
+#### 22.2 值转换（基础层，可分别关闭）
+
+| 输入 | 输出 |
+|---|---|
+| `¥1,234.50` / `12.5元` | `1234.5` / `12.5` |
+| `2026/9/1 17:24` / `2026年9月1日` | `2026-09-01 17:24:00` / `2026-09-01 00:00:00` |
+| 空单元格 | 可空列 → NULL；`NOT NULL` 列 → 该列的 DDL 默认值 |
+
+> 中文时长（`3分53秒`）不在本模块的转换范围内，如需请用通讯采集模式。
+
+#### 22.3 接口
+
+```
+POST /api/ha_data_store/import/parse       解析数据源文本（列名 + 全部行 + 前 20 行预览）
+POST /api/ha_data_store/import             单批导入（支持 dry_run 试运行）
+GET  /api/ha_data_store/import/template?table=xxx    下载目标表空模板 CSV
+GET  /api/ha_data_store/export/csv?table=xxx         导出表数据为 CSV
+```
+
+**大文件处理**：解析只回传列名、总行数与前 20 行预览（**不回传全量数据**）；
+导入时前端把文本按行切片（每片约 200 万字符、各片自带表头）分多次提交，避免超出 HA 的请求体上限（约 16 MB），
+切片时不会切断引号内的跨行字段。服务端**流式解析**并按每 2000 行一批写入，内存占用与总行数无关；
+整批失败时自动降级为逐行重试并记录失败行，不会因一行错误丢掉整批。
+
+**安全**：表名 / 列名白名单校验 + 严格参数化写入；核心配置表（`api_keys`、`entity_configs`、
+`attr_type_defs`、`push_targets` 等 11 张）与 `sqlite_*` 系统表禁止导入；
+写操作受「数据库修改」开关约束。
+
 ---
 
 ## API 接口文档
@@ -1087,6 +1656,16 @@ curl "http://ha:8123/api/ha_data_store/query?type=whole_house_usage&year=2026&mo
 - 运行中设备（`on_time` 非空、`off_time` 空）纳入统计并带 `running` 标记：时长=当前时间−`on_time`；用电=有电表取 `now_kwh−on_power`，无电表但有固定功率按 `power_rating(W)/1000×时长` 折算
 - 汇总传感器 `sensor.ha_data_store_all_room_usage` 直接输出 本年/本月/今日 三级（状态值=今日用电 kWh，每 1 分钟刷新）
 
+**通讯数据查询（独立路径）：**
+
+```
+GET /api/ha_data_store/comm?type=records&date=2026-09-01&key=你的APIKey
+```
+
+`type` 可取 `records` / `dates` / `stats` / `crosstab` / `compare` / `contact` / `longest` /
+`quality` / `meta` / `onthisday` / `ranking` / `trend` / `summary` / `parties` / `places` / `heatmap`；
+参数与返回结构详见 [21. 通讯数据（采集 + 查询）](#21-通讯数据采集--查询)。
+
 ### 配置管理接口
 
 ```
@@ -1191,6 +1770,7 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
 | `/api/ha_data_store/health_types` | GET/POST/DELETE | 健康数据类型管理 |
 | `/api/ha_data_store/batch_entity_state` | POST | 批量写入实体状态 |
 | `/api/ha_data_store/db_maintain` | POST | 数据库维护（VACUUM/REINDEX） |
+| `/api/ha_data_store/clear_table` | POST | 清空指定表并重置自增 ID（body `{table, admin_password, vacuum?}`，需管理员密码；核心表禁止） |
 | `/api/ha_data_store/entity_monitor` | GET | 实体在线监控 |
 | `/api/ha_data_store/automations` | GET/POST | 自动化配置列表/新增 |
 | `/api/ha_data_store/automations/{id}` | PUT/DELETE | 修改/删除自动化（修改后自动重算下次运行时间） |
@@ -1234,7 +1814,9 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 - 数据分页浏览
 - 在线编辑、删除行
 - 按列排序
-- 直接添加新行
+- 📥 导入数据（CSV / JSON，字段映射 + 固定值、追加 / Upsert、自动建表与补列、试运行）
+- ⬇️ 导出CSV（当前表数据；另可下载目标表空模板）
+- 🧹 清空表（删除全部数据并让自增 ID 从 1 重新开始，需管理员密码 + 二次确认）
 
 **安全限制：** 默认仅限同网段访问，需要管理员密码登录（默认 `admin`）。
 
@@ -1308,6 +1890,10 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 ### 属性提取表
 
 按类型动态创建：`attr_{type_name}`
+
+通讯数据采集（`mode=comm`）使用 `attr_comm_records`，固定 16 列
+（见 [21. 通讯数据（采集 + 查询）](#21-通讯数据采集--查询)），并为
+`time`、`(party_number,time)`、`(party_name,time)`、`(location,time)` 建立索引。
 
 ### 配置表
 
@@ -1439,6 +2025,1183 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v4.15.3 「类型级映射」表格加醒目提示（避免改了看不到效果）（2026-09-30）
+
+界面上有**两处**显示字段映射，容易混淆：
+
+| 位置 | 数据来源 | 优先级 |
+|---|---|---|
+| **属性提取 → 编辑** 的「实体采集参数」→ 行尾「编辑」 | 实体级 → 内置预设 → 类型级 | 前两层可覆盖类型级 |
+| **属性提取 → 新建/编辑** 的「通讯字段映射」表格 | **纯类型级** | 只对「无预设、无自定义」的实体生效 |
+
+第二处**现在只是兜底** —— `*_calls` / `*_sms` / `*_traffic` 走内置预设、
+其它实体多半有实体级配置，所以**在那里改映射往往看不到效果**。
+
+该表格顶部现在加了橙色警示条，写明「这是类型级默认映射，只对没有预设也没有单独配置的实体生效；
+`*_calls` / `*_sms` / `*_traffic` 会走内置预设；那两层都优先于这里」，并指明去哪改。
+
+> 功能没变，只是把"改了为什么没反应"这件事说清楚。
+> 各实体实际用哪份映射，看「实体采集参数」里点「编辑」后面板**头部**的标注
+> （`内置预设：xxx` / `自定义` / `继承类型级`）。
+
+> 版本号 → `4.15.3`。前端改动，**硬刷新页面**（Ctrl+F5）即可，无需重启 HA。
+
+### v4.15.2 修复：实体映射面板把「内置预设」和「类型级」串在一起（2026-09-30）
+
+**问题**：流量实体的映射面板里，除了正确的预设 7 项外，还混进了一堆**通话**的字段：
+
+```
+party_number ← phone_number      ← 流量不该有
+party_place  ← number_location   ← 流量不该有
+location     ← location          ← 流量不该有
+msg_type     ← type              ← 流量不该有
+call_type    ← call_type         ← 流量不该有
+party_isp / party_coordinate / location_coordinate  ← 流量不该有
+```
+
+而 `time ← datetime`、`duration ← duration_seconds`、`traffic_usage ← volume_mb` 又是对的 ——
+**对的是预设项，错的全来自类型级**（库里类型级 `field_mapping` 存的是通话那份）。
+
+**根因**：源字段反查被写成了**逐列回退**：
+
+```js
+Object.keys(own).forEach(...);           // 实体级
+if (!src) Object.keys(effMap).forEach(...);   // 内置预设
+if (!src) Object.keys(typeMap).forEach(...);  // 类型级 ← 错在这里
+```
+
+但「实体级 > 内置预设 > 类型级」是**整体**关系，不是逐列回退 —— 预设一旦存在，
+类型级就**完全不该参与**。于是每列在预设里找不到时，就掉进了通话映射。
+
+**修复**：抽出两个职责单一的函数，并把"整体三层"这件事写死在一处：
+
+```js
+// 三层整体取一层：上层存在就完全取代下层
+function aeEffectiveMapping(own, presetMapping, typeMap) {
+  if (own && Object.keys(own).length) return { map: own, scope: 'entity' };
+  if (presetMapping && Object.keys(presetMapping).length) return { map: presetMapping, scope: 'preset' };
+  return { map: typeMap || {}, scope: 'type' };
+}
+// 只在「生效映射」里反向找源字段（不再跨层回退）
+function aeSourceOf(target, effMap) { ... }
+```
+
+面板现在严格按生效的那一层渲染。顺带：
+
+- 「清除」按钮文案改为「清除自定义映射（恢复内置预设 / 继承类型级）」，确认框说明会回落到哪一层
+- 表格上方的说明补上"三层是**整体**关系，命中上层就完全取代下层"
+
+> 后端 `_merge_entity_mapping` 一直是**整体覆盖**（`if ec_fm ... elif preset_fm ...`），
+> 采集结果本来就是对的；这次修的纯粹是**前端展示**。
+
+> 版本号 → `4.15.2`。需重启 HA 生效（前端刷新页面即可，无需清缓存）。
+
+### v4.15.1 修正内置预设的映射 + 修复保存时误报「数组路径不能为空」（2026-09-30）
+
+**一、修复保存被误拦**
+
+v4.14.0 把「数组路径 / 唯一键字段 / 对比最近条数 / 小数位数」下移到实体行后，
+`saveAttrEdit()` 里仍在读已被删除的 `#attrEditArrayPath` —— `getElementById` 返回 `null`，
+取到空串，于是**每次保存都误报**
+
+```
+数组路径不能为空（列表展开/混合/通讯模式必填）（共 2 项，已中止保存）
+```
+
+同处还有两个连带缺陷（都会导致保存异常）：
+
+- `arrPath` / `keyField` / `compareLimit` / `decimalPlaces` 四个变量已不存在，但后面仍在
+  用于计算类型级 diff → `ReferenceError`
+- 通讯模式不再渲染类型级字段映射表，`mapping` 恒为空 → 原来那句
+  `defUpdates.push(['field_mapping', ...])` 会**把类型级映射清空**（兜底默认值被抹掉）
+
+现在：类型级的这四项**不再在编辑弹窗里改动**（保留库中原值继续作兜底）；
+校验改为按「**实体级 → 内置预设 → 类型级**」三级判断，三者都取不到才报错，
+错误信息会指明是哪个实体的哪一项。
+
+**二、修正三条内置预设（按实际数据形状）**
+
+| | `*_calls` | `*_sms` | `*_traffic` |
+|---|---|---|---|
+| 采集节点 | `通话流水清单` | `短信记录` | `上网会话清单` |
+| 唯一键 | `call_time` | `datetime` | `datetime` |
+| `channel` 默认值 | **`语音`** | `短信` | `流量` |
+
+**通话**（13 项）：`phone_number→party_number`、`number_location→party_place`、
+`call_time→time`、`location→location`、**`type→msg_type`**、**`call_type→call_type`**、
+`duration→duration`、`fee→cost`、`location_coordinate→location_coordinate`、
+`number_isp→party_isp`、`number_location_coordinate→party_coordinate`
+
+> 两处与 v4.15.0 不同：`type`（呼叫/接听，方向）应进 `msg_type` 而不是 `call_type`；
+> 源字段里的 `call_type`（国内通话/漫游）才是 `call_type` 列。
+
+**短信**（9 项）：`phone_number→party_number`、`datetime→time`、`type→msg_type`、
+`fee→cost`、`number_isp→party_isp`、`number_location_coordinate→party_coordinate`、
+`number_location→party_place`
+
+**流量**（7 项）：`datetime→time`、`duration_seconds→duration`、`fee→cost`、
+`volume_mb→traffic_usage`、`business_type→traffic_type`
+
+**三、`my_number` 从实体 ID 自动提取**
+
+三条预设都会根据实体 ID 里的电话号码生成 `my_number` 固定值映射 ——
+`sensor.17792405320_sms` → `=17792405320`。正则取末段 7~15 位连续数字
+（`extract_phone()`），兼容手机号与带区号固话；提取不到就不生成该项。
+
+实现上 `my_number` **不写进** `COMM_PRESETS` 常量（保持前后端可静态比对），
+由 `preset_field_mapping(entity_id)` 运行时叠加。
+
+> 版本号 → `4.15.1`。需重启 HA 生效。
+
+### v4.15.0 通讯采集内置映射预设（按实体后缀开箱即用）（2026-09-30）
+
+针对 `shaobo_pocket_carrier` 集成产生的三类实体，内置「采集节点 + 字段映射 + 唯一键」，
+**无需任何配置**即可采集。按实体 ID **末段后缀**识别：
+
+| 后缀 | 采集节点 | 唯一键 | 主要映射 |
+|---|---|---|---|
+| `*_calls` | **`通话流水清单`** | `call_time` | `phone_number→party_number`、`number_location→party_place`、`number_isp→party_isp`、`number_location_coordinate→party_coordinate`、`location→location`、`location_coordinate→location_coordinate`、`type→call_type`、`duration→duration`、`fee→cost`、`=通话→channel` |
+| `*_sms` | **`短信记录`** | `datetime` | `phone_number→party_number`、`number_location→party_place`、`number_isp→party_isp`、`number_location_coordinate→party_coordinate`、`type→msg_type`、`fee→cost`、`=短信→channel` |
+| `*_traffic` | **`上网会话清单`** | `datetime` | `volume_mb→traffic_usage`、`business_type→traffic_type`、`duration_seconds→duration`、`fee→cost`、`=流量→channel` |
+
+三个实体里都有多个数组（`按天汇总` / `最近一条` / `排序选项` 等），
+预设一律选**明细清单**那一个。`channel` 用**固定值**写法（`=通话` 等）。
+
+**优先级**：`实体级配置` → `内置预设` → `类型级配置`
+
+- 已手工配过的实体不受影响（实体级非空即优先）
+- 新加的 `*_sms` / `*_traffic` / `*_calls` 实体默认就能采到数据
+- 手工配过之后想退回预设：清掉该实体的实体级配置即可
+
+**实现**：
+
+- 新增 `comm_presets.py`：`detect_preset(entity_id)`（按**末段**后缀匹配，
+  避免 `sensor.sms_gateway_temperature` 这类误命中）、`preset_summary()`（给前端）
+- `_merge_entity_mapping(row, mode)` 增加 `mode` 参数，在实体级与类型级之间插入预设层；
+  **仅通讯模式**生效（预设的映射项都是通讯固定列）
+- `_async_attr_event` 的 `cfg` 组装同样插入预设层
+- `AttrEntityMappingView` 的 GET 返回 `preset` 供前端展示
+- 前端内置一份镜像（`COMM_PRESETS` + `commPresetOf()`），实体行的「字段映射」列
+  显示 **内置：通话记录** 之类的绿色标识；点「编辑」时映射面板会**按预设预填**
+  并提示来源（后缀），保存即固化为实体级配置
+
+> 版本号 → `4.15.0`。需重启 HA 生效。
+
+### v4.14.1 修正「唯一键字段」的候选来源与语义说明（2026-09-30）
+
+**先明确语义**：`key_field` 填的是**源字段名**（**该实体采集节点下数组元素里的字段**，
+如 `call_time` / `b_when`），**不是数据库列名**。因为去重时是拿它到数组元素里取值：
+
+```python
+key_target_col = field_mapping.get(key_field, key_field)   # 该源字段映射到哪一列
+key_value = _extract_nested_value(element, key_field)      # 从数组元素里取值
+```
+
+**问题**：实体表格里这列的输入框绑定的是 `list="attrEditFieldList"` ——
+那是**类型级**探测出来的扁平候选，于是 `sensor.x_sms` 这一行会给出 `call_time`
+这类**别的实体的字段名**，必须手工敲。
+
+**修复**：
+
+- 每行挂一个**独立 datalist**（`#aeKeyList_<i>`），输入框绑定各自的
+- `_aeLoadEntityFields()` 为每个实体**按它自己的采集节点**（行内下拉优先、否则库里的
+  `array_path`）算出字段候选，存进 `ctx.entityFieldCands[entity_id]`
+- `_aeUpdateDatalists()` 把候选填进各行的 datalist
+- 某行的「采集节点」变化时（`aeOnEntityNodeChanged`，300ms 防抖）会重新探测并刷新候选
+- 占位符与提示文案明确写出「源字段名（该节点下）」、**不是数据库列名**，
+  以及填错时的兜底行为（自动回退到时间列并在日志提示，见 v4.9.1）
+
+实测：`通话流水清单` / `短信清单` / `上网会话清单` 三个节点各返回各自的字段集，
+互不混入；节点用错（对某实体不存在）时按既有规则退回顶层标量。
+
+> 版本号 → `4.14.1`。需重启 HA 生效。
+
+### v4.14.0 采集参数全部下移到实体级 + 编辑弹窗支持最大化（2026-09-30）
+
+`key_field`（唯一键）、`compare_limit`（去重窗口）、`decimal_places`（小数位）
+也支持**实体级覆盖**（与 `array_path` / `field_mapping` 同一套规则），
+于是「采集参数」区只剩类型名与模式（只读展示），实体表格扩到 10 列：
+
+```
+实体 | 房间 | 采集方式 | 间隔(分钟) | 采集节点（数组路径） | 唯一键字段 | 对比最近条数 | 小数位数 | 字段映射 | 操作
+```
+
+- 三列输入框的 **placeholder 显示当前继承值**（如 `继承：call_time`），留空即继承类型级
+- 数值项用哨兵值区分「未设置」：`compare_limit` 用 `≤0`、`decimal_places` 用 `< -1`
+  （因为 `decimal_places` 的 `-1`（不限）与 `0~6` 都是合法值，哨兵取 `-2`）
+
+**类型级「通讯字段映射」区已移除** —— 通讯模式一律走每个实体行的「编辑」按钮。
+类型级 `field_mapping` 仍作为**回退默认值**保留在库里，但不再在界面上暴露；
+非通讯模式（fields / list / multi）的类型级映射区保持不变。
+
+**编辑弹窗支持最大化**：标题栏新增 `⛶ 最大化 / ⤡ 还原` 按钮，
+最大化时铺满视口（`99vw × 96vh`），配合 `#attrEditBody` 既有的 `overflow:auto`
+可正常滚动查看 10 列表格。
+
+后端：`entity_configs` 新增 `key_field` / `compare_limit` / `decimal_places` 三列（含迁移）；
+采集链路与 `AttrEntityMappingView` 同步支持读写这三项。
+
+> 版本号 → `4.14.0`。需重启 HA 生效。
+
+### v4.13.0 采集节点改为「每个实体各自指定」（2026-09-30）
+
+`array_path`（要采集的数组节点）原先只是**类型级**配置，同一类型下的所有实体共用。
+但同一类型的各实体数据形状往往不同 —— 例如 `rec` 类型下的三个实体：
+
+| 实体 | 数组节点 |
+|---|---|
+| `sensor.xxx_traffic` | `data.traffic` |
+| `sensor.xxx_sms` | `data.sms.list` |
+| `sensor.xxx_calls` | `data.calls` |
+
+现在 `array_path` 与 `field_mapping`、`field_types` 一样支持**实体级覆盖**
+（`ENTITY_CONFIGS.array_path` 列，`RestoreEntity` 式的「实体级非空优先、否则回退类型级」）。
+
+**实体表格新增「采集节点（数组路径）」列**，每行一个下拉：
+
+```
+实体 | 房间 | 采集方式 | 间隔(分钟) | 采集节点（数组路径） | 字段映射 | 操作
+```
+
+- 选项来自**该实体自己**属性树里的数组节点（带元素数；由 `_aeLoadEntityFields` 逐实体探测）
+- 首项 `（继承类型级：data.records）` 表示沿用类型级；空 = 回退类型级
+- 若当前值没探测到（实体不可用/手工填过），仍保留为一个 `（当前，未探测到）` 选项
+
+**点该行「编辑」打开字段映射时**：面板标题会显示该实体的采集节点，
+**源字段候选按该实体 + 该节点重新探测**（只列该节点下元素的字段），
+关闭面板时还原为类型级候选。
+
+**保存**：节点变化走 `entity_configs.array_path` 的 UPDATE；新增实体时先走
+`EntityConfigView` 建行，再补一次 `AttrEntityMappingView` 设节点。
+
+接口 `GET|POST /api/ha_data_store/attr_entity_mapping` 相应增加 `array_path` 字段
+（GET 另返回 `type_array_path`；`scope` 也计入节点）。
+
+> 版本号 → `4.13.0`。需重启 HA 生效。
+
+### v4.12.1 采集节点与字段映射候选联动（2026-09-30）
+
+v4.12.0 加的「节点选择面板」只是让你**能挑**节点，但挑完节点后，
+下方「字段映射」的**源字段候选并没有跟着变** —— 这才是真正需要的能力。
+
+**两处修正**：
+
+**一、候选改为「节点优先」**（`_aeFieldCandidates`）
+
+| 情况 | 修改前 | 修改后 |
+|---|---|---|
+| 已指定采集节点 | 该节点下字段 **+ 顶层标量属性**（混在一起） | **只**列该节点下元素的字段 |
+| 未指定节点 | 顶层标量属性 | 不变 |
+
+指定节点后候选里混着无关的顶层字段，映射时要在里面翻 —— 现在不会了。
+
+**二、候选随节点变化「整体重建」+ 自动联动**
+
+- `_aeLoadEntityFields()` 原来用 `if (ctx.fieldCands.indexOf(c) < 0) push(c)` **累加**候选，
+  换节点后旧节点的字段仍然留在候选里；现在改为**重新构建** `ctx.fieldCands`
+- 「数组路径」输入框加 `oninput` / `onchange` → `aeOnArrayPathChanged()`（350ms 防抖）
+  → 重新探测实体属性 → 重建候选 → 刷新 datalist 与提示
+- 新增 **「从实体属性选节点」下拉**（`#aeArrayPathSelect`）：直接列出实体属性树里的
+  **所有数组节点**（带元素数），选中即填入并触发联动 —— 等价于创建流程的 `#attrArrayPath`
+- 采集参数区下方新增**提示行**：显示当前节点下取到多少个字段、已并入候选多少个
+
+**三处入口都会触发联动**：改输入框、用下拉选、点节点面板里的「设为数组路径」。
+
+> 版本号 → `4.12.1`。需重启 HA 生效。
+
+### v4.12.0 属性提取编辑界面新增「从实体属性选择节点」（2026-09-30）
+
+**问题**：创建类型时（「步骤 1：加载实体状态」）可以用 `#attrArrayPath` 下拉从实体属性树里
+挑数组节点，编辑已有类型时**没有这个入口** —— 只有输入框 + datalist 候选，看不到属性树的形状，
+只能盲猜路径。通讯模式的 `array_path` / `extra_json_nodes` 尤其受影响。
+
+**修复**：编辑弹窗的「采集参数」区新增 **🌳 从实体属性选择节点** 面板：
+
+- 顶部选择要探测的实体（自动列出该类型下**启用中**的实体，多实体时可切换）
+- **🔍 探测属性树** 调用既有 `/api/ha_data_store/entity_state`，按层级缩进渲染全部属性节点
+- 每个节点显示 `type` 与规模：list 显示 `[N 个元素]`、dict 显示 `{N 个键}`
+
+每个节点按类型给出可执行动作：
+
+| 节点类型 | 可用动作 |
+|---|---|
+| `list` | **设为数组路径**（填入 `array_path`，当前值会标 `✔`） |
+| `list` / `dict` | **加为 JSON 节点**（追加到 `extra_json_nodes`，已在列表的标 `✔`） |
+| 任意 | **设为唯一键**（填入 `key_field`）、**复制路径** |
+
+**实现**（`db_viewer.html`，纯前端，未改后端）：
+
+- HTML 面板插在数组路径输入行之后（编辑弹窗内）
+- 新增 10 个函数：`aeToggleNodePicker` / `aeCloseNodePicker` / `_aeFillNodePickerEntities` /
+  `aeProbeNodes` / `_aeNodeDepth` / `aeRenderNodePicker` /
+  `aePickNodeAsArrayPath` / `aePickNodeAsKeyField` / `aePickNodeAsJsonNode` / `aeCopyNodePath`
+- 「加为 JSON 节点」复用既有的 `_aeNodeRowHtml(path)` 行模板，并先按 `input[data-role="node"]`
+  现有值去重
+- `_aeRender()` 末尾会**恢复面板展开状态**（重渲染会重建 DOM），并按最新输入重绘 `✔` 标记；
+  `closeAttrEditModal()` 里重置 `aeNodePickerOpen` / `aeNodeTree`，避免残留上个类型的属性树
+
+后端 `attribute_tree` 的节点结构（`entity_state` 返回，未改动）：
+`{path, type, keys?, length?, value?, first_element?}`，其中 `type` 为
+`"list"` / `"dict"` 或 Python 类型名（`str` / `int` / `NoneType` 等）。
+
+> 版本号 → `4.12.0`。需重启 HA 生效。
+
+### v4.11.0 属性提取编辑界面支持增删实体（多实体配置）（2026-09-30）
+
+**问题**：编辑已有类型时**无法新增实体**。原因是前端「属性提取」编辑弹窗里
+`_aeRender()` 只遍历从数据库读到的**已存在**实体，页面没有「添加」入口；
+而保存函数 `saveAttrEdit()` 对没有 `_rowid` 的行直接 `return` 跳过 ——
+**整条链路没有 INSERT 分支**（后端其实一直能 upsert，只是前端从不调用）。
+
+**修复**：编辑弹窗的「实体采集参数」区改为始终渲染表格并支持增删：
+
+| 入口 | 行为 |
+|---|---|
+| **➕ 添加实体** | 追加一行空行（沿用上一行的房间 / 采集方式 / 间隔），可直接输入 entity_id |
+| **📋 批量添加** | 弹框粘贴多个 entity_id（逗号 / 换行 / 空格 / 中文逗号均可），自动去重 |
+| **🗑 删除** | 待新增行直接移除；已有行标记为「待停用」（半透明，可点「↩ 恢复」取消） |
+
+保存时：
+
+- 新增实体走 `EntityConfigView`（`POST /api/ha_data_store/config`）的 **upsert**，
+  传 `entity_id` + `attr_type` + `category=attribute` + 采集方式 / 间隔 / 房间，
+  **无需传 `field_mapping`**（新实体默认继承类型级映射）
+- 停用实体走 `enabled=0` **软删**（只影响该实体的本类型配置，历史数据保留，
+  再次编辑并保存即可恢复）
+- 新增前会用 `/api/ha_data_store/entity_state` 校验实体是否存在（与「更换实体」同样对待）
+- 确认框会列出新增 / 停用的实体清单
+
+**其它**：`_aeRender()` 开头新增 `_aeSyncEntityInputs()`，在重渲染前把表格里
+未保存的输入收回内存，避免「添加 / 删除行」时丢失刚填的内容。
+
+> 版本号 → `4.11.0`。需重启 HA 生效。
+
+### v4.10.0 通讯表字段「自动填写」（号码归属地 / 运营商 / 坐标）（2026-09-30）
+
+在 **API 工具 → 📞 通讯数据查询** 页面下方新增「📇 自动填写」区，用本地离线数据补全通讯表
+中的空字段（**不联网**）：
+
+| 字段 | 来源 |
+|---|---|
+| `party_place`（对方归属地） | `party_number` 查本地归属地库（省+市，省市同名只留一个） |
+| `party_isp`（对方运营商） | `party_number` 查本地归属地库（标准化为 `中国移动` 等） |
+| `party_coordinate`（对方坐标） | `party_place` 查本地城市坐标表（`"经度,纬度"`） |
+| `location_coordinate`（我的坐标） | `location` 查本地城市坐标表 |
+
+**数据文件**（放在集成目录的 `data/` 下，也可放在 `config/ha_data_store/` 覆盖）：
+
+| 文件 | 内容 |
+|---|---|
+| `phone2region.zdb` | 手机号 / 固话归属地库（[ALI1416/phone2region](https://github.com/ALI1416/phone2region)，Apache-2.0） |
+| `city_coordinates.json` | 420 个城市中心坐标（`{"coordinates": {"西安": [108.948, 34.2632], ...}}`） |
+
+**页面操作**：
+
+- **📇 自动填写**：只补空字段（默认），已有内容不覆盖，可反复执行（幂等）
+- **🧪 预览**：只统计会补多少条，不写库
+- **覆盖已有值**：勾选后连已有内容一并重算
+- **最多处理 N 行**：`0` = 全部；大表可分批跑
+- **🔄 刷新状态**：读取库版本 / 坐标表条数 / 待回填行数
+
+**接口**：
+
+```
+GET  /api/ha_data_store/comm/backfill?type_name=
+       → {success, region:{库状态}, coords:{坐标表状态}, table:{待回填统计}}
+POST /api/ha_data_store/comm/backfill
+       Body: {type_name?, dry_run?, only_empty?, limit?}
+       → {success, scanned, updated, filled:{...}, no_region, no_coord, samples}
+```
+
+`type_name` 留空时沿用 `comm.resolve_comm_type_name` 的自动探测（见 v4.6.1）。
+
+**实现**：新增 `phone_region.py`（归属地库解析与查询）与 `city_geo.py`（城市坐标匹配），
+两者移植自同仓库的 `shaobo_pocket_carrier` 集成，逻辑保持一致；新增 `comm_backfill.py`
+承载回填逻辑。
+
+库格式（已实测确认，小端序）：`.zdb` 是 ZIP 容器，内层 `phone2region.db` 为
+`[20字节头: CRC32+版本+记录区指针+二级索引指针+一级索引指针]` +
+`[记录区: <长度1B><UTF-8 "省|市|邮编|区号|运营商">]` +
+`[二级索引: 2736 × int32]` + `[一级索引: N × [号段低8位1B][记录区偏移4B]]`；
+手机号查询 `key = 前7位 - 1300000`，`key>>8` 定位块、块内按 `key&0xFF` 顺序扫描。
+
+> 版本号 → `4.10.0`。需重启 HA 生效。
+
+### v4.9.1 修复：多实体各写各的映射时，去重键 `key_field` 不匹配导致整批跳过（2026-09-30）
+
+**问题**：`key_field` 是**类型级**配置，而 `field_mapping` 可以被实体级覆盖（v4.8.1）。
+多实体共用一张表、各写各的源字段名时（手机 A 用 `a_time`、手机 B 用 `b_when`，都映射到 `time`），
+类型级的 `key_field`（`a_time`）对 B 而言不存在 → 取不到 key → **B 的数组元素整批被静默跳过，
+一条都不写**，且日志无任何提示。
+
+**并非**"因为 time 一致而互相覆盖"——去重与更新都以 `entity_id` 为条件隔离，
+不同实体即使 `time` 完全相同也各写各行、互不干扰。真正的问题是"不匹配的实体什么都不写"。
+
+**修复**（新增 `_resolve_collect_key(field_mapping, key_field)`）：
+
+| 顺序 | 条件 | 结果 |
+|---|---|---|
+| 1 | `key_field` 在本实体映射的源字段中 | 直接用（不回退） |
+| 2 | 本实体映射中有源字段映射到 `time` 列 | 用该源字段（comm 模式 `time` 必填，必命中） |
+| 3 | 其它 | 退化为映射中的第一个目标列（保证是表中真实存在的列，避免取列异常） |
+
+发生回退时写一条 warning 日志，指出实际使用的源字段与目标列，便于排查。第 1 种情况
+（即绝大多数单实体或映射一致的场景）**行为完全不变**。
+
+**顺带明确的两点既有行为**（未改动，仅说明）：
+
+- **同一轮数组内**两条记录 `key` 相同时，两条都会插入（`lookup` 只在采集开始时从库中读取一次，
+  不含本轮新插入的行）。同一秒的两条不同通话本就该是两行，这是对的。
+- **跨轮次**、同一 `entity_id` + 同一 `key` 时按 key 去重：内容无变化不写，有变化则 UPDATE（不新增行）。
+
+> 版本号 → `4.9.1`。需重启 HA 生效。
+
+### v4.9.0 通讯表新增「流量 / 流量类型」字段（2026-09-30）
+
+通讯固定字段由 16 个增至 **18 个**：
+
+| 列名 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `traffic_usage` | REAL | 流量(MB) | 数据流量，统一换算为 **MB** |
+| `traffic_type` | TEXT | 流量类型 | 如 `移动数据` / `WLAN` / `5G` |
+
+位置在 `cost`（金额）之后、`content`（消息内容）之前，避免破坏既有列序。
+
+**自动升级**：字段定义改为 `COMM_FIELDS` 后，建表、补列（`_ensure_comm_columns`）与
+启动时的全表升级（`_ensure_all_comm_tables`）自动包含新列——**已有通讯表重启 HA 后自动补列**，
+历史数据保留（新列历史行为默认值 `0` / 空串）。
+
+**流量单位自动换算**（`_parse_comm_traffic`，采集时对源字段值生效）：
+
+| 源值 | 结果 | 说明 |
+|---|---|---|
+| `123` / `123.5` | 123 / 123.5 | 纯数字按 MB |
+| `512MB` / `200kb` | 512 / 0.1953 | 支持 KB / MB / GB / TB / B |
+| `1.5GB` / `2G` | 1536 / 2048 | 单字母写法也可（`K`/`M`/`G`/`T`） |
+| `abc` / `1.5XB` | 0 | 无法识别按 0 |
+
+单位大小写不敏感、允许空格，换算结果保留 4 位小数。
+
+**查询接入**：`traffic_usage` / `traffic_type` 进入明细输出列（`_OUTPUT_COLUMNS`）、
+排序白名单（`_SORT_COLUMNS`，可按 `sort=traffic_usage` 排序）、排行榜指标
+（`by=traffic_usage` 按流量排序）与汇总（summary 返回 `traffic_usage` 合计）。
+
+**前端**：`COMM_FIELD_DEFS`（通讯字段映射表）与 `COMM_SOURCE_ALIASES`（源字段自动预选别名）
+同步新增两项，别名覆盖 `traffic` / `data_usage` / `flow` / `net_type` / `network_type` 等常见写法。
+
+> 注意：`channel`（数据来源）的别名中已有 `data_type`，因此**未**把它作为 `traffic_type` 的别名，
+> 避免同一源字段被两列争抢。若源数据的 `data_type` 实际表示流量类型，请手工把它映射到「流量类型」。
+
+> 版本号 → `4.9.0`。需重启 HA 生效。
+
+### v4.8.1 通话记录支持多实体采集到同一张表（每实体独立字段映射）（2026-09-30）
+
+通讯采集（以及所有属性提取模式）此前**字段映射是「类型级」的**——同一个类型下的所有实体
+共用一份映射。两台手机的通话记录 JSON 结构不同时，只能二选一。
+
+现在支持**实体级映射**：每个实体可指定自己的「源字段 → 目标列」，写入的仍是**同一张表**
+`attr_<类型名>`。
+
+| 层级 | 存储 | 说明 |
+|---|---|---|
+| 类型级 | `attr_type_defs.field_mapping` | 该类型的**默认**映射 |
+| 实体级 | `entity_configs.field_mapping` | **新增**；非空则覆盖类型级，留空 = 继承 |
+
+**优先级**：实体级非空 → 用实体级；否则回退类型级。旧配置（只有类型级映射）行为**完全不变**。
+
+**列结构**：各实体采集时各自补列，所以表是各实体映射的**并集**；某实体未映射的列在该行写入
+时留默认值。两个不同的源字段名映射到同一个目标列是允许的（如 A 的 `a_time` 与 B 的 `b_when`
+都映射到 `time`）。
+
+前端：「属性提取 → 编辑」的**实体采集参数**表格新增「字段映射」列，显示
+`继承类型级` / `自定义 N 项`，点行尾「编辑」展开该实体的映射表（目标列由类型决定：
+通讯模式为 18 个固定字段，其它模式为类型级映射的目标列），填源字段或 `=固定值`。
+保存/清除即时写入（`entity_configs.field_mapping`），下一轮采集生效。
+
+接口：
+
+```
+GET  /api/ha_data_store/attr_entity_mapping?entity_id=&attr_type=
+       → {scope: "entity"|"type", field_mapping, field_types, type_field_mapping, ...}
+POST /api/ha_data_store/attr_entity_mapping
+       Body: {entity_id, attr_type, field_mapping: {...}}
+       · 空映射 = 清除实体级，回退继承
+       · 通讯模式校验：目标列须在 COMM_COLUMNS 白名单内、必填列（time）必须映射
+```
+
+> 版本号 → `4.8.1`。需重启 HA 生效。
+
+### v4.8.0 属性提取编辑时支持更换「被采集的实体」（2026-09-30）
+
+**问题**：「属性提取」编辑已有采集配置时，「实体采集参数」表格里的**实体 ID 是只读文本**——
+只能改房间 / 采集方式 / 间隔，无法更换被采集的实体。要换实体只能删掉重建配置。
+
+**修复**：实体 ID 改为可编辑输入框。
+
+| 行为 | 说明 |
+|---|---|
+| 直接编辑实体 ID | 保存时按新 ID 更新 `entity_configs`（主键为 `entity_id + attr_type`，等价于"换绑"） |
+| 空值校验 | 实体 ID 不能为空 |
+| 重复校验 | 同类型下不能出现重复实体 ID |
+| **存在性预校验** | 保存前先探一次实体状态，不存在或不可用则拒绝保存并提示 |
+| 确认框强化 | 明确列出「旧实体 → 新实体」，并提醒核对数组路径 / 唯一键 / 字段映射 |
+| 友好报错 | 若目标实体已存在同类型配置（主键冲突），提示「请先删除它的旧配置」而不是抛原始 SQL 错误 |
+
+**注意事项**（确认框里也提示了）：
+
+- 旧数据**保留在原表中，不迁移**——新实体从下一轮采集开始写入，历史数据仍归原类型
+- 若新实体的属性结构与原实体差异较大，需要一并核对「数组路径 / 唯一键字段 / 字段映射」，
+  否则采集可能取不到数据（配置本身允许保存，不会报错）
+
+> 版本号 → `4.8.0`。需重启 HA 生效。
+
+### v4.7.9 修复：通讯表字段升级在「配置记录丢失」时失效（2026-09-29）
+
+**问题**：v4.7.8 新增的 3 个字段没有出现在已有通讯表里。
+
+**根因**：补列函数 `_ensure_comm_columns()` 只在 `_ensure_attr_table()` 内被调用，
+而它要求 `attr_type_defs` 中**存在对应 type_name 的记录**。若采集配置记录已丢失
+（但表和 10 万行数据仍在），就永远不会走到补列逻辑——表结构永久停在旧版本。
+**与自定义表名无关**，自定义类型名本身是支持的。
+
+**修复**：新增 `_ensure_all_comm_tables()`，在数据库初始化时（`_migrate_database()` 之后）
+运行，用**两条互补途径**识别通讯表：
+
+1. `attr_type_defs` 中 `mode=comm` 的 type_name
+2. **结构特征**：`attr_*` 表中含 `my_number` / `party_number` / `time` 三列的
+
+只要表还在就能升级，不受配置记录影响。非通讯表（电费、燃气等）不会被误改。
+
+> 识别条件宽松但要求三列同时存在，避免误判。单表补列与建索引都幂等，可重复执行。
+
+> 版本号 → `4.7.9`。需重启 HA 生效。
+
+### v4.7.8 通讯表新增 3 个字段（2026-09-29）
+
+通讯数据采集新增第 14~16 个固定字段：
+
+| 列 | 类型 | 标签 | 必填 |
+|---|---|---|---|
+| `location_coordinate` | TEXT | 我的坐标 | 否 |
+| `party_isp` | TEXT | 对方运营商 | 否 |
+| `party_coordinate` | TEXT | 对方坐标 | 否 |
+
+- 加入 `const.py` 的 `COMM_FIELDS`（追加在末尾），随之进入 `COMM_COLUMNS` /
+  `COMM_COLUMN_TYPES` 白名单，采集配置的目标列白名单校验与前端映射表自动生效
+- **已存在的表自动补列**：`_ensure_comm_columns()` 幂等，重启后保存一次采集配置
+  （或等下一次采集触发）即执行 `ALTER TABLE ADD COLUMN`，**不需要重建表、不丢数据**
+- `comm.py` 的 `_OUTPUT_COLUMNS` 同步加入，`type=records` 明细会返回这三列
+- 前端「属性提取 → 通讯字段映射」新增三行，同样支持**选源字段**或**直接填固定值**；
+  常见别名自动预选：
+  - 我的坐标：`my_coordinate` / `my_coord` / `coordinate` / `coord` / `gps` / `geo` / `position` / `lonlat` / `lnglat` …
+  - 对方运营商：`isp` / `carrier` / `operator` / `party_carrier` / `sim_isp` / `network` …
+  - 对方坐标：`party_coord` / `party_position` / `party_gps` / `party_geo` / `peer_coordinate` …
+
+字段**追加在末尾**而非插入中间——这样 `ALTER TABLE ADD COLUMN` 的列顺序与新建表一致。
+
+> 版本号 → `4.7.8`。需重启 HA 生效。
+
+### v4.7.7 分页不再设上限 + limit=0 表示不限（2026-09-29）
+
+`limit` 现在**只设默认值，不设上限**：
+
+| 传值 | 行为 |
+|---|---|
+| 不传 | 用默认条数（明细类 100） |
+| `limit=0` / 负数 | **不限条数，一次返回全部** |
+| 其它值 | 按该值返回，**不再被钳制** |
+
+响应里的 `limit_max` 恒为 `null`，表示无上限。原先各查询类型的上限（明细 1000、
+stats 5000、ranking 500、crosstab 200 等）全部移除。
+
+```bash
+# 一次拿全（502 条）
+/api/ha_data_store/comm?type=onthisday&mode=detail&limit=0&key=xxx
+#   → count: 502, truncated: false, limit: null, limit_max: null
+
+# 传具体值也不再被钳制
+/api/ha_data_store/comm?type=onthisday&mode=detail&limit=100000&key=xxx
+#   → limit: 100000（原值保留）
+```
+
+**顺带修掉一个 bug**：`comm.py` 有自己的 `_get_int()`，仍是旧写法
+（`params.get(key) or ""`），导致整数 `0` 被当成「未提供」而套用默认值——
+所以 `limit=0` 在 `records` 模式下会静默变成 100。已与 `onthisday.py` 统一为显式判空。
+
+> 版本号 → `4.7.7`。需重启 HA 生效。
+
+### v4.7.6 分页参数回显 limit_max（2026-09-29）
+
+**澄清一个常见误解**：`limit` 不是"强制值"，而是**默认值**——不传时取 100，
+可以显式调大。此前没有任何地方告知上限是多少，只能靠试错。
+
+```bash
+# 不传 limit → 默认 100 条
+/api/ha_data_store/comm?type=onthisday&mode=detail&key=xxx
+#   → count: 100, total: 502, truncated: true, remaining: 402
+
+# 传 limit=1000 → 一次拿全 502 条
+/api/ha_data_store/comm?type=onthisday&mode=detail&limit=1000&key=xxx
+#   → count: 502, truncated: false, remaining: 0
+```
+
+改动：
+
+| 项 | 说明 |
+|---|---|
+| 响应新增 `limit_max` | 该查询类型的 `limit` 上限（明细类为 1000） |
+| `comm._query_records` 补充 `truncated` / `remaining` | 上一版只给 `onthisday` 的 detail 加了这两个字段，`records` 漏了 |
+| 常量提取 | `_DETAIL_LIMIT_DEFAULT/MAX`（onthisday）、`_RECORDS_LIMIT_DEFAULT/MAX`（comm），默认值与上限不再散落在代码里 |
+
+各查询类型的 `limit` 默认值并不相同（明细 100、统计/趋势 1000、排行榜 20…），
+上限也不同——以响应里的 `limit` / `limit_max` 为准。
+
+> 版本号 → `4.7.6`。需重启 HA 生效。
+
+### v4.7.5 明细分页新增 truncated / remaining 标记（2026-09-29）
+
+排查「power 数据少了」时发现：数据一条没丢，是 **`limit` 分页截断**被误读成缺数据——
+`total: 663`、`group_count: 351`，而 `limit=100` 只返回了最近 100 组。
+
+原因还有一个放大因素：**低频指标在时间倒序下容易被高频指标挤出窗口**。温度湿度每批 12 条
+（12 个房间），`power` 每批只有 1 条（「全屋」总表），100 行的窗口很快就被温湿占满。
+
+本次改动：
+
+| 字段 | 含义 |
+|---|---|
+| `truncated` | 是否还有未返回的行 |
+| `remaining` | 未返回的行数 |
+
+聚合与平铺两种模式都会给出；配合已有的 `count`（本页行数）/ `total`（采样总数）/
+`group_count`（聚合后总行数），一眼就能看出是否被截断，不用数数。
+
+**想看某个指标时用 `env_metric` 筛选**，别靠翻页：
+
+```
+/api/ha_data_store/onthisday?source=env&mode=detail&env_metric=power&limit=1000&key=xxx
+```
+
+（`limit` 上限 1000；本例 `group_count` 351，调大后一次可拿全。）
+
+> 版本号 → `4.7.5`。需重启 HA 生效。
+
+### v4.7.4 环境明细 API 默认返回「带指标类型」的格式（2026-09-29）
+
+**问题**：环境明细的聚合格式之前只对传感器生效，API 默认仍是平铺——而平铺时所有指标的值
+都叫 `value`，**看不出哪条是温度、哪条是湿度**：
+
+```json
+{"datetime": "...12:30:00", "name": "", "room": "次卧", "value": 24.8}
+{"datetime": "...12:30:00", "name": "", "room": "次卧", "value": 72.0}
+```
+
+**修复**：
+
+| 改动 | 说明 |
+|---|---|
+| `env_by_room` 默认值 `0` → **`1`** | env 源的明细**默认**按「房间 × 时间点」聚合，指标名即字段名 |
+| 平铺模式（`env_by_room=0`）补 **`metric`** 字段 | 每行标明 `temperature` / `humidity` / `power` …，即使 `fields` 白名单也会附带 |
+
+现在同一个请求返回：
+
+```json
+{"room": "全屋", "datetime": "2026-09-29 12:40:00", "power": 4.383}
+{"room": "次卧", "datetime": "2026-09-29 12:30:00", "temperature": 24.8, "humidity": 72.0}
+{"room": "厨房", "datetime": "2026-09-29 12:30:00", "temperature": 25.3, "humidity": 70.0}
+```
+
+平铺模式仍可用（`env_by_room=0`），只是每行多了 `metric` 字段：
+
+```json
+{"datetime": "...12:30:00", "room": "次卧", "value": 24.8, "metric": "temperature"}
+```
+
+注意：聚合模式下 `fields` / `drop_fields` **不适用**（列由数据动态决定），
+以此前带 `fields=datetime,name,room,value` 的 URL 请求，会直接得到聚合结果而不报错。
+
+> 版本号 → `4.7.4`。需重启 HA 生效。
+
+### v4.7.3 环境汇总列出「存在但无数据」的指标（2026-09-29）
+
+`summary.by_metric` 之前只包含**有数据**的指标，导致它的键少于 `tables`（例如有 6 张指标表，
+汇总里只出现 3 个），看起来像"漏统计了另外几个指标"。
+
+现在 **`by_metric` 的键与 `tables` 一一对应**，无数据的指标以占位形式列出：
+
+```yaml
+by_metric:
+  temperature: {count: 144, avg_value: 23.7, max_value: 27.7, min_value: 18.8}
+  humidity:    {count: 144, avg_value: 74.3708, max_value: 91, min_value: 54}
+  power:       {count: 19, avg_value: 3.2239, max_value: 4.383, min_value: 1.801}
+  pm25:        {count: 0, avg_value: null, max_value: null, min_value: null}   # 无数据
+  co2:         {count: 0, avg_value: null, max_value: null, min_value: null}
+  sensor:      {count: 0, avg_value: null, max_value: null, min_value: null}
+```
+
+聚合值用 `null` 而非 `0`——「没有采样」和「采样值恰好是 0」是两回事（温度 0℃ 是有效读数）。
+
+按年的 `years[].by_metric` 仍只列该年有数据的指标（年份维度补空无意义）。
+
+> 若某个指标一直是 `count: 0`，说明该表在当前筛选（月日相同）下确实没有数据。
+> 可用 `SELECT COUNT(*), MIN(datetime), MAX(datetime) FROM env_pm25;` 确认表里到底有没有数据。
+
+> 版本号 → `4.7.3`。需重启 HA 生效。
+
+### v4.7.2 修复：API 未读取「通讯数据表类型名」设置（2026-09-29）
+
+**问题**：设置了 `text.ha_data_store_comm_type_name` 后，传感器能正确查到通讯表，但通讯查询 API
+（`/api/ha_data_store/comm`）仍报「未找到通讯数据表 attr_comm_records」。
+
+**根因**：设置实体只在**传感器**路径被读取，两条 API 路径都漏了——`CommApiView` 只从请求参数取
+`type_name`（前端已不再发送该参数，于是恒为空），`OnThisDayView` 更是完全没处理。它们只能靠
+`attr_type_defs` 自动探测，而库里若没有 `mode=comm` 的登记记录，就会回退到默认名。
+
+**修复**：
+
+| 改动 | 说明 |
+|---|---|
+| 新增 `comm.read_comm_type_name_setting(hass)` | 统一读取设置实体（须在事件循环线程调用），空值 / `unknown` / `auto` 等一律返回空串 |
+| `CommApiView._handle` | 参数为空时读取设置实体，再交给 `run_comm_query` 做自动探测 |
+| `OnThisDayView._handle` | 同上（此前完全没有这一步） |
+| `sensor.py` | `_read_comm_type_name()` 改为调用同一函数，消除重复实现 |
+| `run_comm_query` | 返回值新增 `type_name`（**实际生效值**，含自动探测结果）；`CommApiView` 不再回显参数原值 |
+
+三条路径现在共用同一套解析逻辑，口径不可能再漂移。
+
+> 版本号 → `4.7.2`。需重启 HA 生效。
+
+### v4.7.1 环境汇总也按指标分组（2026-09-29）
+
+上一版只改了明细，`summary` / `years` 仍在**跨指标混算**：温度 25、湿度 58、CO₂ 800
+一起求平均得到 `avg_value: 46.9853`、`max_value: 91`（那是 CO₂ 的值）、`min_value: 0`——
+这三个数字不代表任何东西。现在环境汇总按指标分组：
+
+```yaml
+summary:
+  count: 535                    # 采样总数（跨指标求和仍有意义：采了多少条）
+  by_metric:
+    temperature: {count: 90, avg_value: 24.5, max_value: 26.1, min_value: 19.8}
+    humidity:    {count: 90, avg_value: 57.2, max_value: 68.0, min_value: 45.0}
+    pm25:        {count: 90, avg_value: 35.1, max_value: 52.0, min_value: 18.0}
+years:
+  - {year: '2026', count: 400, by_metric: {temperature: {...}, humidity: {...}, ...}}
+```
+
+- 顶层只保留 `count`；`avg_value` / `max_value` / `min_value` 只出现在各指标内部
+- 无论明细是否聚合（`env_by_room`），汇总都按指标分组
+- **仅影响 env 源**：comm / device 各表量纲一致，`summary` / `years` 结构完全不变
+
+> 版本号 → `4.7.1`。需重启 HA 生效。
+
+### v4.7.0 环境明细改为「一个房间多种数据」（2026-09-29）
+
+环境数据分布在 6 张指标表（`env_temperature` / `env_humidity` / `env_pm25` / `env_co2` /
+`env_power` / `env_sensor`），逐条平铺时不同指标的值混在同一个 `value` 列里，
+**看不出哪个是温度、哪个是湿度**。现在传感器的 `env.detail` 改为按「房间 × 时间点」聚合：
+
+```yaml
+env:
+  count: 535          # 采样总数（口径不变）
+  group_count: 54     # 聚合后行数
+  room_count: 10
+  rooms: [主卧, 次卧, 客厅, ...]
+  metric_names: [temperature, humidity, pm25, co2]
+  detail:
+    - {room: 客厅, datetime: '2026-09-29 10:00:00', temperature: 25.0, humidity: 58.0, pm25: 35.0}
+```
+
+| 参数 | 说明 |
+|---|---|
+| `env_by_room` | **仅 env 源**，`1` = 聚合（默认 `0` = 平铺，保持向后兼容） |
+| `room_bucket` | 时间聚合精度（分钟，默认 `1`）。同一房间同一分钟内的采样取平均，故各指标表时间戳差几秒也能对齐到同一行；`0` = 精确到秒 |
+
+顺带修掉 `_get_int()` 的一个 bug：
+
+```python
+# 修复前：整数 0 是 falsy，会被当成「未提供」而套用默认值
+val = int(str(params.get(key, "") or "").strip() or default)
+```
+
+这导致 Python 侧传 `room_bucket=0`（精确到秒）时会被静默改成 `1`。URL 参数是字符串不受影响，
+但语义上确实是错的，已改为显式判空。
+
+> 版本号 → `4.7.0`。需重启 HA 生效。
+
+### v4.6.3 历史今日传感器精简明细字段（2026-09-29）
+
+传感器三个节点的 `detail`（逐条明细）字段按数据源裁剪，减少状态属性体积：
+
+| 数据源 | 排序字段 | 明细列 |
+|---|---|---|
+| `comm` | `time` | 剔除 `id` / `datetime` / `extra_json` / `name` / `room` / `updated_at`（6 个通用元数据列），保留全部通讯业务字段（含 `entity_id`） |
+| `device` | `on_time` | 不裁剪 |
+| `env` | `datetime` | **只保留** `datetime` / `room` / `value` |
+
+新增查询参数 `drop_fields`（黑名单，逗号分隔）——通讯源用它，因此**将来表里新增列会自动保留**；
+环境源用 `fields`（白名单）。两者同时给出时 `fields` 优先。
+只影响 `detail`，`summary` / `years` 等汇总统计不受影响。
+
+> 关于环境数据：若明细只出现今年，通常是环境表里**确实只有今年**的数据
+> （历年的 `MM-DD` 不存在），而非筛选失效。可用
+> `SELECT SUBSTR(datetime,6,5) AS d, COUNT(*) FROM env_temperature GROUP BY d` 自查。
+
+> 版本号 → `4.6.3`。需重启 HA 生效。
+
+### v4.6.2 通讯 API 工具不再暴露「类型名」参数（2026-09-29）
+
+既然类型名已由设置实体与自动探测决定，**DB 浏览器「API 工具」中的通讯查询参数区已移除
+「类型名 type_name」输入项**，生成的 URL 也不带该参数——共 7 处（明细 / 日期 / 统计 / 历史今日 /
+交叉汇总 / 周期对比 / 联系人档案的公共参数，以及历史今日设备环境的 `comm` 数据源参数）。
+
+提示文案同步说明：数据表类型名**自动探测**（取 `attr_type_defs` 中 `mode=comm` 且数据表已存在者），
+如需明确指定请设置 HA 实体 `text.ha_data_store_comm_type_name`。
+
+**后端行为不变**：`type_name` 参数仍然保留（向后兼容），已有显式传参的调用与自动化不受影响；
+只是前端不再引导用户填写。
+
+> 版本号 → `4.6.2`。需重启 HA 生效。
+
+### v4.6.1 通讯表类型名自动探测 + 新增设置实体（2026-09-29）
+
+之前历史今日（及通讯查询 API）在 `type_name` 未指定时**写死**用默认名 `comm_records`，
+于是在「属性提取」里用了自定义类型名的用户会看到「未找到通讯数据表 attr_comm_records」。
+现在改为按以下顺序解析：
+
+| 优先级 | 来源 |
+|---|---|
+| 1 | 显式 `type_name` 参数 |
+| 2 | **新增** HA 实体 `text.ha_data_store_comm_type_name`（留空 = 自动） |
+| 3 | **自动探测**：`attr_type_defs` 中 `mode='comm'` 且数据表已存在的类型名（按名称排序取首个） |
+| 4 | `attr_type_defs` 中 `mode='comm'` 的类型名（表尚未建） |
+| 5 | 默认 `comm_records` |
+
+**大多数人不需要做任何事**——第 3 步会自动找到你在「属性提取」里配置的通讯表。设置实体只在
+「同一库里有多个通讯表、需要明确指定」时才需要。
+
+新增实体：
+
+| 实体 | 说明 |
+|---|---|
+| `text.ha_data_store_comm_type_name` | 通讯数据表类型名（`attr_<类型名>`）；留空 = 自动探测。校验：不含空白、≤50 字符。`RestoreEntity` 跨重启保持 |
+
+生效范围：历史今日（`comm` 数据源）、历史今日传感器、通讯查询 API（`/api/ha_data_store/comm`）
+的默认类型名。**该实体变化时传感器立即刷新**（与时间范围设置实体一同监听）。
+
+其余改动：报错信息会列出 `attr_type_defs` 中已登记的通讯类型名并提示可用参数 / 实体；
+传感器属性新增 `comm_type_name`（回显实际生效的类型名，含自动探测结果）；
+历史今日响应体在 `comm` 源下新增 `type_name` 字段。
+
+> 版本号 → `4.6.1`。需重启 HA 生效。
+
+### v4.6.0 历史今日新增「排除实体」配置（2026-09-29）
+
+「系统配置」新增子选项卡 **📜 历史今日**，用于维护「排除实体」清单：被排除的 `entity_id`
+不参与历史今日的**任何数据源、任何 mode** 统计，**API 与传感器同时生效**。
+
+| 项目 | 说明 |
+|---|---|
+| 存储 | `api_settings.today_in_history_exclude_entities`（JSON 数组，无需新建表） |
+| 页面 | 系统配置 → 📜 历史今日（三种添加方式：手动输入 / chips 删除 / 候选列表搜索添加），角标显示 `-N` |
+| 接口 | `GET\|POST /api/ha_data_store/onthisday/exclude`（读写）、`GET /api/ha_data_store/onthisday/entities`（候选实体） |
+| 生效范围 | `comm` / `device` / `env` 三类数据源的全部 mode（stats / detail / ranking / crosstab） |
+| 临时排除 | 查询参数 `exclude_entities`（多值），与设置取并集；与 `entity_ids` 叠加时取交集 |
+| 回显 | 响应体与传感器属性均含 `exclude_entities` / `exclude_count` |
+
+细节：用 `IFNULL("entity_id", '') NOT IN (...)` 过滤，保证 `entity_id` 为空的历史记录
+**不会被误排除**（SQLite 中 `NULL NOT IN (...)` 结果为 NULL）。
+
+顺带把 `api_settings` 的列表读写抽为通用模块 `app_settings.py`
+（`get_list` / `set_list`，兼容 JSON 数组与逗号 / 换行 / 全角逗号纯文本），
+`recent_devices` 的排除项读写改为调用它——两处共用同一套容错逻辑，行为不变。
+
+> 版本号 → `4.6.0`。需重启 HA 生效。
+
+### v4.5.2 历史今日实体改为每整点刷新（2026-09-29）
+
+`sensor.ha_data_store_today_in_history` 的定时刷新由「每 5 分钟」改为**每整点刷新一次**
+（`async_track_time_change(..., minute=0, second=0)`，即每小时 0 分 0 秒触发）。
+同时显式声明 `should_poll = False`，不再参与 HA 默认轮询——刷新完全由三种方式驱动：
+
+1. **每整点**定时刷新
+2. 设置实体（时间范围）变化时**立即**刷新
+3. HA 启动后延迟 5 秒首次刷新
+
+> 注意：`now,60` 这类含 `now` 的设置，窗口会随当前时刻滑动。整点刷新意味着窗口最久滞后 1 小时，
+> 实时性要求高时建议改用固定时刻写法（如 `09,60`）并在需要时手动触发。
+
+> 版本号 → `4.5.2`。需重启 HA 生效。
+
+### v4.5.1 历史今日时间范围改为「时间,前后分钟」写法（2026-09-29）
+
+设置实体 `text.ha_data_store_today_in_history_set` 的取值改为 **`<时间>,<前后分钟>`**：
+
+| 写法 | 含义 |
+|---|---|
+| `01,80` | 01:00 前后 80 分钟 |
+| `now,60` | 此刻前后 60 分钟 |
+| `09:02,30` | 09:02 前后 30 分钟 |
+| 留空 | **全部数据**（不限定时间范围） |
+
+等价于接口的 `at=<时间>&window=<分钟>`。解析规则抽到 `onthisday.parse_window_setting()`，
+text 实体的格式校验与传感器的读取**共用同一个函数**，因此「能不能写」和「读出来是什么」必然一致；
+传感器另有 `range` / `at` / `window` 三个属性回显当前口径。
+
+格式校验：必须两段、时间须为 `now` 或 `HH[:MM]`（0~23 时 / 0~59 分）、分钟须为非负整数且不超过 720。
+`unknown` / `unavailable` / `-` 与留空等价，按「全部数据」处理。
+
+设置实体的 `entity_id` 未变（仍是 `text.ha_data_store_today_in_history_set`），
+旧值（`0`~`23` 的纯数字）现在都无法解析，会按「全部数据」处理——重新设置一次即可。
+
+**联动**：设置实体发生变化时，立即重算传感器的 `comm` / `device` / `env` 三个节点
+（无需等下一次定时刷新），并在日志中记录新值。
+
+> 版本号 → `4.5.1`。需重启 HA 生效。
+
+### v4.5.0 新增「历史今日」传感器与时间范围设置实体（2026-09-29）
+
+**新增两个实体**：
+
+- `sensor.ha_data_store_today_in_history` —— 状态为三类数据的记录总数，
+  属性含 `comm` / `device` / `env` 三个节点（各含 `count` / `summary` / `years` / `detail`），
+  5 分钟自动刷新
+- `text.ha_data_store_today_in_history_set` —— 时间范围设置（0~23）：`0` = 全天，
+  `N` = 从当前整点起最后 N 小时；写入后传感器立即刷新，`RestoreEntity` 跨重启保持
+
+两者都**复用 `onthisday.py` 的查询实现**，与 API 口径完全一致；某类表不存在时该节点只返回
+`error`，不影响其它两类。
+
+**顺带修复一个已存在的问题**：`onthisday` 里 comm 数据源会把 `date` 透传给
+`comm._build_filters`，而那里 `date` 表示"指定单日"——于是「历史今日」被悄悄收窄成一天。
+以前没暴露是因为测试与前端默认都用 `09-29` 这种短格式（解析不出日期，恰好绕过了）。
+现在 comm 数据源的业务过滤会先剔除 `date` / `month` / `year` / `start` / `end` / `period`，
+统一由「历史今日」自己的基准日与年份范围参数负责。
+
+> 版本号 → `4.5.0`。需重启 HA 生效。
+
+### v4.4.1 修复环境数据源参数冲突与参数区串味（2026-09-29）
+
+**修复 1：`metric` 参数冲突**。`metric` 在环境数据源里表示「环境指标」（`temperature`…），
+在交叉汇总里表示「测度」（`count`…）。参数区把 crosstab 的 `metric=count` 也拼进了 URL，
+后端于是拿 `count` 去拼表名 `env_count`，报「未找到任何环境数据表」。
+
+- 环境指标改用 **`env_metric`**（别名 `env_metrics`）
+- 为兼容，`metric` 取值确实属于环境指标名时仍然生效；取 `count` 之类的测度值会被忽略
+- `comm` 的委托入口同样适用
+
+**修复 2：参数区按模式裁剪**。此前参数区一次性渲染了所有模式的字段，导致 URL 里同名字段
+重复出现——例如 `limit=1000&…&limit=100&…&limit=20&…&limit=30`，后端只取最后一个，
+用户设的明细条数被交叉汇总的 `limit` 覆盖。现在只渲染当前模式的字段，
+切换「输出模式」会重建参数区（`onOtdModeChange`）。
+
+**修复 3：交叉汇总的合计语义**。`grand_total` / `row_metric` / `col_metric` 原先一律求和，
+对 `max_value` / `min_value` 这类极值指标是错的（"各格最大值之和"没有意义）。
+现在按指标语义合并：极值类取极值，其余求和。
+
+> 版本号 → `4.4.1`。需重启 HA 生效。
+
+### v4.4.0 「历史今日」抽为独立模块，支持设备与环境（2026-09-29）
+
+新增 `onthisday.py`（独立模块），把「历史今日」从通讯专用扩展为**通用查询**：
+
+| source | 数据表 | 时间列 | 指标 |
+|---|---|---|---|
+| `comm` | `attr_<type_name>` | `time` | 条数 / 通话时长 / 金额 |
+| `device` | `device_history` | `on_time` | 开关次数 / 运行时长 / 用电 / 平均时长 |
+| `env` | `env_<metric>` | `datetime` | 采样数 / 平均值 / 最大值 / 最小值 |
+
+新接口 `GET|POST /api/ha_data_store/onthisday?source=comm|device|env`，
+模式沿用 `stats` / `detail` / `ranking` / `crosstab`，参数沿用基准日、年份范围、时刻窗口
+（`at` / `align` / `hours` / `minutes` / `hour`）与明细分页 / 排序 / `fields` 字段点选。
+
+实现要点：
+
+- 用「数据源描述」抹平三者差异：`time_col`（`time` / `on_time` / `datetime`）、
+  `dims`、`metrics`（`count` / `sum` / `avg` / `max` / `min` 五种聚合）各自声明
+- 支持按原生列聚合，避免把 `duration` 和 `energy_consumed` 硬编码进表结构判断
+- `env` 不指定 `metric` 时自动合并所有存在的 `env_*` 表，均值用采样数**加权**、
+  极值取极值，不会出现"把两个指标的平均值再平均"的错误
+- 明细跨表合并后统一排序分页；`fields` 按各表实际列过滤
+
+通讯侧：`/comm?type=onthisday` 保留为兼容入口，内部委托到新模块（固定 `source=comm`），
+`mode=records` / `mode=parties` 自动映射为 `detail` / `ranking`；`comm.py` 内原历史今日实现
+已移除（-231 行），`_query_crosstab` 因独立 `type=crosstab` 仍在用而保留。
+
+「API 工具 → 查询类型」新增分组「📜 历史今日 · 设备 / 环境」（8 个入口）。
+
+> 版本号 → `4.4.0`。需重启 HA 生效。
+
+### v4.3.9 修复「历史今日」模式未随 URL 发送 + 明细支持点选返回字段（2026-09-29）
+
+**修复**：API 工具里选择「历年今日 · 明细 / 详细明细 / 排行榜 …」后，生成的 URL **缺少 `mode`
+参数**——`mode` 来自下拉选项的第二段（`comm:onthisday:detail`），但生成 URL 时只用于显示提示，
+没有拼进查询串，导致后端一律走默认的 `stats`，看起来「只有汇总、没有明细」。
+现在参数区新增「输出模式 mode」下拉（默认即所选入口的模式，切换会重建参数区），
+`mode` 会正常随 URL 发送。
+
+**新增**：`fields` 参数——只返回指定列，明细类查询（`records` / `onthisday&mode=detail` /
+`longest` / `contact`）都生效。API 工具中对应「返回字段 fields」**点选**控件（复选框），
+全不勾选 = 返回全部字段。
+
+```
+?type=onthisday&mode=detail&fields=time,party_number,party_name,duration
+?type=records&fields=time,party_name,content&limit=50
+```
+
+字段名大小写不敏感、自动去重、非法列名被忽略（不会拼进 SQL）。
+
+> 版本号 → `4.3.9`。需重启 HA 生效。
+
+### v4.3.8 「历史今日 · detail」改为逐条明细（2026-09-29）
+
+修正 `mode=detail` 的语义：它应当返回**每一条历史今日的数据**，而不是按年嵌套的汇总档案。
+
+现在 `rows` 是**跨年份的扁平明细列表**（每条含完整字段），并附带：
+
+- `total`：匹配总数（不受分页影响）
+- `year_summaries` + `years`：各年汇总，便于做年度对比
+- `summary`：总体汇总（条数 / 时长 / 金额 / 联系人数 / 活跃天数 / 首末时间）
+
+参数相应调整为：`limit` / `offset`（分页）、`sort` / `order`（默认 `time desc`）、
+`content_len`（截断）、`with_years=0`（关闭年度汇总）、`years_limit`（最多年数），
+以及原有的 `at` / `align` / `hours` / `minutes` / `hour`（限定时刻）。
+原先的 `record_limit` / `party_limit`（按年嵌套用）已移除。
+
+「📜 历史上的今日」入口更名为「历年今日 · 详细明细（逐条记录 + 各年汇总对比）」。
+
+> 版本号 → `4.3.8`。需重启 HA 生效。
+
+### v4.3.7 「历史上的今日」新增详细档案（detail）（2026-09-29）
+
+新增 `mode=detail`：按年组织，**每年一条**，包含该年的汇总（条数 / 时长 / 金额 / 联系人数 /
+首末时间）、联系人 Top N、时段分布与明细。一次调用就能看到「历史上每年的今天都发生了什么」，
+不必再分别调 stats / parties / records 再手动按年对齐。
+
+专属参数：`limit`（最多年数，默认 10）、`record_limit`（每年明细条数，默认 20，0=不返回）、
+`party_limit`（每年联系人数，默认 10）、`content_len`（明细截断，默认 80）；
+也可用 `at` / `align` / `hours` / `minutes` / `hour` 把范围收窄到某时刻，
+并叠加任意通用过滤（如只与某人有关）。
+
+「📜 历史上的今日」分组新增第 6 个入口，参数区会按 `detail` 渲染专属字段。
+
+> 版本号 → `4.3.7`。需重启 HA 生效（后端新增模式）。
+
+### v4.3.6 修复「历史上的今日」缺 type_name 参数（2026-09-29）
+
+「历史今日」参数区漏了 `type_name`（类型名），当数据表不用默认的 `comm_records` 时无法指定
+目标表。已在公共参数组中补上，5 个模式（汇总 / 排行榜 / 联系人汇总 / 明细 / 交叉汇总）全部生效。
+其余查询类型原本已提供该参数。
+
+> 仅涉及 `db_viewer.html`，刷新浏览器即可生效（无需重启 HA）。
+
+### v4.3.5 通讯查询新增 5 个分析接口 + 「此刻」时间粒度（2026-09-29）
+
+新增 5 个查询类型：
+
+- **`compare`（周期对比）**：当前周期 vs 上一周期（环比）vs 去年同期（同比），返回差值与增长率。
+  `period=day|week|month|quarter|year`，`compare=prev|yoy|both`。
+- **`contact`（联系人档案）**：给 `party_number` 或 `party_name`，一次拿到总量、首末通讯、
+  「多久没联系」、平均联系间隔、按小时 / 星期 / 月份 / 来源分布、联系最多的日子与最近明细。
+- **`longest`（单次 Top N）**：按 `by=duration|cost` 取单条记录前 N 条。
+- **`quality`（数据质量）**：时间为空 / 格式异常 / 时长与金额异常 / 内容为空 / 图片缺路径，
+  以及疑似重复（同 时间+号码+内容）与时间覆盖，附 `ok` 判定。
+- **`meta`（数据概览）**：表结构、总量、时间跨度，以及实际存在的渠道 / 消息类型 / 呼叫类型 /
+  归属地 / 地点 / 年份 / 月份清单。
+
+「历史今日」的**此刻查询**新增时间粒度：`align`（`hour` 整点 / `30` / `15` / `5` / `min`）
+决定起点对齐，`hours` / `minutes` 决定跨度。于是「现在 09:02 查 09:00~10:00」写作
+`?type=onthisday&mode=records&at=now&align=hour`；「最近 2 小时」写作 `&align=hour&hours=2`；
+原有 `window`（以 `at` 为中心 ± N 分钟）保持不变。
+
+顺带修复与增强：
+
+- 修复 `crosstab` 在「无任何过滤 + 指定列维度」时拼接出 `FROM tbl AND (...)` 的 SQL 语法错误
+  （新增 `_and_sql()` 统一处理有无 `WHERE` 两种情形）
+- 通用过滤新增单数别名：`party_number` / `party_name` / `my_number` 现在等价于对应的多值参数，
+  所有查询类型统一支持
+- `invalid_time` 检查从「只判长度」升级为「字段越界也判」（如 `2026-13-01`）
+
+「API 工具 → 查询类型 → 📞 通讯数据查询」新增 5 个入口（共 25 个通讯查询选项）。
+
+> 版本号 → `4.3.5`。需重启 HA 生效。
+
+### v4.3.4 通讯查询新增「历史上的今日」与「交叉汇总」（2026-09-29）
+
+新增两个查询类型：
+
+- **`onthisday`（历史上的今日）**：按「月日相同」筛选历年同一天的记录，`mode` 可选
+  `stats`（按年 / 年月 / 年月日汇总）、`ranking`（排行榜）、`parties`（对方号码 / 姓名汇总）、
+  `records`（明细，`at=now` 看「此刻」）、`crosstab`（交叉汇总）。用 `date` 指定基准日
+  （`09-29` 或 `2026-09-29`），`years` / `min_year` / `max_year` / `exclude_current` 限定年份，
+  `at` / `window` / `hour` 限定时刻。
+- **`crosstab`（交叉汇总）**：行维度 × 列维度 的度量矩阵，`rows=msg_type&cols=party_name&metric=duration`，
+  可用维度含 `msg_type` / `location` / `party_place` / `call_type` / `party_name` / `party_number` /
+  `channel` / `my_number`；`cols` 留空则只输出各行合计。
+
+「API 工具 → 查询类型」新增独立分组「📜 历史上的今日」（5 个入口），并在「📞 通讯数据查询」中
+加入统计分析与交叉汇总入口。
+
+> 版本号 → `4.3.4`。需重启 HA 生效。
+
+### v4.3.3 通讯查询新增「统计分析」（2026-09-29）
+
+通讯查询新增 `stats` 类型：按 年 / 季度 / 月 / 周 / 日 / 小时 / 星期 分组汇总，每桶返回
+条数、时长、金额、去重联系人数、活跃天数、平均时长，并附合计行（`total`）与可选每桶均值
+（`avg_per_bucket`）。时间范围留空即「全部数据」，填 `year` / `month` 即「指定年 / 指定年月」，
+再叠加 `party_numbers` / `party_names`（支持多值）就是「指定号码 / 姓名」的汇总。
+`sort=value` 配合 `by=count|duration|cost` 可按指标取 Top N 时间桶；`fill=1` 补全空缺桶。
+
+「API 工具 → 查询类型 → 📞 通讯数据查询」新增 6 个统计入口（全部数据按年 / 按年月、
+指定年 → 按月、指定年月 → 按日、指定号码姓名、自定义），选中后按类型动态渲染参数区。
+
+> 版本号 → `4.3.3`。需重启 HA 生效。
+
+### v4.3.2 通讯表新增「图片路径」字段（2026-09-28）
+
+通讯数据采集新增第 13 个固定字段 `image_path`（TEXT，非必填），用于存储图片消息的文件路径 / URL。
+属性提取的通讯字段映射表多出一行「图片路径」，同样支持选源字段或直接填固定值（常见别名如
+`image` / `img` / `pic` / `photo` / `file_path` 会自动预选）；`type=records` 查询会返回该列。
+**表结构自动升级**：重启后保存一次采集配置（或等下一次采集触发）即自动 `ALTER TABLE ADD COLUMN`，
+不需要重建表、不丢数据。
+
+> 版本号 → `4.3.2`。需重启 HA 生效（后端字段定义变更）。
+
+### v4.3.1 数据库浏览器新增「清空表」（2026-09-27）
+
+数据浏览页工具栏新增 **🧹 清空表**：删除当前表的全部数据，并让**自增 ID 从 1 重新开始**
+（等价于 `TRUNCATE TABLE`）。需输入**管理员密码**并二次确认；核心配置表与 `sqlite_*`
+系统表禁止清空。清空后如需回收磁盘空间，可再点「🗜 压缩」。
+接口：`POST /api/ha_data_store/clear_table`（body `{table, admin_password, vacuum?}`）。
+
+> 版本号 → `4.3.1`。需重启 HA 生效（后端改动）。
+
+### v4.3.0 通讯数据模块 + 数据导入 / 导出（2026-09-27）
+
+> 本次新增两个模块：**通讯数据**（属性提取新增 `comm` 采集模式 + 独立查询 API）与
+> **数据导入 / 导出**（CSV · JSON）。完整记录见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
+
+**一、通讯数据**：「系统配置 → 📊 属性提取」新增第四种模式 **通讯数据采集**（`mode=comm`），
+把手机端同步过来的通讯记录按数组展开写入 **13 个固定字段**（`my_number` / `party_number` /
+`party_place` / `party_name` / `time` / `location` / `msg_type` / `channel` / `call_type` /
+`duration`(秒) / `cost`(元) / `content` / `image_path`），列名与类型由系统固定、自动建好查询索引；
+每个目标列既可以选源字段，也可以**直接填固定值**；`2026/9/1 17:24` 自动规范化为
+`2026-09-01 17:24:00`，`3分53秒` 等中文时长自动换算为秒。新增 `comm.py` 提供 **8 类查询**
+（明细 / 日期 / 排行 / 趋势 / 汇总 / 联系人 / 地点 / 时段），支持多号码、多姓名、多地点、
+时间段、关键词、时长与金额区间过滤；API 工具的「查询类型」新增「📞 通讯数据查询」分组。
+
+**二、数据导入 / 导出**：新增 `data_import.py` 与数据浏览页「📥 导入数据」面板，
+支持 CSV / JSON 文件或直接粘贴文本导入**任意数据表**：字段映射 + 固定值、
+**追加 / Upsert**（多列唯一键）、自动建表与补列、🧪 试运行、分批进度与错误明细；
+基础值转换（`¥1,234.5` → `1234.5`、`2026/9/1` → `2026-09-01`）。
+另可导出当前表数据或目标表空模板为 CSV（UTF-8 BOM，Excel 直接打开不乱码）。
+
+**三、修复**：属性提取数组展开模式的去重窗口原先会**全表加载**（通讯级数据量下会拖死采集），
+改为按配置窗口查询并自动放大到 2 倍本次条数（对既有 list / multi 模式同样生效）；
+`compare_limit` 等采集参数在类型已存在时**不会写库**（改了不生效），通讯模式已放开；
+前端「源列 / 固定值」的判定逻辑统一为公共函数，通讯采集与数据导入行为保持一致。
+
+> 版本号 → `4.3.0`。需重启 HA 生效（涉及 Python 改动）。
 
 ### v4.0.0 实体→网络「可控制」+ 整库备份 + API 工具整合（2026-09-26）
 
