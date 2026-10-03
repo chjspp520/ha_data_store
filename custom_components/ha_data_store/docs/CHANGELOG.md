@@ -1,5 +1,982 @@
 # 更新日志
 
+## 2026-10-03 — v4.16.8 第三页地图改用 `geoflows` + `geoflows` 支持 `md`
+
+> 用户实测："第三页的地图数据其实是不全的（全部数据 / 指定人或指定号码时尤其明显），
+> 因为返回的数据有长度限制，改用 api 获取流向数据（type=geoflows），支持指定人、指定时段等参数。"
+
+### 🐛 地图数据不全的根因：`limit` 截断
+
+第三页地图原先取的是 **`type=records&limit=1000`**（1000 = 后端 `limit_max`）——
+**明细有长度上限**，记录一多，最近 1000 条可能只覆盖一小段时间（流量最明显），
+地图上自然就"少了很多地方"。**这不是画的问题，是取数的问题。**
+
+改成让后端聚合：`geoflows` 返回的是"地点 + 有向边"而不是几万行明细，
+**天生没有这个上限问题**；而且它吃**全部通用过滤**，所以"指定人 / 指定号码 / 指定时段 /
+指定渠道"的地图直接叠参数即可：
+
+```
+type=geoflows&channels=语音&start=2023-01-01&end=2026-12-31&party_names=张三
+```
+
+### ✨ `geoflows` 新增 `md` 参数
+
+第三页的「历史今日」看的是"**历年同一天**"，而通用的 `start` / `end` 是连续区间、表达不了它
+（原来靠 `onthisday` 接口）。所以给 `geoflows` 加了 `md`（`MM-DD`）：
+
+```
+type=geoflows&md=10-03&channels=微信      # 历年 10 月 3 日
+```
+
+实现上就是把 `SUBSTR(time, 6, 5) = ?` 并进 WHERE；格式非法（如 `2025-10-03` / `1-1`）
+当作没传，不至于让整条查询变空。
+
+### 🔧 前端只做"形状搬运"，不再重新聚合
+
+新增 `_commGeoGraphFromApi(res)`：把后端返回的 `cities` / `flows` 对齐成前端地图件认的形态
+（字段名对齐 + 坐标兜一道 + 补 `missing` + 分配色板），**不做任何重新聚合**。
+于是 `_commAnaMap` / `_commAnaMapClick` 的逻辑几乎不用动 ——
+后端给的 `mine` / `other` 正好就是"点某地自动选口径"（`places` vs `party_places`）要用的。
+
+色板复用 `_commPlaceToneMap`（按**过滤后**的有效地点算，别把刚剔掉的脏地名也算进去占序号）。
+另：API 版没有逐条流水，流向气泡里的"这条线上的流水"给空数组（那正是它快的原因）。
+
+### 验证（15 + 31 项）
+
+**后端**：`md=10-03` 只取历年 10 月 3 日（10-04 / 09-03 被排除）；不传即全库；
+非法格式（`xx` / `2025-10-03` / `1-1` / 空）当没传；格式合法但不存在的月日（`13-45`）给 0 条；
+与 `party_places` / `start` / `channels` 叠加都生效；返回结构与前端 `_commGeoGraph` 同形。
+
+**前端**：`_commAnaMapParams` 出 `type=geoflows`（两个视图都验），带 range 的渠道/时段/对端、
+**不再带 `fields` / `with_years`**、不再用 `records`；历史今日用 `md` 且不误带 range 的时间区间；
+`_commGeoGraphFromApi` 剔掉无名 / 坐标越界的地点与缺坐标的边、`mine`/`other`/`dir`/`seconds`/`missing` 全保留、
+色板与有效地点同源；`_commAnaMap` 用 API 数据且色板取自 `graph.tones`、legend 报"地点 + 流向 + 记录数"；
+**点地点仍能筛明细**（只在对方归属地出现 → 自动用 `party_places`；只在我的地点出现 → 用 `places`）；
+只给 `cities`/`flows` 也能画（不再依赖老的 `rows`）。
+
+### 其它
+
+- `COMM_API_VERSION` → `1.3.0`（`geoflows` 多了 `md`），`db_viewer.html` 期望版本同步。
+- `manifest.json` → `4.16.8`。
+
+## 2026-10-03 — v4.16.7 新增「👥 按通讯录回填姓名」按钮
+
+> 用户澄清：「通讯录回填按钮是指，点击后自动根据通讯录表（comm_contacts）来回填
+> 通讯数据表的姓名列。不是让用户输入」
+
+### 一、问题：按钮名字没区分"回填"与"管理"
+
+原来的「👥 通讯录」按钮点开是**导入面板**（粘贴 / 选文件）—— 那是"管理通讯录数据"。
+而按字面理解，"通讯录回填"应该是**点一下就按表回填姓名**。两件事挤在一个按钮上。
+
+### 二、拆开
+
+| 按钮 | 作用 |
+|---|---|
+| **👥 按通讯录回填姓名**（新增） | **点一下即按 `comm_contacts` 表回填「对方姓名」列**，无需任何输入 |
+| 📥 通讯录管理（原「👥 通讯录」改名） | 导入 / 查看 / 清空通讯录数据，再点一次收起 |
+| 📇 全部回填（历史数据） | 保留：一次补归属地 / 运营商 / 姓名 / 坐标 |
+
+### 三、后端：支持「只回填指定列」
+
+`CommFiller` 增加 `only_columns`：
+
+```python
+def _has(self, row, col):
+    if self.only_columns is not None and col not in self.only_columns:
+        return False          # 不在限定范围 → 该列完全不参与
+    if self.table_cols is not None:
+        return col in self.table_cols
+    ...
+```
+
+- `build_filler(..., only_columns=None)` 透传
+- `backfill(..., columns=None)`：`active` 按 `columns` 过滤，报错信息也从 `wanted` 生成
+- `POST /api/ha_data_store/comm/backfill` 新增 `columns`，兼容数组与逗号字符串：
+
+  ```json
+  { "type_name": "comm_records", "columns": ["party_name"], "only_empty": 1 }
+  ```
+
+顺带一提：`select_cols` 始终包含 `party_number` —— 姓名回填要靠它去通讯录里查。
+
+### 四、前端
+
+- `runCommBackfill(dry, columns)` —— 第二个参数指定只跑哪几列
+- 确认框按用途措辞：
+
+  ```
+  将回填「姓名」的空值（号码取自本地通讯录、不联网，不覆盖已有内容）。
+  ```
+
+- 结果摘要带上用途：
+
+  ```
+  🧪 预览（「姓名」）：扫描 53365 行，将更新 41207 行（party_name +41207）
+  ```
+
+- 新增 `_commColLabel(col)`：列名 → 中文标签，**延迟查** `COMM_FIELD_DEFS`
+  （避开常量初始化顺序，用 try/catch 兜底）
+
+### 五、验证
+
+约 30 项断言：
+
+- **只补姓名的实测**（真实 SQLite）：
+  - 断言 `filled` 的键**恰好只有** `party_name`
+  - 断言两行的 `party_name` 已补
+  - 断言 `party_place` / `party_coordinate` / `location_coordinate` **仍为空**（没被顺带补）
+  - **对照组**：再跑一次全量 → 这次 `party_place` 才进 `filled`，且已有姓名**未被覆盖**
+- 未匹配号码：`updated == 0`、`no_contact == 1`、`missed_numbers == ['13511112222']`
+- 非法列名报错且信息含列名
+- 源码断言：`only_columns` / `_has` 判断顺序 / `backfill` 签名 /
+  `View` 解析与透传 `columns` / 前端按钮与文案 / **不再存在两个同名「👥 通讯录」按钮**
+- 全部 `<script>` 块语法检查
+
+> 版本号 → `4.16.7`。需重启 HA 生效。
+
+---
+
+## 2026-10-03 — v4.16.6 「其他数据回填」界面收纳
+
+> 用户反馈：「为什么我点击"通讯录"下方会弹出好多东西呢」
+
+### 一、原因
+
+不是功能出错 —— 是**信息一次全铺开**了。通讯录有 1388 人，
+状态行里把「最近导入的 20 条」`号码 → 姓名` 全列出来，一屏占掉好几行；
+再加上格式说明 4 行、粘贴框 7 行，面板就显得很"炸"。
+
+### 二、收纳改动
+
+| 位置 | 之前 | 现在 |
+|---|---|---|
+| 最近导入列表 | 20 条全铺 | **5 条** + `<details>`「展开其余 N 条」 |
+| 通讯录格式说明 | 4 行常显 | 一行摘要 + `<details>`「格式说明」 |
+| 粘贴框 | `rows="7"` | `rows="5"` |
+| 待回填字段明细 | `party_place 78025、party_isp 110790、…` 挤在统计行里 | `<details>`「各字段待填」 |
+| 「👥 通讯录」按钮 | 只能打开 | **再点一次收起**（toggle） |
+| 回填结果里的未匹配号码 | 最多 5 个 | 不变（本来就限了 5 个） |
+
+实现要点：
+
+- 折叠全用原生 `<details>` / `<summary>` —— **不需要额外的 JS 状态**，
+  浏览器自己管展开/收起，也不怕重渲染丢状态
+- `openCommContacts()` 增加 toggle：
+
+  ```js
+  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  ```
+
+- 最近导入列表格式化抽成 `fmt`，5 条与其余部分共用
+
+功能一处没减，只是把不常看的部分折起来。
+
+### 三、验证
+
+约 20 项断言：
+
+- `refreshCommContacts`：断言 **slice(0,5)** 与 **slice(5)** 都在，
+  且旧的整串铺开写法（`samples.map(s => escHtml(s.number)`）**已不存在**
+- 格式说明 / 各字段待填各自有 `</summary>`，粘贴框 `rows="5"`
+- `openCommContacts`：断言展开状态判断与收起分支都在，按钮 title 写明"再点一次可收起"
+- 子页与面板结构未变（`sub-backfill` 仍在、面板默认 `display:none`、
+  折叠元素至少 3 处）
+- 全部 `<script>` 块语法检查
+
+> 版本号 → `4.16.6`。前端改动，**硬刷新页面**（Ctrl+F5）即可。
+
+---
+
+## 2026-10-03 — v4.16.5 修复：外部导入的通讯录匹配不上
+
+> 用户提示：「通讯录数据回填是根据 comm_contacts 表的数据来回填」——
+> 顺着这句话去查，发现**读取端没有归一化号码**。
+
+### 一、根因
+
+`comm_contacts.load_names()` 读取通讯录时只做了 `strip()`：
+
+```python
+for number, name in conn.execute("SELECT number, name FROM comm_contacts"):
+    num = str(number or "").strip()      # ← 没有归一化
+    mapping[num] = nm
+```
+
+于是出现了**两种导入方式结果不同**的割裂：
+
+| 导入方式 | 库里存的号码 | 能否匹配 |
+|---|---|---|
+| 界面「👥 通讯录」导入 | 已归一化（`import_contacts` 处理过） | ✅ |
+| **外部工具直接写表**（腾讯 / 微信导出） | 原始写法（`+86 138-0013-8000`） | ❌ |
+
+v4.16.3 修的是**导入端**和**采集端**的归一化，读取端漏了 —— 而外部导入的数据
+根本不经导入端，所以一直匹配不上。
+
+### 二、修复
+
+**1. 读取时归一化**（`load_names()`）：
+
+```python
+num = normalize_number(number)
+nm = str(name or "").strip()
+if num and nm:
+    mapping[num] = nm     # 同一号码多种写法时，以表中靠后者为准
+```
+
+**2. 判重与更新**（`import_contacts()`）：这是顺带挖出来的**第二个 bug**。
+
+原实现：
+
+```python
+existing = {row[0]: row[1] for row in ...}          # 用库里的原始号码做 key
+...
+conn.execute(f"UPDATE ... WHERE number = ?", (number,))   # 用规范化号码去匹配 → 0 行
+```
+
+库里存的是 `+86 138-0013-8000`，拿 `13800138000` 去 `WHERE number = ?` **匹配不到** ——
+接口返回「导入成功」，实际一行都没改（**静默失败**）。
+
+现在：查表时同时取 `rowid`，判重按归一化号码，更新按 `rowid` 定位，并把该行
+`number` 写回规范形式：
+
+```python
+for rid, raw_num, raw_name in conn.execute(
+        "SELECT rowid, number, name FROM comm_contacts"):
+    key = normalize_number(raw_num)
+    if key:
+        existing[key] = (rid, raw_name)
+...
+conn.execute(
+    "UPDATE comm_contacts SET number = ?, name = ?, raw = ?, source = ?, "
+    "updated_at = ? WHERE rowid = ?", (number, name, name, source, now, rid))
+```
+
+**3. 缓存加 TTL（60 秒）**：
+
+v4.16.3 加的指纹（`COUNT + MAX(updated_at)`）能发现**行数变化**与**带时间戳的更新**，
+但如果外部只改姓名、没动 `updated_at`，指纹是不变的。加 TTL 兜底：
+
+```python
+_CACHE_TTL = 60.0
+fresh = (now - float(_CACHE.get("ts") or 0.0)) < _CACHE_TTL
+```
+
+TTL 内命中缓存（省一次全表读）；到期后即使指纹相同也会重读。
+采集是分钟级间隔，60 秒足够"及时"，也不会造成频繁读盘。
+
+### 三、验证
+
+约 30 项断言，核心是**模拟外部工具直接写库**：
+
+```python
+conn.execute("INSERT INTO comm_contacts (number, name, updated_at) VALUES (?,?,?)",
+             ("+86 138-0013-8000", "张三", ""))      # 原始写法，不走导入接口
+```
+
+- 载入结果为 `{'13800138000': '张三', '13900139000': '李四', ...}`
+  —— 断言**原始写法不再作为 key 出现**（`any('-' in k or '+' in k)` == False）
+- 带 `+86` / `0086` / 不带 `+` 的 `86` 三种写法都归到同一个号码
+- 同一号码的两种写法只留一条，以**表中靠后者**为准
+- **端到端**：5 种号码写法（含 `+8613800138000`）都能补出正确姓名
+- **与导入接口共存**：外部写入后再走界面导入，断言
+  `inserted == 0`、`updated == 1`、总行数不变（不重复膨胀），且该行 `number` 被写回规范形式
+- **TTL**：TTL 内命中缓存（同一对象）；外部改名且**不动 `updated_at`** 时，
+  手动把 `_CACHE["ts"]` 倒推过期 → 断言能读到新值；`invalidate_cache()` 立即生效
+- 源码断言（读取归一化 / 判重归一化 / UPDATE 用 rowid / TTL / 时间戳字段）
+
+> 版本号 → `4.16.5`。需重启 HA 生效。
+
+---
+
+## 2026-10-03 — v4.16.4 数据回填独立成「其他数据回填」子页
+
+> 用户要求：把「通讯字段回填」那块从 API 工具页移到系统配置里，单独开一个子选项卡。
+
+### 一、搬迁
+
+| | 原来 | 现在 |
+|---|---|---|
+| 位置 | API 工具 → 通讯数据查询 → 参数区下方 | **系统配置 → 📇 其他数据回填** |
+| 子选项卡 | 无 | 新增 `📇 其他数据回填`（排在「📊 指标管理」之后） |
+
+理由：它是**数据维护**操作，跟"构造查询 URL"不是一回事，原位置也不显眼。
+
+**改动明细**（`db_viewer.html`）：
+
+- 新增 sub-tab 按钮：`switchSubTab('backfill')`
+- 新增子面板 `<div id="sub-backfill" class="sub-panel">`（插在 `sub-metrics` 之前）
+- 整块 HTML **原样搬入**（按钮区 + 状态行 + 通讯录导入面板），
+  8 个元素的 id 全部保持 —— JS 逻辑一处未改，只是换了位置
+- 原位置替换为一行指路提示：「📇 数据回填…已移至「系统配置 → 📇 其他数据回填」」
+- 子页顶部补了完整说明：补哪 5 个字段、各自的本地数据源（归属地库 / 坐标表 / 通讯录）、
+  **只填空值**、以及「新数据已在采集时自动回填，可逐个实体开关」
+- `renderCommParams` 里的 `loadCommBackfillStatus()` 调用删掉
+  （该元素已不在 API 工具页）
+
+### 二、顺带加「数据类型」下拉
+
+原来只能靠后端自动探测（`resolve_comm_type_name`）。若能有多份通讯数据，
+就没法指定补哪一张表。现在：
+
+- 下拉 `#commBackfillType`，只列 `mode=comm` 的类型（`ATTR_TYPES_API` 拉取）
+- 首项「（自动探测）」= 保持原行为（后端推断 mode=comm 且表已存在者）
+- 切换即刷新状态；「📇 自动填写 / 🧪 预览」都会带上所选类型
+  - GET：`?type_name=...`（不选则不带参数）
+  - POST：body 增加 `type_name`
+- `switchSubTab('backfill')` 时自动 `loadBackfillTypes()` + `loadCommBackfillStatus()`
+
+后端 `comm.py` 的 `CommBackfillView` 本就同时接受 GET 的 query 与 POST 的 body
+中的 `type_name`，无需改动。
+
+### 三、验证
+
+约 40 项断言：
+
+- **子选项卡**：按钮存在、`sub-backfill` 容器存在、默认**不带** `active`
+  （首屏仍显示「设备类」）、位于 `tab-manage` 内且在 `sub-metrics` 之前
+- **搬迁完整**：8 个元素 id **各出现且仅出现一次**（`re.findall` 计数），
+  回填按钮只剩一处，原位置确认已移除、只留指路提示
+- **7 个 JS 函数仍在**（位置变了，函数名没变）
+- **类型选择器**：下拉存在、`onchange` 绑定、`loadBackfillTypes` / `_commBackfillType`
+  存在、只列 `comm` 模式、切换时加载、GET 与 POST 都带上 `type_name`
+- **node 复核**：静态 HTML **无重复 id**（585 个 id 全表检查）、
+  关键元素各 1 次、`runCommBackfill(false)` 按钮 1 处、全部 `<script>` 语法通过
+
+> 版本号 → `4.16.4`。前端改动，**硬刷新页面**（Ctrl+F5）即可，无需重启 HA。
+
+---
+
+## 2026-10-03 — v4.16.3 修复通讯录姓名匹配不上的两个原因
+
+> 用户反馈：「采集的时候，没有从通讯录匹配姓名」。
+> 代码逻辑本身正确，问题出在**号码归一化**与**缓存可见性**。
+
+### 一、原因一：归一化漏了不带 `+` 的国家码
+
+`normalize_number` 原来只处理 `+86` / `0086` 两种前缀：
+
+| 输入 | 旧结果 | 能否匹配 `13800138000` |
+|---|---|---|
+| `13800138000` | `13800138000` | ✅ |
+| `+86 138-0013-8000` | `13800138000` | ✅ |
+| `008613800138000` | `13800138000` | ✅ |
+| **`8613800138000`** | **`8613800138000`** | ❌ |
+
+有些导出（Excel、部分手机通讯录）给的是 `8613800138000`（没有 `+`），
+于是它多带一个 `86`，与采集到的 `13800138000` 对不上 → 姓名补不上，
+而且**看起来完全像"通讯录里没这个人"**，很难往这里想。
+
+**修复**：
+
+```python
+digits = re.sub(r"\D", "", text)
+if len(digits) > 11 and digits.startswith("86"):
+    digits = digits[2:]
+```
+
+判据保守：**长度 > 11** 才剥 —— 10 位的 `8610`（北京固话区号）
+不会被误伤成 `10`。
+
+### 二、原因二：缓存感知不到外部改动
+
+`load_names()` 原来只按 `db_path` 判断缓存有效性：
+
+```python
+if not force and _CACHE["path"] == db_path and _CACHE["map"] is not None:
+    return _CACHE["map"]
+```
+
+`import_contacts()` 会调 `invalidate_cache()`，界面导入没问题；
+但若通讯录是**在别处**改的（外部工具、直接写库、另一个进程），
+缓存不会被清 → 采集侧一直用旧快照。
+
+**修复**：缓存比对**指纹**（一次廉价的 `COUNT + MAX` 查询）：
+
+```python
+def _fingerprint(conn) -> str:
+    if not _table_exists(conn):
+        return "absent"
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM comm_contacts").fetchone()
+    return f"{row[0]}:{row[1]}"
+```
+
+`fp` 一致才用缓存，否则重载。`_CACHE` 增加 `fp` 字段，`invalidate_cache()` 一并清掉。
+
+### 三、诊断增强
+
+姓名补不上时最难的是**分辨原因**：是通讯录没这个人？还是号码写法对不上？
+所以：
+
+- 采集日志的「通讯自动回填已启用」由 `debug` 提到 **`info`**：
+
+  ```
+  [attr] 通讯自动回填已启用 entity_id=sensor.xxx_calls 归属地=有 坐标=有 通讯录=428 条
+  ```
+
+- `CommFiller` 记录**匹配不到的号码**（归一化后，最多 10 个），
+  `backfill()` 的返回体增加 `missed_numbers`
+- 前端「📇 自动填写 / 预览」结果显示出来：
+
+  ```
+  通讯录里没有 3 个号码（如 13511112222、13511113333）
+  ```
+
+  对着这些号码去通讯录里搜一下，就知道是"没导入"还是"写法不同"。
+
+### 四、验证
+
+约 50 项断言：
+
+- **归一化 9 种写法**全部归到 `13800138000`（含 `+86` / `0086` / 纯 `86` / 空格 / 连字符 / 括号）
+- **保守性**：10 位 `86101234567`（8610 北京）不动；`18600186000` 不误剥；空值 / `None` / 非数字
+- **交叉匹配**：通讯录写 `8613800138000` → 9 种采集写法都能查到姓名；
+  通讯录写标准形式 → 同样全部命中（双向验证）
+- **缓存指纹**：绕过 `import_contacts` 直接 `INSERT` / `UPDATE` 库，断言
+  下一次 `load_names()` **能自动感知**；指纹未变时命中缓存（返回同一对象）
+- **端到端**：`+86 138-0013-8000` 与 `8613900139000` 都能补出姓名；
+  已有姓名不覆盖；通讯录为空时不报错、不补姓名、但仍补归属地（数据源互相独立）
+- **诊断**：未匹配号码被记录、`no_contact` 计数正确、记录的是归一化后的号码
+- 源码断言（归一化分支 / `fp` 字段 / `missed_numbers` / info 日志 / 前端显示）
+- 全部 `<script>` 块语法检查
+
+> 版本号 → `4.16.3`。需重启 HA 生效。
+
+---
+
+## 2026-10-03 — v4.16.2 修复「更换采集实体」的真正原因
+
+> 用户反馈：「提示成功了，但是刷新后又回去了」。
+> v4.16.1 改成了专用接口，但**根本没被触发** —— 这次找到根因。
+
+### 一、根因：比较对象被提前覆盖
+
+`saveAttrEdit()` 的执行顺序：
+
+| 段 | 代码 | 作用 |
+|---|---|---|
+| 3 | `_aeSyncEntityInputs()` | 把表格输入同步回 `ctx.entities` |
+| 6 | `if (orig.entity_id !== newId) entRenames.push(...)` | 判断是否换了实体 |
+
+而第 3 段里有一句：
+
+```js
+if (idEl) e.entity_id = (idEl.value || '').trim();   // ← 原始值在这里被覆盖
+```
+
+于是第 6 段拿到的 `orig.entity_id` **已经是输入框里的新值**，
+`orig.entity_id !== newId` **恒为 false** → `entRenames` 永远为空。
+
+后果很"安静"：
+
+- 不会调用 rename 接口（所以 v4.16.1 的后端改动没机会执行）
+- 也不会报错（连"没有改动"都不一定提示 —— 若同时改了别的字段，就是「修改已保存」）
+- 重新打开弹窗 → `entity_id` 从库里读回原值 → **"回去了"**
+
+### 二、修复
+
+**前端**（`db_viewer.html`）：
+
+```js
+// 打开弹窗时记下原始 ID（entity_id 会被 _aeSyncEntityInputs 覆盖，不能用它比较）
+(ecs.rows || []).forEach(r => { r._origId = r.entity_id || ''; });
+```
+
+```js
+// 第 6 段改用 _origId
+const oldId = (orig._origId !== undefined) ? orig._origId : (orig.entity_id || '');
+if (oldId !== newId) {
+  entRenames.push({ rowId: orig._rowid, oldId: oldId, newId: newId });
+}
+```
+
+**顺带修掉一处重复**：v4.16.1 的两次编辑都落了盘，`rename` 循环在文件里出现了**两遍** ——
+第一次把 `sensor.old` 改成 `sensor.new`，第二次又拿 `sensor.old` 去查（此时已不存在），
+必然抛错中断保存。现已合并为一处。
+
+**后端**（`http_api.py`）：`UPDATE` + `commit()` 之后**回读确认**：
+
+```python
+conn.commit()
+check = conn.execute(
+    f"SELECT entity_id FROM {TABLE_ENTITY_CONFIGS} WHERE entity_id = ? AND attr_type = ?",
+    (new_id, attr_type)).fetchone()
+if not check:
+    raise ValueError(f"更换实体失败：写入后未查到「{new_id}」的配置行，请重试")
+```
+
+这样「接口说成功、库里其实没变」的静默失败会立刻暴露成明确错误。
+
+### 三、验证
+
+**用 node 跑真实的比较逻辑，直接复现这个 bug**：
+
+```js
+const buggy = detect(/* useOrig = */ false);   // → []            （识别不到任何更换）
+const fixed = detect(/* useOrig = */ true);    // → [[old, new]]  （正确识别）
+```
+
+断言前者为空、后者命中，等于把「改了没反应」这个现象钉成了可回归的用例。
+
+其余断言：
+
+- 前端：`_origId` 记录、比较改用 `_origId`、`entRenames` 用 `oldId`、
+  **rename 语句在文件中只出现一次**（防重复回归）、走专用接口、空改动判断含 `entRenames`
+- 后端：rename 分支、按 `(entity_id, attr_type)` 定位、`hass.states.get` 校验、
+  `rowcount` 检查、回读确认、`commit()` 在回读之前
+- **真实 SQLite 全流程**：更换成功、库里已是新实体、旧实体消失、
+  **其它字段保持**（`autofill` 仍为 1）、`updated_at` 已写、可以再换回去；
+  失败分支（实体不存在 / 原配置不存在 / 目标已占用）
+- 全部 `<script>` 块语法检查
+
+> 版本号 → `4.16.2`。需重启 HA 生效（前端刷新页面即可）。
+
+---
+
+## 2026-10-03 — v4.16.1 修复「更换采集实体」不生效 + 每实体的「自动回填」开关
+
+> 两个诉求：① 在「修改属性提取配置」里改了实体没起作用；② 实体采集参数里加一列控制自动回填。
+
+### 一、更换实体不生效
+
+**原实现**：前端把 `entity_id` 当普通单元格提交（`POST /api/ha_data_store/db_viewer/update`），
+且保存前先用 `GET /api/ha_data_store/entity_state?entity_id=新实体` 预校验。
+
+**问题**：校验失败时只 `showToast(...)` 后 `return` —— 提示一闪而过，
+用户以为保存成功；而通用单元格更新给出的失败原因也很泛，定位不到。
+
+**修复**：改走**专用分支**（`AttrEntityMappingView` 新增 `action: "rename"`）：
+
+```python
+if str(body.get("action") or "").strip().lower() == "rename":
+    new_id = str(body.get("new_entity_id") or "").strip()
+    ...
+    def _rename() -> dict:
+        if hass.states.get(new_id) is None:
+            raise ValueError(f"实体「{new_id}」不存在或不可用（未在 Home Assistant 中注册）")
+        # 按 (entity_id, attr_type) 定位，不依赖 rowid
+        old = ... WHERE entity_id = ? AND attr_type = ?
+        if not old: raise ValueError("未找到…采集配置，请重新打开配置页核对")
+        clash = ... WHERE entity_id = ? AND attr_type = ?
+        if clash: raise ValueError("已有类型「…」的采集配置，请先删除它的旧配置再更换")
+        UPDATE entity_configs SET entity_id = ?, updated_at = ?
+          WHERE entity_id = ? AND attr_type = ?
+```
+
+要点：
+
+- **按 `(entity_id, attr_type)` 定位** —— 不再依赖前端从列表接口拿到的 `rowid`
+- **`hass.states.get()` 校验** —— 与 HA 的真实状态一致（原来的 `entity_state` 接口
+  还受「API 总开关」影响，可能给出误导性的「不存在」）
+- 四种失败各有明确信息：实体不存在 / 原配置不存在 / 目标已占用 / 更新 0 行
+- 前端删掉预校验，执行阶段调该接口，错误直接 `throw` 到状态栏
+- 「空改动」判断补上 `entRenames.length`（原来只改实体、其它都没动时会误判为「没有改动」）
+
+### 二、每实体的「自动回填」开关
+
+「实体采集参数」表格新增一列（复选框，默认勾选）：
+
+| 列 | 存储 | 说明 |
+|---|---|---|
+| 自动回填 | `entity_configs.autofill` | 1=采集每行前自动补全空字段；0=完全不回填 |
+
+**表结构**：`entity_configs` 新增 `autofill INTEGER NOT NULL DEFAULT 1`：
+
+- 建表语句加列
+- `_migrate_database` 的逐列补齐列表加 `("autofill", "INTEGER NOT NULL DEFAULT 1")`
+  → **重启即升级，已有实体默认开启**
+- 「重建表」分支的 `new_columns_def` 与 `copy_cols` 白名单同步加入
+
+**采集链路**：
+
+- `_get_all_attr_entities` 查询加 `ec.autofill AS ec_autofill`
+- `_merge_entity_mapping` 归一化为 `row["autofill"]`（`0`/`False` → 0，其余 → 1，
+  列缺失时默认 1）
+- `_async_attr_event` 的 `cfg` 组装加 `"autofill": int(info.get("autofill", 1) or 0)`
+- `_attr_collect_for_entity` 的判断改为：
+  `if mode == ATTR_MODE_COMM and int(cfg.get("autofill", 1) or 0):`
+
+**接口**：`POST /api/ha_data_store/attr_entity_mapping` 新增 `autofill` 字段，
+用 `-1` 作「未传」哨兵，SQL 写成
+
+```sql
+autofill = CASE WHEN ? >= 0 THEN ? ELSE autofill END
+```
+
+这样**只改字段映射时不会顺手把开关重置**。GET 也返回 `autofill`。
+
+**前端**：
+
+- 表头加「自动回填」，行内加复选框（非 comm 模式显示「不适用」且禁用）；`colspan` 10 → 11
+- `_aeSyncEntityInputs` 把复选框状态同步进 `ctx.entities[i].autofill`
+- `saveAttrEdit`：新增实体时带上 `autofill`，已有实体变化时走 `entUpdates` 写 `autofill` 列
+- 内联映射面板保存时也带上 `autofill`（先 `_aeSyncEntityInputs()` 再读）
+- 表格说明补充：只对通讯模式生效、只填空值、关掉则完全不回填
+
+### 三、验证
+
+约 60 项断言：
+
+- 建表 / 迁移 / 重建表三处都含 `autofill`
+- **rename 核心逻辑实测**（真实 SQLite）：正常更换返回 1 行、新旧实体正确、
+  **其它字段不受影响**（`autofill` 仍为 1）、目标被占用报错、实体不存在报错、
+  原配置不存在报错
+- 后端接入：rename 分支、`hass.states.get` 校验、按 `(entity_id, attr_type)` 定位、
+  冲突提示、GET/POST 的 `autofill`、`CASE` 保留旧值
+- 采集链路：`ec_autofill` 查询、`_merge_entity_mapping` 归一化（1/0/缺失三种）、
+  采集判断含开关、event 模式 `cfg` 含 `autofill`
+- **开关实测**：开 → 归回填出「张老板 / 北京」；关 → 行数据原样不动
+- 前端：表头 / 复选框 / `colspan` / 同步 / 收集 / 比较 / 新增默认值 /
+  内联面板提交 / rename 不再走通用单元格更新且走专用接口 / 空改动判断 / 说明文案
+- 全部 `<script>` 块语法检查
+
+> 版本号 → `4.16.1`。需重启 HA 生效。
+
+---
+
+## 2026-10-03 — v4.16.0 通讯记录：新增「通讯录」与采集时自动回填
+
+> 需求：①按城市字段回填坐标；②按对方号码回填姓名（需新增通讯录表，用户自己导入）；
+> ③**新数据进来时自动回填**。
+
+### 一、现状梳理
+
+①②的**数据源与查询逻辑早已具备**（`phone_region.py` / `city_geo.py`，从
+`shaobo_pocket_carrier` 移植），`comm_backfill.py` 也已实现手动回填 4 列。
+本次真正要新增的是：
+
+- **`party_name`** —— 姓名推不出来，必须由用户提供 → **新增通讯录表**；
+- **采集时自动回填** —— 原来只有「📇 自动填写」这个手动按钮，历史数据能补，
+  但**新数据得手动再跑一次**。
+
+### 二、新增通讯录（`comm_contacts.py`）
+
+```sql
+CREATE TABLE IF NOT EXISTS comm_contacts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    number     TEXT NOT NULL,          -- 归一化号码（纯数字）
+    name       TEXT NOT NULL DEFAULT '',
+    raw        TEXT NOT NULL DEFAULT '',
+    source     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(number)
+)
+```
+
+- **归一化**（`normalize_number`）：去 `+86` / `0086` / 所有非数字字符，
+  口径与 `phone_region.digits_of` 一致 —— 这样通讯录里的号码与通讯记录里的
+  `party_number` 才能对上（同一个号两边写法常不同）。`UNIQUE(number)` 保证了
+  重复导入是 **upsert 更新**而不是堆积。
+- **导入解析**（`parse_import`，自动嗅探）：
+  | 格式 | 示例 |
+  |---|---|
+  | CSV / TSV | `13800138000,张三` 每行一条（逗号/制表符/分号/竖线） |
+  | JSON 数组 | `[{"number":"...","name":"..."}]`（键名支持 `phone`/`手机`/`号码` 等别名） |
+  | JSON 对象 | `{"13800138000":"张三"}` |
+  | 手机导出 | `张三,13800138000` —— **列序自动判断**（哪列更像号码） |
+  会跳过表头与无法识别号码的行，并返回警告列表；单次上限 20 万条。
+- 建表由 `_migrate_database` 调用 `comm_contacts.ensure_table(conn)`，
+  **重启 HA 自动建表**，无需手工迁移。
+
+### 三、回填器抽出共用逻辑（`comm_backfill.py`）
+
+新增 `CommFiller` 类 + `build_filler()`，把「一行数据该补什么」收在一处：
+
+```python
+filler = comm_backfill.build_filler(db_path, only_empty=True, table_cols=cols)
+changes = filler.fill(row)          # → {列名: 新值}，无改动时为空 dict
+```
+
+`backfill()`（手动按钮）与采集链路**都走这一个入口**，避免两份逻辑漂移。
+`BACKFILL_COLUMNS` 增加 `party_name`：
+
+```python
+BACKFILL_COLUMNS = ("party_place", "party_isp", "party_name",
+                    "location_coordinate", "party_coordinate")
+```
+
+处理顺序：号码 → 归属地 / 运营商 / 姓名，再由（新的或原有的）归属地推对方坐标。
+三个数据源各自带缓存，**每次采集只读一次**，不是每行读一次。
+
+### 四、采集时自动回填（`__init__.py`）
+
+在 `_attr_collect_for_entity` 的列表展开分支里，循环**外**构造一次填充器：
+
+```python
+comm_filler = None
+if mode == ATTR_MODE_COMM:
+    try:
+        from . import comm_backfill as _cb
+        _tbl_cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{tbl}")')}
+        comm_filler = _cb.build_filler(db_path, only_empty=True, table_cols=_tbl_cols)
+    except Exception as _exc:
+        comm_filler = None          # 回填不可用不应影响采集
+```
+
+循环**内**在规范化之后、写库之前应用：
+
+```python
+if mode == ATTR_MODE_COMM:
+    _normalize_comm_row(row_data)
+    if comm_filler is not None:
+        row_data.update(comm_filler.fill(row_data))
+```
+
+要点：
+
+- 位置在 `_normalize_comm_row` **之后** —— 归属地/坐标要靠已规范化的号码与地名；
+- `row_data.update(...)` 让回填结果进入 INSERT 的列集合，因此**该行写进库时就是全的**；
+- 只填空值：`fill()` 走 `_is_blank` 判断，源数据已给出的字段一律不动；
+- `table_cols` 用一次 `PRAGMA` 传入，确保只回填表里真有的列（避免 INSERT 未知列）；
+- 整块 try/except 包裹：归属地库缺失 / 损坏时只跳过回填，**采集照常进行**。
+
+**三条采集路径全部生效**（都调用 `_attr_collect_for_entity`）：poll 轮询、
+手动触发、event 状态变化（`_async_attr_event`）。
+
+### 五、接口与前端
+
+新增 `CommContactsView`（`comm.py`，在 `register_api_views` 注册）：
+
+```
+GET  /api/ha_data_store/comm/contacts
+       → {success, exists, total, samples:[{number,name}]}
+POST /api/ha_data_store/comm/contacts
+       { action:"import", text, format?, mode? }  → {imported, inserted, updated, total, warnings}
+       { action:"clear" }                         → {deleted}
+       { action:"delete", number }                → {deleted}
+```
+
+`CommBackfillView` 的 GET 在 `table_status` 中增加 `contacts_total`；
+POST 的返回增加 `region_ready` / `contacts_total` / `no_contact`。
+
+前端（`db_viewer.html`）：
+
+- 「通讯数据查询」页新增 **👥 通讯录** 按钮 → 展开导入面板（粘贴框 + 文件选择 +
+  整份替换开关 + 刷新 / 清空）
+- 5 个新函数：`openCommContacts` / `refreshCommContacts` / `onCommContactsFile` /
+  `importCommContacts` / `clearCommContacts`
+- 状态栏增加「通讯录 N 人」，为空时提示去导入
+- 回填结果增加「通讯录里没有 N 个号码」；按钮改为「📇 自动填写（历史数据）」
+
+### 六、验证
+
+约 100 项断言，用**真实归属地库与坐标表**做端到端：
+
+- **号码归一化 7 种**（纯号码 / `+86` / `0086` / 空格连字符 / 括号 / 空 / None）
+- **导入解析 11 种**：CSV 三种分隔符、姓名在前、跳过表头、JSON 数组（键名别名）、
+  JSON 对象、同号码去重、无号码行跳过、空内容
+- **入库**：首次 inserted / 重复导入是 updated / `replace` 先清空 / 更新后 total 不变
+- **填充器端到端**：`13910001234` + `西安` → 断言
+  `party_place=北京`、`party_isp=中国移动`、`party_name=张老板`、
+  `party_coordinate` 与 `location_coordinate` 均非空且为「经,纬」
+- **只填空值**：已有 `party_place` / `party_name` 不被覆盖，但坐标仍会补
+- **覆盖模式**（`only_empty=False`）会改写
+- `place_is_padded` 判据：「陕西西安 vs 西安」→ True，「北京市 vs 北京」（同义）→ False
+- **真实通讯表全流程**：预览（不写库）→ 执行 → 复查每行每列；已有值未被覆盖；
+  `table_status` 的 `pending` / `blanks` / `contacts_total`
+- **后端接入**：建表调用、filler 构造在循环外、应用在规范化之后、
+  try/except 保护、View 定义与注册、API 路径
+- **前端**：5 个函数、面板/粘贴框/文件/开关/按钮 DOM、状态与统计文案
+- 全部 `<script>` 块语法检查
+
+> 版本号 → `4.16.0`（顺带把 `const.py` 与 `manifest.json` 统一 —— 此前两者
+> 分别是 `4.15.4` 与 `4.15.7`，已不同步）。需重启 HA 生效。
+
+---
+
+## 2026-10-03 — v4.15.7 回填归属地不再带省份（并纠正历史遗留）
+
+> 用户实测："回填的数据带有省份，能不能不要省？"
+
+### 🐛 `merge_place` 把省拼了上去
+
+归属地库返回的是 `province='陕西'` + `city='西安'`（**都不带后缀**），
+而 `merge_place` 的旧实现是 `f"{province}{city}"` → **`陕西西安`**。
+
+省本身没有信息量（一看城市就知道在哪个省），更要紧的是**同一个城市分裂成了两种写法**：
+
+```
+库里原本：  西安
+回填之后：  陕西西安      ← 于是筛选 / 配色 / 地图上的地点各算两个，明细里看着像两个地方
+```
+
+**修法**：只取市（`city or province`，市缺失时才退回省），最后过一遍
+`city_geo.normalize_place` 去掉「市」这类后缀。实测：
+
+| 归属地库 | 旧结果 | 新结果 |
+|---|---|---|
+| 陕西 + 西安 | `陕西西安` | **`西安`** |
+| 北京 + 北京 | `北京北京` → `北京` | `北京` |
+| 北京市 + 北京市 | `北京市北京市` | **`北京`** |
+| 内蒙古自治区 + 巴音郭楞蒙古自治州 | `内蒙古自治区巴音郭楞蒙古自治州` | **`巴音郭楞`** |
+
+### 🔧 顺手纠正**历史遗留**的带省串
+
+以前回填进去的 `陕西西安` 在「只填空值」模式下**永远不会被改写**，会一直躺在库里。
+所以新增 `place_is_padded()`：**旧值只是新值前面多挂了一级省名**时，即使开着「只填空值」也纠正
+（那和新值指的是同一个地方，纠正它不算覆盖用户填的内容）。
+
+判据保守（**宁可漏改也不误改**）：两边先 `normalize_place`（否则 `陕西省西安市` 的结尾是
+`西安市`、`endswith('西安')` 不成立），再要求 `old` 以 `new` 结尾、更长，多出来的前缀长度 ≤ 8
+（省一级最长也就「新疆维吾尔自治区」这个量级），且归一化后**不包含** `new` 本身。
+实测 `我手填的地方` / `西安` / `西安市` / `上海浦东` 都不会被误改。
+
+**连带好处**：坐标回填是按 `party_place` 查表的，带省串 `陕西西安` 归一化后仍是 `陕西西安`、
+查不到坐标；改写成 `西安` 后 `party_coordinate` 也就跟着能填上了。
+
+### 验证（35 项）
+
+`merge_place` 9 组拼接；`place_is_padded` 10 组判据（含 4 组**不该误改**的）；
+端到端回填 8 行真实号码（西安 / 北京 / 电信西安）：空白→`西安`、`陕西西安`→`西安`、
+`陕西省西安市`→`西安`、本来就对的不动、**用户手填的不动**、北京号→`北京`、
+运营商与坐标一并填对；`dry_run` 不写库；`only_empty=False` 时才覆盖一切。
+
+### 其它
+
+- `manifest.json` → `4.15.7`。
+- 通讯**查询**接口没动，`COMM_API_VERSION` 保持 `1.2.0`。
+
+## 2026-10-03 — v4.15.6 通讯查询新增 `geoflows`（地点坐标流向）
+
+> 给迁徙图用的一个接口：**输出与前端 `_commGeoGraph()` 同形**，前端拿到就能直接喂给地图，
+> 不必再把几万条明细拉回来自己聚合。
+
+### ✨ 新接口 `type=geoflows`（别名 `flows`）
+
+```
+GET /api/ha_data_store/comm?type=geoflows&key=xxx
+GET /api/ha_data_store/comm?type=geoflows&channels=语音&min_count=2&key=xxx
+GET /api/ha_data_store/comm?type=geoflows&start=2025-01-01&end=2025-06-30&party_names=张三&key=xxx
+```
+
+| 返回字段 | 说明 |
+|---|---|
+| `cities` | 地点节点：`{name, coord:[lng,lat], count, mine, other, duration, cost, traffic_usage}` |
+| `flows` | 有向边：`{from, to, fromCoord, toCoord, dir:'out'\|'in', count, seconds, duration, cost, first_time, last_time}` |
+| `missing` | 有地名却缺坐标的条数（提示"部分记录没上图"） |
+| `resolved` | 靠本地城市坐标表**现算**补上坐标的地点个数 |
+| `total_records` / `range` | 参与统计的记录数 / 时间范围标签 |
+
+**方向判据与前端完全一致**（`msg_type` 里的 `接听 / 被叫 / 呼入 / 来电` → 反向；
+`呼叫 / 主叫 / 呼出 / 去电` → 正向）：**未接等不编造方向** —— 那些行只计入地点次数、不成边；
+**同城通话**（两侧同名）也不成边，同样只计次数。
+
+**参数**：通用过滤全可用（`channels` / `start` / `end` / `party_names` / `places` …），另有
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `min_count` | 1 | 流向最少次数（调大可滤掉只通了一次的噪音） |
+| `by` | `count` | 排序依据：`count` / `duration` / `cost` / `traffic_usage` |
+| `order` | `desc` | 排序方向 |
+| `limit` | 200 | 流向数上限（`0` = 不限） |
+| `nodes_limit` | 0 | 地点数上限（`0` = 不限） |
+| `resolve` | 1 | 坐标为空时用本地城市坐标表**现算** |
+
+### 🐛 实现时踩到的两个坑（都已修）
+
+1. **`city[side] += 1` 少算了行数**。SQL 已经按 `(地点, 对方地点, 坐标, dir)` 分好组，
+   一个组可能代表**好几行**（实测同一条 `西安→北京` 被 `dir` 拆成 `in` / `out` / `''` 三组，
+   组内还有 `COUNT=2` 的）。前端是**逐行**遍历记录、那边的 `+= 1` 正等价于 `+= count`；
+   写成 `+= 1` 会漏掉同一组里的重复行（实测"北京作为对方地点"少算 1 次）。
+2. **`city.count` 应等于 `mine + other`**，且**没坐标的地点要直接丢掉**（地图画不出来）——
+   与前端 `_commGeoGraph()` 的收尾一致，否则"多少个地点"会虚高。
+
+> 注：同城通话会以 `mine` / `other` **两侧各记一次**（`count` = `mine + other` 也就含两份）。
+> 这是**刻意**的、与前端同口径：一条同城通话，它既"作为我的地点"参与、也"作为对方地点"参与。
+
+### 其它
+
+- `COMM_API_VERSION` → `1.2.0`，`db_viewer.html` 的期望版本同步（**改了 comm.py 要重启 HA**）。
+- `manifest.json` → `4.15.6`。
+
+## 2026-10-03 — v4.15.5 通讯查询新增 `months`（哪些年月有数据）
+
+> 一个轻量接口：**不填任何条件就是全库**，回答"这些数据横跨哪些年、每年哪几个月有动静"。
+> 面板上放在「📞 通讯数据查询」分组里。
+
+### ✨ 新接口 `type=months`
+
+与 `dates`（哪些**日期**有数据）是一对，只是粒度从「日」换成「月」。过滤条件完全一致，
+所以"某人哪些年月有数据"叠加 `party_names` / `party_numbers` 即可。
+
+```
+GET /api/ha_data_store/comm?type=months&key=xxx                 # 全库
+GET /api/ha_data_store/comm?type=months&party_names=张三&key=xxx  # 某人
+GET /api/ha_data_store/comm?type=months&order=desc&key=xxx       # 倒序（默认 asc）
+```
+
+| 字段 | 说明 |
+|---|---|
+| `months` | **纯清单**，`["2019-08", "2019-09", …]` —— 只要"哪些年月"直接取它 |
+| `years` | 按年归拢：`[{year, months: [...], count, duration, cost}]`，省得调用方自己 group |
+| `rows` | 每月一行（与 `dates` 同形）：`count` / `duration` / `cost` / `traffic_usage` / `party_count` / `active_days` |
+| `span` | 首末年月 `{first, last}` —— 不受 `order` 影响（取 min/max，不是取首尾） |
+| `total_records` | 各月条数之和 |
+
+**脏值处理**：库里存在 `0000-00-00 00:00:00` 这类时间（占位 / 导入残留），它们在字典序上排在
+`2019-08` **前面**。如果只在 Python 侧剔除，`LIMIT` 会先被它们占掉名额（实测 `limit=3` 时取回
+`0000-00 / 2019-08 / 2019-09`，剔完只剩 2 个真月份）—— 所以过滤下沉到了 SQL（`GLOB` + 排除
+`0000` / `00` 月），Python 侧再兜一层。
+
+> 顺带发现：`dates` 没有做这个过滤，把 `0000-00-00` / `2021-00-10` 也算成了"天"。
+> 本次**没有改动它**（不在需求范围内），仅记录在此。
+
+### 其它
+
+- `COMM_API_VERSION` → `1.1.0`，`db_viewer.html` 的期望版本同步（**改了 comm.py 要重启 HA**）。
+- `manifest.json` → `4.15.5`。
+
+## 2026-10-02 — v4.15.4 通讯查询新增 6 个接口 · 流量改按数据量统计
+
+> 一次较大的接口扩充：补齐「按对端看对话」「活跃日历」「失联名单」「时长分布」
+> 「新联系人」「最忙的时段」六个查询，并把流量的口径从**时长**改成**数据量**。
+> 另给通讯接口加了版本号，便于确认重启后新接口到底生效了没有。
+
+### 一、新增 6 个接口（`/api/ha_data_store/comm`）
+
+| type | 用途 |
+|---|---|
+| `chat` | 以**对端**为中心的一整段对话（含正文）。`mode=detail` 只回逐条内容、`summary` 只回汇总、`both`（默认）都回；`empty_content=0` 只留有正文的记录 |
+| `calendar` | 某月**每一天**的汇总，**缺的天补 0** —— `dates` 只返回有数据的天，画日历要完整格子；另附 `first_weekday`（该月 1 号是周几）与月度合计 |
+| `stale` | 失联名单：超过 N 天没联系的联系人（按失联天数从久到近） |
+| `duration_dist` | 通话时长分布：按**时长**分桶（`<10秒 / 10秒-1分 / 1-5分 / 5-30分 / 30分-2小时 / ≥2小时`），给直方图用 |
+| `new_peers` | 新联系人：**全库首次联系时间**落在指定范围内的号码（不是"范围内有记录"） |
+| `peak` | 最忙的时段 / 日子：`dim=date\|hour\|weekday\|month\|year\|day`，`by=count\|duration\|cost\|traffic_usage` |
+
+另外 `compare` 新增 `compare=range`：用 `a_start/a_end` 与 `b_start/b_end` 对**任意两个区间**做对比，
+返回 a / b 各自指标与 diff（diff = a − b）。
+
+### 二、流量改按**数据量**统计
+
+流量记录的 `duration` 是"上网时长"（那条会话持续了多久），与"用了多少流量"是两个口径 ——
+实测某条会话 `duration=642 秒` 却只跑 `traffic_usage=0.05 MB`（挂着没传输很常见）。
+此前多处把时长当流量用，现全部改掉：
+
+- `stats` 的**桶**与 `total`、`crosstab` 的**行**、`dates` 的**每天**都补上 `traffic_usage`
+- `traffic_type` 加进维度白名单 → `crosstab&rows=traffic_type`、`ranking&dimension=traffic_type` 立即可用
+
+### 三、通讯接口版本号
+
+`comm.py` 新增 `COMM_API_VERSION`，**每个响应**都带 `api_version`；
+`db_viewer.html` 侧对应 `COMM_VIEWER_EXPECTED_VERSION`，显示在通讯查询的说明区。
+后端改动必须重启才生效，有版本号就不用猜"改了到底生效没有"。
+
+### 四、db_viewer.html
+
+- 「📞 通讯数据查询」分组新增对应入口（含「**聊天记录明细**」：把 `chat` 的 `mode` 固定为 `detail`，
+  响应里只有逐条聊天内容，没有 `by_*` 汇总块）
+- 清理预设参数里的**真实姓名与号码**（`13363902861` → `13800000000`、`宋平平` → `张三`）
+
+> 验证：新接口用**内存 SQLite + 打桩加载真实 `comm.py`** 跑过（43 + 21 + 16 项，含闰年、跨月、
+> 边界包含语义、非法入参、原有模式回归）；db_viewer 的前端改动用「提取内联 script 做语法检查 +
+> 真实 eval 字段规格」验过（28 + 11 + 4 项）。均为全通过。
+
+> 版本号 → `4.15.4`。**需重启 HA 生效**（`comm.py` 有改动）；前端硬刷新页面即可。
+
+---
+
 ## 2026-09-30 — v4.15.2 修复实体映射面板把「内置预设」与「类型级」串在一起
 
 > 前端展示 bug：流量实体的映射面板混进了通话的字段。

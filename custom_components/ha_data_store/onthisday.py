@@ -199,6 +199,11 @@ _SOURCE_DEFS: dict[str, dict] = {
             "count": {"label": "条数", "agg": "count"},
             "duration": {"label": "通话时长(秒)", "agg": "sum", "column": "duration"},
             "cost": {"label": "金额(元)", "agg": "sum", "column": "cost"},
+            # 上网数据量（MB）。与 `duration`（上网时长）是**两个口径** —— 实测某条会话
+            #   642 秒只跑 0.05 MB。前端「流量」渠道的主图纵轴与 KPI 都取它；
+            #   少了这一项，历史今日的流量图只能按条数画（用户实测反馈过这个问题）。
+            #   表里没这列时 `_build_source` 会自动跳过，所以对设备 / 环境源无影响
+            "traffic_usage": {"label": "流量(MB)", "agg": "sum", "column": "traffic_usage"},
         },
         "default_dim": "party_name",
     },

@@ -11629,7 +11629,7 @@ class AttrEntityMappingView(_BaseDBView):
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     f"SELECT field_mapping, field_types, array_path, key_field, "
-                    f"  compare_limit, decimal_places FROM {TABLE_ENTITY_CONFIGS} "
+                    f"  compare_limit, decimal_places, autofill FROM {TABLE_ENTITY_CONFIGS} "
                     f"WHERE entity_id = ? AND attr_type = ?",
                     (entity_id, attr_type),
                 ).fetchone()
@@ -11666,6 +11666,7 @@ class AttrEntityMappingView(_BaseDBView):
                     "key_field": ec_kf,
                     "compare_limit": ec_cl,
                     "decimal_places": ec_dp,
+                    "autofill": ec_af,
                     "type_field_mapping": _json_or(str(td.get("field_mapping") or ""), {}),
                     "type_field_types": _json_or(str(td.get("field_types") or ""), {}),
                     "type_array_path": str(td.get("array_path") or ""),
@@ -11704,6 +11705,91 @@ class AttrEntityMappingView(_BaseDBView):
                 {"success": False, "error": "缺少 entity_id / attr_type 参数"}, status_code=400
             )
 
+        # ── 动作：更换被采集的实体 ──
+        # 走专用分支而不是通用的单元格更新：① 按 (entity_id, attr_type) 定位，
+        # 不依赖前端拿到的 rowid；② 在 HA 里校验新实体确实存在；③ 冲突时给出明确错误。
+        if str(body.get("action") or "").strip().lower() == "rename":
+            new_id = str(body.get("new_entity_id") or "").strip()
+            if not new_id:
+                return self.json(
+                    {"success": False, "error": "缺少 new_entity_id 参数"}, status_code=400
+                )
+            if new_id == entity_id:
+                return self.json(
+                    {"success": True, "renamed": False, "entity_id": entity_id,
+                     "attr_type": attr_type}
+                )
+            rename_now = _get_local_iso(
+                hass.data.get(DOMAIN, {}).get("timezone", DEFAULT_TIMEZONE)
+            )
+
+            def _rename() -> dict:
+                if hass.states.get(new_id) is None:
+                    raise ValueError(f"实体「{new_id}」不存在或不可用（未在 Home Assistant 中注册）")
+                conn = sqlite3.connect(db_path)
+                try:
+                    old = conn.execute(
+                        f"SELECT 1 FROM {TABLE_ENTITY_CONFIGS} "
+                        f"WHERE entity_id = ? AND attr_type = ?",
+                        (entity_id, attr_type),
+                    ).fetchone()
+                    if not old:
+                        raise ValueError(
+                            f"未找到实体「{entity_id}」的类型「{attr_type}」采集配置，"
+                            f"请重新打开配置页核对"
+                        )
+                    clash = conn.execute(
+                        f"SELECT 1 FROM {TABLE_ENTITY_CONFIGS} "
+                        f"WHERE entity_id = ? AND attr_type = ?",
+                        (new_id, attr_type),
+                    ).fetchone()
+                    if clash:
+                        raise ValueError(
+                            f"实体「{new_id}」已有类型「{attr_type}」的采集配置，"
+                            f"请先删除它的旧配置再更换"
+                        )
+                    cur = conn.execute(
+                        f"UPDATE {TABLE_ENTITY_CONFIGS} SET entity_id = ?, updated_at = ? "
+                        f"WHERE entity_id = ? AND attr_type = ?",
+                        (new_id, rename_now, entity_id, attr_type),
+                    )
+                    if not cur.rowcount:
+                        raise ValueError("更换实体失败：未找到原配置行")
+                    conn.commit()
+                    # 回读确认：避免「接口说成功、库里其实没变」这类静默失败
+                    check = conn.execute(
+                        f"SELECT entity_id FROM {TABLE_ENTITY_CONFIGS} "
+                        f"WHERE entity_id = ? AND attr_type = ?",
+                        (new_id, attr_type),
+                    ).fetchone()
+                    if not check:
+                        raise ValueError(
+                            f"更换实体失败：写入后未查到「{new_id}」的配置行，请重试"
+                        )
+                    return {"renamed": True, "entity_id": new_id,
+                            "old_entity_id": entity_id}
+                finally:
+                    conn.close()
+
+            try:
+                result = await self._exec_in_executor(hass, _rename)
+            except ValueError as exc:
+                return self.json({"success": False, "error": str(exc)}, status_code=400)
+            except sqlite3.IntegrityError as exc:
+                return self.json(
+                    {"success": False,
+                     "error": f"更换实体失败（该实体已有同类型配置）：{exc}"},
+                    status_code=400,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.exception("[attr] 更换采集实体失败")
+                return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+            _LOGGER.info(
+                "[attr] 更换采集实体 %s → %s type=%s", entity_id, new_id, attr_type
+            )
+            return self.json({"success": True, "attr_type": attr_type, **result})
+
         raw_fm = body.get("field_mapping")
         if raw_fm is None or (isinstance(raw_fm, str) and not raw_fm.strip()) or raw_fm == {}:
             field_mapping: dict = {}
@@ -11741,6 +11827,10 @@ class AttrEntityMappingView(_BaseDBView):
         compare_limit = _opt_int(body.get("compare_limit"), 0)
         decimal_places = _opt_int(body.get("decimal_places"), -2)
 
+        # 自动回填开关：`None` / 未传 = 保持不变（避免「只改映射」时被重置）
+        raw_af = body.get("autofill")
+        autofill: int = -1 if raw_af is None else (1 if str(raw_af) not in ("0", "False", "false") else 0)
+
         now = _get_local_iso(
             hass.data.get(DOMAIN, {}).get("timezone", DEFAULT_TIMEZONE)
         )
@@ -11775,11 +11865,13 @@ class AttrEntityMappingView(_BaseDBView):
                 cursor = conn.execute(
                     f"UPDATE {TABLE_ENTITY_CONFIGS} SET field_mapping = ?, field_types = ?, "
                     f"array_path = ?, key_field = ?, compare_limit = ?, decimal_places = ?, "
+                    f"autofill = CASE WHEN ? >= 0 THEN ? ELSE autofill END, "
                     f"updated_at = ? WHERE entity_id = ? AND attr_type = ?",
                     (
                         json.dumps(field_mapping, ensure_ascii=False) if field_mapping else "",
                         json.dumps(field_types_use, ensure_ascii=False) if field_types_use else "",
                         array_path, key_field, compare_limit, decimal_places,
+                        autofill, autofill,
                         now, entity_id, attr_type,
                     ),
                 )
@@ -11798,6 +11890,7 @@ class AttrEntityMappingView(_BaseDBView):
                     "key_field": key_field,
                     "compare_limit": compare_limit,
                     "decimal_places": decimal_places,
+                    "autofill": autofill,
                 }
             finally:
                 conn.close()

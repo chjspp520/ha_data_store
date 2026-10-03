@@ -565,6 +565,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('recent')">🕘 近期使用设备<span class="sub-tab-badge" id="badge-recent"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('onthisday')">📜 历史今日<span class="sub-tab-badge" id="badge-onthisday"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('metrics')">📊 指标管理<span class="sub-tab-badge" id="badge-metrics"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('backfill')">📇 其他数据回填<span class="sub-tab-badge" id="badge-backfill"></span></button>
   </div>
 
   <!-- 子面板: 设备类 -->
@@ -1682,6 +1683,101 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 其他数据回填（本地归属地库 / 城市坐标表 / 用户通讯录） -->
+  <div id="sub-backfill" class="sub-panel">
+    <div class="section">
+      <h3>📇 其他数据回填</h3>
+      <div class="hint">
+        用<b>本地</b>数据给通讯记录补全空字段 —— <b>不联网、只填空值</b>（不覆盖源数据已给出的内容）。
+        <br>· <b>对方归属地 / 运营商</b> ← 按对方号码查集成内置归属地库（归属地<b>只要市不要省</b>：
+        <code>陕西省西安市</code> → <code>西安</code>，也会顺手纠正历史遗留的带省写法）
+        <br>· <b>对方姓名</b> ← 按对方号码查<b>你导入的通讯录</b>（姓名无法从任何内置库推出来，只能由你提供）
+        <br>· <b>对方坐标 / 我的坐标</b> ← 按地名查内置城市坐标表（420 个城市）
+        <br><b>新采集的数据已在写入时自动回填</b>（可在「属性提取 → 编辑 → 实体采集参数」里
+        逐个实体用「自动回填」开关控制）；这里主要用于补<b>历史数据</b>。
+      </div>
+
+      <div class="form-row" style="margin-bottom:8px">
+        <div>
+          <label>数据类型</label>
+          <select id="commBackfillType" onchange="loadCommBackfillStatus()" style="min-width:240px"></select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <span class="hint">选「自动探测」时由后端推断（取 mode=comm 且数据表已存在者）</span>
+        </div>
+      </div>
+
+      <div style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2)">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="btn-accent" onclick="runCommBackfill(false, ['party_name'])"
+                  style="background:#8e44ad;border-color:#8e44ad;font-size:12px;padding:6px 12px"
+                  title="按 comm_contacts（通讯录）表里的「号码→姓名」，回填通讯数据表中为空的「对方姓名」列。只填空值，不覆盖已有姓名；不联网。此按钮是「用通讯录回填」，不需要你输入任何内容">👥 按通讯录回填姓名</button>
+          <button class="btn-accent" onclick="runCommBackfill(false)"
+                  style="background:#16a085;border-color:#16a085;font-size:12px;padding:6px 12px"
+                  title="用本地归属地库、城市坐标表与你的通讯录，一次性补全「对方归属地 / 对方运营商 / 对方姓名 / 对方坐标 / 我的坐标」的空值；不覆盖已有内容、不联网">📇 全部回填（历史数据）</button>
+          <button class="btn-accent" onclick="runCommBackfill(true)"
+                  style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px"
+                  title="只统计会补多少条，不写入数据库">🧪 预览</button>
+          <button class="btn-accent" onclick="openCommContacts()"
+                  style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px"
+                  title="管理通讯录数据本身（导入 / 查看 / 清空）。回填请点左边的「👥 按通讯录回填姓名」；再点一次可收起">📥 通讯录管理</button>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="checkbox" id="commBackfillOverwrite"> 覆盖已有值
+          </label>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px">
+            最多处理
+            <input type="number" id="commBackfillLimit" min="0" step="100" value="0"
+                   style="width:80px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px">
+            行（0 = 全部）
+          </label>
+          <button class="btn-accent" onclick="loadCommBackfillStatus()"
+                  style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px">🔄 刷新状态</button>
+        </div>
+        <div id="commBackfillStatus" style="margin-top:6px;font-size:12px;color:var(--text2)">正在读取本地库状态…</div>
+
+        <!-- 通讯录（号码 → 姓名）：用户自行导入，供 party_name 回填 -->
+        <div id="commContactsBox" style="display:none;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card)">
+          <div style="font-size:12px;color:var(--text2);margin-bottom:6px">
+            <b>通讯录导入</b>：用于回填「对方姓名」（姓名无法从任何内置库推出，只能由你提供）。
+            支持 <code>13800138000,张三</code> 每行一条，或 JSON。重复导入是<b>更新</b>而非新增。
+            <details style="margin-top:4px">
+              <summary style="cursor:pointer;color:var(--accent)">格式说明</summary>
+              <div style="margin-top:4px">
+                · 文本：<code>号码,姓名</code> 每行一条（逗号 / 制表符 / 分号 / 竖线均可；
+                <code>姓名,号码</code> 的列序也能自动识别）
+                <br>· JSON：<code>[{"number":"...","name":"..."}]</code> 或
+                <code>{"号码":"姓名"}</code>
+                <br>· 号码会自动去掉 <code>+86</code>（含不带加号的 <code>86</code>）、空格与连字符，
+                所以同一号码的不同写法能互相匹配
+                <br>· 可从文件导入 <code>.csv</code> / <code>.txt</code> / <code>.json</code>
+              </div>
+            </details>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+            <input type="file" id="commContactsFile" accept=".csv,.txt,.json"
+                   onchange="onCommContactsFile(this)" style="font-size:12px">
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer">
+              <input type="checkbox" id="commContactsReplace"> 先清空再导入（整份替换）
+            </label>
+          </div>
+          <textarea id="commContactsText" rows="5"
+                    placeholder="在这里粘贴通讯录…&#10;13800138000,张三&#10;13900139000,李四"
+                    style="width:100%;box-sizing:border-box;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:4px;padding:6px;font-size:12px;font-family:monospace"></textarea>
+          <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn-green" onclick="importCommContacts()" style="font-size:12px;padding:6px 12px">📥 导入</button>
+            <button class="btn-accent" onclick="refreshCommContacts()" style="font-size:12px;padding:6px 12px">🔄 刷新</button>
+            <button class="btn-accent" onclick="clearCommContacts()"
+                    style="font-size:12px;padding:6px 12px;background:#c0392b;border-color:#c0392b">🗑 清空通讯录</button>
+            <button class="btn-accent" onclick="document.getElementById('commContactsBox').style.display='none'"
+                    style="font-size:12px;padding:6px 12px">✕ 关闭</button>
+          </div>
+          <div id="commContactsStatus" style="margin-top:6px;font-size:12px;color:var(--text2)"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 子面板: 指标管理（元数据 + 通用指标引擎 metrics_catalog） -->
   <div id="sub-metrics" class="sub-panel">
     <div class="section">
@@ -2219,7 +2315,16 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         </optgroup>
         <optgroup label="📞 通讯数据查询">
           <option value="comm:records">通讯记录明细（多条件 / 多号码 / 时间段）</option>
+          <option value="comm:chat">聊天记录（指定人员 / 号码 · 各维度汇总 · 支持起止时间）</option>
+          <option value="comm:chat:detail">聊天记录明细（逐条聊天内容 · 指定人员 / 号码 / 时间段）</option>
           <option value="comm:dates">哪些日期有数据（指定月份 / 号码 / 姓名）</option>
+          <option value="comm:months">哪些年月有数据（全部数据 · 逐月清单 · 可叠加人员/渠道）</option>
+          <option value="comm:geoflows">📍 地点坐标流向（迁徙图数据 · 可叠加渠道/人员/时间）</option>
+          <option value="comm:calendar">活跃日历（指定人员指定月份 · 每天是否有数据）</option>
+          <option value="comm:stale">失联名单（超过 N 天没联系的联系人）</option>
+          <option value="comm:duration_dist">通话时长分布（各时长段的条数 / 占比）</option>
+          <option value="comm:new_peers">新联系人（全库首次联系落在指定范围内）</option>
+          <option value="comm:peak">最忙的时段 / 日子（按时间维度排 Top N）</option>
           <option value="comm:stats:year_all">统计分析 · 全部数据按年汇总</option>
           <option value="comm:stats:month_all">统计分析 · 全部数据按年月汇总</option>
           <option value="comm:stats:month_in_year">统计分析 · 指定年 → 按月汇总</option>
@@ -2228,6 +2333,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="comm:stats">统计分析 · 自定义（任选粒度 year/quarter/month/week/day/hour）</option>
           <option value="comm:crosstab">交叉汇总（行维度 × 列维度 · 类型 / 地点 / 号码 / 姓名）</option>
           <option value="comm:compare">周期对比（环比 / 同比 · 日 / 周 / 月 / 季 / 年）</option>
+          <option value="comm:compare:range">区间对比（任意两个时间段 · A vs B）</option>
           <option value="comm:contact">联系人档案（某号码 / 姓名的完整画像）</option>
           <option value="comm:longest">单次 Top N（最长通话 / 最高金额）</option>
           <option value="comm:quality">数据质量检查（空值 / 异常值 / 疑似重复）</option>
@@ -2825,29 +2931,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <label>通讯数据查询参数（留空表示不限制）</label>
       <div id="apiCommParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
       <div id="apiCommHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
-      <!-- 通讯字段回填（归属地 / 运营商 / 坐标）：数据来自本地 phone2region.zdb + city_coordinates.json -->
-      <div style="margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2)">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <button class="btn-accent" onclick="runCommBackfill(false)"
-                  style="background:#16a085;border-color:#16a085;font-size:12px;padding:6px 12px"
-                  title="用本地归属地库与城市坐标表，补全「对方归属地 / 对方运营商 / 对方坐标 / 我的坐标」的空值；不覆盖已有内容、不联网">📇 自动填写</button>
-          <button class="btn-accent" onclick="runCommBackfill(true)"
-                  style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px"
-                  title="只统计会补多少条，不写入数据库">🧪 预览</button>
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer">
-            <input type="checkbox" id="commBackfillOverwrite"> 覆盖已有值
-          </label>
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px">
-            最多处理
-            <input type="number" id="commBackfillLimit" min="0" step="100" value="0"
-                   style="width:80px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px">
-            行（0 = 全部）
-          </label>
-          <button class="btn-accent" onclick="loadCommBackfillStatus()"
-                  style="background:#7f8c8d;border-color:#7f8c8d;font-size:12px;padding:6px 12px">🔄 刷新状态</button>
-        </div>
-        <div id="commBackfillStatus" style="margin-top:6px;font-size:12px;color:var(--text2)">选择「通讯数据查询」后自动读取库状态…</div>
-      </div>
+      <div class="hint" style="margin-top:10px">📇 数据回填（归属地 / 运营商 / 姓名 / 坐标）已移至
+        <b>「系统配置 → 📇 其他数据回填」</b>。</div>
     </div>
     <!-- 历史今日（设备 / 环境）参数区 -->
     <div id="apiOtdRow" style="display:none">
@@ -7353,6 +7438,7 @@ function switchSubTab(name) {
   if (name === 'recent') { loadRecentExclude(); }
   if (name === 'onthisday') { loadOtdExclude(); }
   if (name === 'metrics') { loadMetrics(); }
+  if (name === 'backfill') { loadBackfillTypes(); loadCommBackfillStatus(); }
 }
 
 // ==============================
@@ -8442,6 +8528,9 @@ async function openAttrEditModal(typeName) {
     } catch(e) { cols = null; }
 
     const nodesRaw = _aeJson(defRow.extra_json_nodes, []);
+    // 记下每行的**原始** entity_id：`_aeSyncEntityInputs()` 会把 `entity_id` 覆盖成
+    // 输入框里的新值，若直接拿它和输入框比较，永远相等 → 更换实体永远不会被识别。
+    (ecs.rows || []).forEach(r => { r._origId = r.entity_id || ''; });
     attrEditCtx = {
       typeName: typeName,
       defRow: defRow,
@@ -8553,11 +8642,12 @@ function _aeRender() {
       + '<th style="' + th + ';width:150px">唯一键字段</th>'
       + '<th style="' + th + ';width:110px">对比最近条数</th>'
       + '<th style="' + th + ';width:100px">小数位数</th>'
+      + '<th style="' + th + ';width:96px">自动回填</th>'
       + '<th style="' + th + ';width:140px">字段映射</th>'
       + '<th style="' + th + ';width:76px">操作</th>';
     h += '</tr></thead><tbody id="attrEditEntityBody">';
     if (!entList.length) {
-      h += '<tr><td colspan="10" class="hint" style="padding:8px">该类型下暂无实体，'
+      h += '<tr><td colspan="11" class="hint" style="padding:8px">该类型下暂无实体，'
         + '点上方「➕ 添加实体」新增。</td></tr>';
     }
     entList.forEach((e, i) => {
@@ -8602,6 +8692,18 @@ function _aeRender() {
       h += '<td style="' + cell + '"><input data-role="decimal_places" type="number" min="-1" max="6" value="'
         + escAttr(eDp >= -1 ? eDp : '') + '" placeholder="继承：' + escAttr(num(def.decimal_places, 2))
         + '" style="' + S + '"></td>';
+      // 自动回填：采集时用本地归属地库 / 坐标表 / 通讯录补全空字段（仅通讯模式有意义）
+      const eAf = (e.autofill === null || e.autofill === undefined) ? 1 : Number(e.autofill);
+      h += '<td style="' + cell + ';text-align:center">'
+        + '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" title="'
+        + escAttr(isComm
+            ? '开启后：采集每行前用它自己的号码补「归属地/运营商/姓名」，用地名补「坐标」；只填空值，不覆盖源数据。'
+            : '仅通讯数据（comm）模式生效。') + '">'
+        + '<input type="checkbox" data-role="autofill"' + (eAf ? ' checked' : '')
+        + (isComm ? '' : ' disabled') + '>'
+        + '<span style="font-size:11px;color:var(--text2)">'
+        + (isComm ? (eAf ? '开' : '<span style="color:#e67e22">关</span>') : '不适用')
+        + '</span></label></td>';
       let ownMap = {};
       try { ownMap = e.field_mapping ? JSON.parse(e.field_mapping) : {}; } catch (err) { ownMap = {}; }
       const ownCnt = Object.keys(ownMap).length;
@@ -8643,6 +8745,10 @@ function _aeRender() {
       + '同一类型下各实体的数据形状往往不同（如 <code>xxx_traffic</code> / <code>xxx_sms</code> / '
       + '<code>xxx_calls</code>），各自选自己的节点即可；留空 = 继承类型级（'
       + escHtml(def.array_path || '未设置') + '）。'
+      + '<br><b>自动回填</b>（仅通讯模式）：勾选后，采集每写一行前会用本地库补全空字段 —— '
+      + '按号码补「对方归属地 / 运营商 / 姓名」，按地名补「对方坐标 / 我的坐标」。'
+      + '<b>只填空值</b>，源数据已给出的内容不会被覆盖；归属地与坐标来自集成内置库，'
+      + '姓名来自你在「通讯数据查询」页导入的<b>通讯录</b>。关掉则完全不回填。'
       + '<br><b>唯一键字段 / 对比最近条数 / 小数位数</b>同样是<b>每个实体各自</b>的：'
       + '留空（或 0 / 空）即继承类型级，该行输入框的占位符会显示当前继承值。'
       + '<br><b>唯一键字段填的是「源字段名」</b>（即<b>该实体采集节点下数组元素里的字段</b>，'
@@ -8857,16 +8963,21 @@ async function saveAttrEdit() {
     const clEnt = parseInt(val(tr.querySelector('input[data-role="compare_limit"]')) || '0', 10) || 0;
     const dpRaw = val(tr.querySelector('input[data-role="decimal_places"]')).trim();
     const dpEnt = dpRaw === '' ? -2 : (parseInt(dpRaw, 10) >= -1 ? parseInt(dpRaw, 10) : -2);
+    // 自动回填开关（复选框，默认勾选）
+    const afEl = tr.querySelector('input[data-role="autofill"]');
+    const afEnt = afEl ? (afEl.checked ? 1 : 0) : 1;
 
     // 新增行：没有 _rowid，走 upsert 新建 entity_configs 行
     if (orig._isNew || !orig._rowid) {
       entAdds.push({ entityId: newId, room: room, collectMode: cm, interval: interval,
                      arrayPath: arrPathEnt, keyField: kfEnt,
-                     compareLimit: clEnt, decimalPlaces: dpEnt });
+                     compareLimit: clEnt, decimalPlaces: dpEnt, autofill: afEnt });
       return;
     }
-    if ((orig.entity_id || '') !== newId) {
-      entRenames.push({ rowId: orig._rowid, oldId: orig.entity_id, newId: newId });
+    // 用 _origId 比较（entity_id 已被 _aeSyncEntityInputs 同步成新值，不能用）
+    const oldId = (orig._origId !== undefined) ? orig._origId : (orig.entity_id || '');
+    if (oldId !== newId) {
+      entRenames.push({ rowId: orig._rowid, oldId: oldId, newId: newId });
     }
     if ((orig.room || '') !== room) entUpdates.push({ rowId: orig._rowid, column: 'room', value: room, ent: orig.entity_id });
     if ((orig.collect_mode || 'poll') !== cm) entUpdates.push({ rowId: orig._rowid, column: 'collect_mode', value: cm, ent: orig.entity_id });
@@ -8888,6 +8999,12 @@ async function saveAttrEdit() {
     if (Number(orig.collect_interval === null || orig.collect_interval === undefined ? 30 : orig.collect_interval) !== interval) {
       entUpdates.push({ rowId: orig._rowid, column: 'collect_interval', value: interval, ent: orig.entity_id });
     }
+    // 自动回填开关（列缺失 / 未读过时按「开」处理）
+    const afOrig = (orig.autofill === null || orig.autofill === undefined)
+      ? 1 : Number(orig.autofill);
+    if (afOrig !== afEnt) {
+      entUpdates.push({ rowId: orig._rowid, column: 'autofill', value: afEnt, ent: orig.entity_id });
+    }
     // 停用（软删 enabled，保存后生效；点「↩ 恢复」可取消）
     if (orig._disabled) entDisables.push({ rowId: orig._rowid, entityId: orig.entity_id });
   });
@@ -8905,21 +9022,11 @@ async function saveAttrEdit() {
     } catch (e) { /* 接口异常时不阻断，交由后端约束兜底 */ }
   }
 
-  // 6.1) 更换实体前确认目标实体存在，避免把配置指向一个不存在的实体
-  for (const r of entRenames) {
-    try {
-      const resp = await fetch(ATTR_STATE_API + '?entity_id=' + encodeURIComponent(r.newId));
-      const json = await resp.json();
-      if (!json.success) {
-        showToast('实体「' + r.newId + '」不存在或不可用，未保存', false);
-        return;
-      }
-    } catch (e) { /* 接口异常时不阻断，交由后端约束兜底 */ }
-    entUpdates.push({ rowId: r.rowId, column: 'entity_id', value: r.newId, ent: r.oldId, renamed: true });
-  }
-
+  // 6.1) 更换实体：不在这里预校验、也不塞进 entUpdates。
+  //   改由执行阶段调用专用接口（按 entity_id + attr_type 定位，后端校验存在性与冲突），
+  //   失败时能拿到**明确的原因**，而不是被一句「实体不存在」拦下却不知所以。
   if (!defUpdates.length && !addCols.length && !entUpdates.length
-      && !entAdds.length && !entDisables.length) {
+      && !entAdds.length && !entDisables.length && !entRenames.length) {
     showToast('没有需要保存的改动', true);
     return;
   }
@@ -8984,7 +9091,8 @@ async function saveAttrEdit() {
         if (!json.success) throw new Error(json.error || '未知错误');
         // 采集节点 / 唯一键 / 去重窗口 / 小数位是实体级配置，EntityConfigView 不管它们，
         // 建好行后单独补一次（有任一项非默认值才调）
-        if (a.arrayPath || a.keyField || a.compareLimit > 0 || a.decimalPlaces >= -1) {
+        if (a.arrayPath || a.keyField || a.compareLimit > 0 || a.decimalPlaces >= -1
+            || a.autofill === 0) {
           const mResp = await fetch(ATTR_ENTITY_MAPPING_API, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -8992,6 +9100,7 @@ async function saveAttrEdit() {
               entity_id: a.entityId, attr_type: ctx.typeName,
               array_path: a.arrayPath, key_field: a.keyField,
               compare_limit: a.compareLimit, decimal_places: a.decimalPlaces,
+              autofill: a.autofill,
             }),
           });
           const mJson = await mResp.json();
@@ -9011,6 +9120,23 @@ async function saveAttrEdit() {
     for (const d of entDisables) {
       await _aeCellUpdate('entity_configs', d.rowId, 'enabled', 0);
       done.push('停用实体 ' + d.entityId);
+    }
+    // 更换实体：走专用接口，错误原因直接来自后端
+    for (const r of entRenames) {
+      const resp = await fetch(ATTR_ENTITY_MAPPING_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'rename', entity_id: r.oldId, new_entity_id: r.newId,
+          attr_type: ctx.typeName,
+        }),
+      });
+      const json = await resp.json();
+      if (!json.success) {
+        throw new Error('更换实体「' + r.oldId + '」→「' + r.newId + '」失败：'
+          + (json.error || '未知错误'));
+      }
+      done.push('更换实体 ' + r.oldId + ' → ' + r.newId);
     }
     for (const u of entUpdates) {
       try {
@@ -9115,6 +9241,8 @@ function _aeSyncEntityInputs() {
     const kfEl = tr.querySelector('input[data-role="key_field"]');
     const clEl = tr.querySelector('input[data-role="compare_limit"]');
     const dpEl = tr.querySelector('input[data-role="decimal_places"]');
+    const afEl = tr.querySelector('input[data-role="autofill"]');
+    if (afEl) e.autofill = afEl.checked ? 1 : 0;
     if (idEl) e.entity_id = (idEl.value || '').trim();
     if (roomEl) e.room = (roomEl.value || '').trim();
     if (modeEl) e.collect_mode = modeEl.value;
@@ -9143,6 +9271,7 @@ function aeAddEntityRow(entityId) {
     room: last.room || '',
     collect_mode: last.collect_mode || 'poll',
     collect_interval: last.collect_interval || 30,
+    autofill: 1,
     field_mapping: '',
   });
   _aeRender();
@@ -9174,7 +9303,7 @@ function aeBatchAddEntities() {
     ctx.entities.push({
       _isNew: true, entity_id: id, room: last.room || '',
       collect_mode: last.collect_mode || 'poll',
-      collect_interval: last.collect_interval || 30, field_mapping: '',
+      collect_interval: last.collect_interval || 30, autofill: 1, field_mapping: '',
     });
     added++;
   });
@@ -9375,6 +9504,8 @@ async function aeSaveEntityMapping() {
   const entityId = idInput ? (idInput.value || '').trim() : (e.entity_id || '');
   if (!entityId) { showToast('实体 ID 不能为空', false); return; }
   const mapping = _aeCollectEntityMapping();
+  // 先把表格里其它输入（含「自动回填」复选框）同步进 ctx
+  _aeSyncEntityInputs();
   try {
     const resp = await fetch(ATTR_ENTITY_MAPPING_API, {
       method: 'POST',
@@ -9388,6 +9519,7 @@ async function aeSaveEntityMapping() {
           const v = String(_aeEntityRowParam(aeEntMapIdx, 'decimal_places', '')).trim();
           return v === '' ? -2 : parseInt(v, 10);
         })(),
+        autofill: (e.autofill === null || e.autofill === undefined) ? 1 : Number(e.autofill),
       }),
     });
     const json = await resp.json();
@@ -13573,8 +13705,7 @@ function onApiTypeChange() {
     if (elCommRow) elCommRow.style.display = 'block';
     const commParts = qt.slice('comm:'.length).split(':');
     renderCommParams(commParts[0], commParts[1] || '');
-    // 顺带刷新「自动填写」区里的库状态与待回填统计
-    if (typeof loadCommBackfillStatus === 'function') loadCommBackfillStatus();
+    // 注：数据回填已移至「系统配置 → 📇 其他数据回填」，这里不再刷新它的状态
     return;
   }
 
@@ -16940,10 +17071,56 @@ async function extLoadIntoApi() {
 }
 
 // ---------- 通讯数据查询（comm:*）：参数规格 + 动态渲染 ----------
+// 页面对应的**服务端接口版本**：与 comm.py 的 COMM_API_VERSION 对应。
+//   comm 接口每个响应都会带 api_version，这里拿回来跟期望值比 ——
+//   不一致基本就是"接口更新了但 Home Assistant 没重启"，比人肉排查省事。
+//   comm.py 改了接口行为时，把它和 COMM_API_VERSION 一起改。
+const COMM_VIEWER_EXPECTED_VERSION = '1.3.0';
+
 // 与后端 comm.py 的过滤/统计参数保持一致
 const COMM_TYPE_HINTS = {
   records: '明细列表：返回符合条件的通讯记录，支持排序、分页与内容截断。',
-  dates: '哪些日期有数据：按月/年或自定义区间，返回每天的条数、时长、金额与联系人数（可用于日历打点）。',
+  chat: '聊天记录：以**对端**为中心的一整段对话（含正文）。必须填「对方号码 party_numbers」或「对方姓名 party_names」；'
+    + '一次返回合计 / 分渠道 / 分消息类型 / 分天 —— 做「聊天窗口」只要这一个请求。'
+    + '默认时间正序（对话从上往下读，可改 order=desc）；'
+    + '起止时间 start / end 支持到时分秒，end 是**包含**语义（优先级 start/end > date > month > year）。'
+    + '**mode** 决定回什么：both（默认，汇总 + 明细）/ detail（**只要逐条聊天内容**）/ summary（只要汇总）。'
+    + '只想要一条条聊天记录，用下面的「聊天记录明细」入口更直接（它把 mode 固定成 detail，'
+    + '响应里没有 by_* 那些汇总块，rows 就是本体）。'
+    + '**empty_content**（默认 1）控制「内容（content）为空的记录是否显示」：传 0 只留有正文的 —— '
+    + '语音 / 短信的绝大多数没有正文，看聊天内容时它们只是噪音。注意它作用在**共用条件**上，'
+    + '所以汇总（total / by_*）会跟着一起收窄。',
+  dates: '哪些日期有数据：按月/年或自定义区间，返回每天的条数、时长、金额、流量与联系人数（可用于日历打点）。'
+    + '注意它只返回**有数据的那几天**；要完整月份的格子（缺的天补 0）用 calendar。',
+  months: '哪些年月有数据：不填任何条件就是**全库**，返回这段数据横跨的年月清单。'
+    + '返回里 **months** 是纯清单（`["2019-08", "2019-09", …]`）—— 只要"哪些年月"直接取它；'
+    + '**years** 是按年归拢（每年带自己的月份数组与合计），**rows** 是每月一行'
+    + '（count / duration / cost / traffic_usage / party_count / active_days），'
+    + '另有 span（首末年月）与 total_records。按 order 排序（默认 asc）。'
+    + '过滤条件与 dates 完全一致 —— 想查"某人哪些年月有数据"，叠加 party_numbers / party_names 即可。'
+    + '用途：前端可以拿它把月份选择器的范围收敛到真的有数据的那一段。',
+  calendar: '活跃日历：某个月**每一天**的汇总，**缺的天补 0**（dates 只给有数据的天，画日历需要完整格子）。'
+    + '填「指定月份 month」（如 2025-09）+「对方号码 / 姓名」即可，也可用 start 推断月份。'
+    + '每行含 date / day / weekday / weekday_sun0 / has_data / 条数 / 时长 / 金额 / 流量 / 联系人数；'
+    + '顶层附 first_weekday（该月 1 号是周几，0=周日）、active_days、rest_days 与月度合计 total。',
+  stale: '失联名单：**超过 N 天没联系**的联系人，按失联天数从久到近。'
+    + 'days=阈值天数（默认 30）；min_count=历史最少条数（默认 1，用来滤掉只出现过一次的陌生号）；'
+    + 'by=days（默认，按失联天数）| count | duration。'
+    + '每行含 party_number / party_name / last_time / **days_since_last** / count / duration / cost / first_time。'
+    + '注意：它排的是"最久没联系的人"，和 parties（最常联系的人）正好互补。',
+  duration_dist: '通话时长分布：按**时长**分桶，给直方图用 —— 一眼看出是"多而短"还是"少而长"。'
+    + 'buckets=自定义边界（逗号分隔的秒数，默认 10,60,300,1800,7200 → '
+    + '<10秒 / 10秒-1分 / 1-5分 / 5-30分 / 30分-2小时 / ≥2小时）；'
+    + 'only_positive=1（默认）时只统计 duration>0 的记录 —— 短信 / 微信的时长恒为 0，'
+    + '不排掉会全落进第一个桶。每行含 key（人话标签）/ min / max / count / duration / cost / **pct**。',
+  new_peers: '新联系人：**全库首次联系时间**落在指定范围内的号码（判据是 MIN(time) 在范围内，'
+    + '而不是"范围内有记录"—— 后者会把老朋友也算进来）。必须给时间范围（start/end 或 month/year）。'
+    + 'min_count=最少条数（默认 1）。注意统计的是该号码的**全部**记录，不是范围内那部分。',
+  peak: '最忙的时段 / 日子：按**时间维度**排 Top N。'
+    + 'dim=date（默认，具体某天）| hour（一天里第几小时）| weekday（周几）| month | year | day（月内第几天）；'
+    + 'by=count（默认）| duration | cost | traffic_usage。'
+    + '每行含 rank / key / label（人话，如「09 时」「周一」）/ count / duration / cost / traffic_usage。'
+    + 'ranking 排的是"人 / 地点 / 类型"，peak 排的是"时间本身"。',
   stats: '统计分析：按时间粒度分组汇总，每桶返回条数 / 时长 / 金额 / 去重联系人数 / 活跃天数 / 平均时长，'
     + '并附合计行（total）与可选的每桶均值（avg_per_bucket）。'
     + '时间范围留空 = 全部数据；填 year=2026 或 month=2026-09 即「指定年 / 指定年月」；'
@@ -16957,7 +17134,9 @@ const COMM_TYPE_HINTS = {
   crosstab: '交叉汇总：行维度 × 列维度 的度量矩阵，用于「按消息类型 / 地点 / 呼叫类型汇总某人或某号码的条数、时长」这类分析。'
     + 'rows 支持 1~3 个维度（逗号分隔），cols 最多 1 个（留空则只输出各行合计）。',
   compare: '周期对比：当前周期 vs 上一周期（环比）vs 去年同期（同比），直接返回差值与增长率。'
-    + 'period=day|week|month（默认）|quarter|year；date 为基准日（默认今天）；compare=prev|yoy|both。',
+    + 'period=day|week|month（默认）|quarter|year；date 为基准日（默认今天）；compare=prev|yoy|both。'
+    + '另支持 **compare=range**：改用 a_start/a_end 与 b_start/b_end 给**任意两个区间**做对比'
+    + '（选下拉里的「区间对比」会自动填好），返回 a / b 各自的指标与 diff（diff = a − b，增长率以 b 为基准）。',
   contact: '联系人档案：以 party_number 或 party_name 为身份，一次拿到总量、首末通讯、多久没联系、'
     + '平均间隔、按小时 / 星期 / 月份 / 来源分布、联系最多的日子与最近明细。',
   longest: '单次 Top N：按单条记录的时长（by=duration）或金额（by=cost）取前 N 条，'
@@ -16975,7 +17154,7 @@ const COMM_TYPE_HINTS = {
 
 // 交叉汇总 / 分组可用的维度（与后端 _RANK_DIMENSIONS 保持一致）
 const COMM_DIMENSION_KEYS = ['msg_type', 'location', 'party_place', 'call_type',
-  'party_name', 'party_number', 'channel', 'my_number'];
+  'party_name', 'party_number', 'channel', 'my_number', 'traffic_type'];
 
 // 「历史上的今日」模式（下拉选项第二段 → mode）
 const COMM_OTD_MODE_LABELS = {
@@ -17058,8 +17237,140 @@ function _commFieldSpecs(type, preset) {
       F('fields', '返回字段 fields（点选需要的列）'),
     ]);
   }
+  if (type === 'chat') {
+    // 聊天记录：对端必填；时间给「起止」为主（支持到时分秒），month 是省事的备选
+    if (preset === 'detail') {
+      // 只要逐条聊天内容：mode 固定 detail（响应里没有 by_* 汇总块，rows 就是本体）
+      return [
+        S('mode', '返回模式 mode（本入口固定 detail）', ['detail'], 'detail'),
+        P('party_numbers', '对方号码 party_numbers（逗号分隔多值）', '13800000000'),
+        P('party_names', '对方姓名 party_names（逗号分隔，模糊匹配）', '张三'),
+        P('start', '开始时间 start（可到时分秒）', '2025-09-01 00:00:00'),
+        P('end', '结束时间 end（**包含** · 可到时分秒）', '2025-09-30 23:59:59'),
+        M('month', '指定年月 month（不想写起止时间时用）'),
+        P('channels', '渠道 channels（逗号分隔）', '微信,短信'),
+        P('msg_types', '消息类型 msg_types（逗号分隔）', '发送,接收'),
+        P('keyword', '正文关键词 keyword', ''),
+        P('content_len', '正文截断长度 content_len', '0=不截断'),
+        S('empty_content', '内容为空的记录是否显示 empty_content（0 = 只留有正文的）', ['1', '0'], '1'),
+        S('order', '排序方向 order（asc=从上往下读）', ['asc', 'desc'], 'asc'),
+        P('limit', '条数 limit（0=不限）', '200', '200'),
+        P('offset', '偏移 offset', '0'),
+        F('fields', '返回字段 fields（点选需要的列）'),
+      ];
+    }
+    return [
+      S('mode', '返回模式 mode（detail = 只要逐条内容）', ['both', 'detail', 'summary'], 'both'),
+      P('party_numbers', '对方号码 party_numbers（逗号分隔多值）', '13800000000'),
+      P('party_names', '对方姓名 party_names（逗号分隔，模糊匹配）', '张三'),
+      P('start', '开始时间 start（可到时分秒）', '2025-09-01 00:00:00'),
+      P('end', '结束时间 end（**包含** · 可到时分秒）', '2025-09-30 23:59:59'),
+      M('month', '指定年月 month（不想写起止时间时用；优先级低于 start/end）'),
+      P('channels', '渠道 channels（逗号分隔）', '微信,短信,语音,流量'),
+      P('msg_types', '消息类型 msg_types（逗号分隔）', '发送,接收'),
+      P('keyword', '正文关键词 keyword', ''),
+      P('content_len', '正文截断长度 content_len', '0=不截断'),
+      S('empty_content', '内容为空的记录是否显示 empty_content（0 = 只留有正文的）', ['1', '0'], '1'),
+      S('order', '排序方向 order（asc=从上往下读）', ['asc', 'desc'], 'asc'),
+      P('limit', '条数 limit（0=不限）', '200', '200'),
+      P('offset', '偏移 offset', '0'),
+      F('fields', '返回字段 fields（点选需要的列）'),
+    ];
+  }
+  if (type === 'calendar') {
+    // 活跃日历：月份必填 + 对端；输出已经把缺的天补成 0
+    return [
+      M('month', '指定月份 month（必填，如 2025-09）'),
+      P('party_numbers', '对方号码 party_numbers（逗号分隔多值）', '13800000000'),
+      P('party_names', '对方姓名 party_names（逗号分隔，模糊匹配）', '张三'),
+      P('channels', '渠道 channels（逗号分隔）', '微信,短信,语音,流量'),
+      P('msg_types', '消息类型 msg_types（逗号分隔）', ''),
+      P('keyword', '正文关键词 keyword', ''),
+    ];
+  }
+  if (type === 'stale') {
+    // 失联名单：阈值天数 + 过滤掉"只出现一次的陌生号"
+    return [
+      P('days', '阈值天数 days（超过这么多天没联系）', '30', '30'),
+      P('min_count', '历史最少条数 min_count（滤掉只出现过一次的陌生号）', '1', '1'),
+      P('max_count', '历史最多条数 max_count（0=不限）', '0'),
+      S('by', '排序依据 by', ['days', 'count', 'duration'], 'days'),
+      P('limit', '条数 limit', '50', '50'),
+      P('offset', '偏移 offset', '0'),
+      P('party_numbers', '只看这些号码（逗号分隔，可留空）', ''),
+      P('my_numbers', '我方号码（逗号分隔多值）', ''),
+      P('channels', '渠道 channels（逗号分隔）', ''),
+    ];
+  }
+  if (type === 'duration_dist') {
+    return [
+      P('buckets', '分桶边界 buckets（逗号分隔的秒数）', '10,60,300,1800,7200'),
+      S('only_positive', '只统计 duration>0 的记录 only_positive', ['1', '0'], '1'),
+      D('date', '指定日期 date'),
+      M('month', '指定月份 month'),
+      P('year', '指定年份 year', '2026'),
+      P('start', '开始时间 start', ''),
+      P('end', '结束时间 end', ''),
+      P('party_numbers', '对方号码（逗号分隔多值）', ''),
+      P('party_names', '对方姓名（逗号分隔，模糊匹配）', ''),
+      P('my_numbers', '我方号码（逗号分隔多值）', ''),
+      P('channels', '渠道 channels（逗号分隔）', '语音'),
+      P('call_types', '呼叫类型（逗号分隔）', ''),
+    ];
+  }
+  if (type === 'new_peers') {
+    return [
+      P('start', '开始时间 start（**时间范围必填**）', '2025-09-01'),
+      P('end', '结束时间 end（包含）', '2025-09-30'),
+      M('month', '或直接给指定月份 month'),
+      P('year', '或指定年份 year', ''),
+      P('min_count', '最少条数 min_count', '1', '1'),
+      P('limit', '条数 limit', '100', '100'),
+      P('offset', '偏移 offset', '0'),
+      P('my_numbers', '我方号码（逗号分隔多值）', ''),
+      P('channels', '渠道 channels（逗号分隔）', ''),
+    ];
+  }
+  if (type === 'peak') {
+    return [
+      S('dim', '时间维度 dim', ['date', 'hour', 'weekday', 'month', 'year', 'day'], 'date'),
+      S('by', '排序依据 by', ['count', 'duration', 'cost', 'traffic_usage'], 'count'),
+      P('limit', '取前 N 条 limit', '10', '10'),
+      D('date', '限定日期 date'),
+      M('month', '限定月份 month'),
+      P('year', '限定年份 year', ''),
+      P('start', '开始时间 start', ''),
+      P('end', '结束时间 end', ''),
+      P('party_numbers', '对方号码（逗号分隔多值）', ''),
+      P('party_names', '对方姓名（逗号分隔，模糊匹配）', ''),
+      P('my_numbers', '我方号码（逗号分隔多值）', ''),
+      P('channels', '渠道 channels（逗号分隔）', ''),
+      P('msg_types', '消息类型（逗号分隔）', ''),
+    ];
+  }
   if (type === 'dates') {
     return common.concat([P('limit', '最大天数 limit', '400', '400')]);
+  }
+  if (type === 'months') {
+    // 哪些年月有数据：与 dates 同一套过滤条件，只是粒度从「日」换成「月」。
+    //   不给 fields（返回的是聚合结果，不是表里的列）
+    return common.concat([
+      S('order', '排序方向 order', ['asc', 'desc'], 'asc'),
+      P('limit', '最大月数 limit（0=不限）', '1200', '1200'),
+    ]);
+  }
+  if (type === 'geoflows') {
+    // 地点坐标流向：通用过滤全可用（channels / start / end / party_names / places …）
+    //   返回值与前端 `_commGeoGraph()` 同形，可直接喂给迁徙图
+    return common.concat([
+      P('md', '只要某个「月日」md（MM-DD，供「历史今日」那类视图给地图取数）', '10-03', ''),
+      P('min_count', '流向最少次数 min_count（滤掉只通了一次的噪音）', '1', '1'),
+      S('by', '排序依据 by', ['count', 'duration', 'cost', 'traffic_usage'], 'count'),
+      S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+      P('limit', '流向数上限 limit（0=不限）', '200', '200'),
+      P('nodes_limit', '地点数上限 nodes_limit（0=不限）', '0', '0'),
+      S('resolve', '缺坐标时用本地坐标表现算 resolve', ['1', '0'], '1'),
+    ]);
   }
   if (type === 'stats') {
     // 统计分析：过滤条件 + 粒度 + 汇总开关（granularity 默认值由预设决定）
@@ -17170,7 +17481,7 @@ function _commFieldSpecs(type, preset) {
       return otdCommon.concat([
         P('rows', '行维度 rows（1~3 个，逗号分隔）', 'msg_type'),
         P('cols', '列维度 cols（0~1 个，留空 = 只看行合计）', 'party_name'),
-        S('metric', '测度 metric', ['count', 'duration', 'cost'], 'count'),
+        S('metric', '测度 metric', ['count', 'duration', 'cost', 'traffic_usage'], 'count'),
         P('limit', '最大行数 limit', '30', '30'),
         P('col_limit', '最大列数 col_limit', '20', '20'),
       ]);
@@ -17192,7 +17503,7 @@ function _commFieldSpecs(type, preset) {
       P('end', '结束时间 end', '2026-09-30'),
       P('rows', '行维度 rows（1~3 个，逗号分隔）', 'msg_type'),
       P('cols', '列维度 cols（0~1 个，留空 = 只看行合计）', 'party_name'),
-      S('metric', '测度 metric', ['count', 'duration', 'cost'], 'count'),
+      S('metric', '测度 metric', ['count', 'duration', 'cost', 'traffic_usage'], 'count'),
       P('party_numbers', '对方号码（逗号分隔多值）', ''),
       P('party_names', '对方姓名（逗号分隔，模糊匹配）', ''),
       P('my_numbers', '我方号码（逗号分隔多值）', ''),
@@ -17207,6 +17518,29 @@ function _commFieldSpecs(type, preset) {
     ];
   }
   if (type === 'compare') {
+    if (preset === 'range') {
+      // 任意两区间对比：不走「当前周期」，直接给 A / B 两段。
+      //   compare 字段必须在参数里显式带上（下拉选项带不了请求参数），所以这里放一个
+      //   只有 range 一项的下拉 —— 它同时起到"告诉用户当前是哪种模式"的作用
+      return [
+        S('compare', '对比模式 compare（本入口固定 range）', ['range'], 'range'),
+        P('a_start', '区间 A · 开始 a_start', '2023-09-01'),
+        P('a_end', '区间 A · 结束 a_end（**包含**）', '2023-09-30'),
+        P('b_start', '区间 B · 开始 b_start（作为基准）', '2025-09-01'),
+        P('b_end', '区间 B · 结束 b_end（**包含**）', '2025-09-30'),
+        P('party_numbers', '对方号码（逗号分隔多值）', ''),
+        P('party_names', '对方姓名（逗号分隔，模糊匹配）', ''),
+        P('my_numbers', '我方号码（逗号分隔多值）', ''),
+        P('places', '通讯地点（逗号分隔，模糊匹配）', ''),
+        P('party_places', '归属地（逗号分隔，模糊匹配）', ''),
+        P('channels', '数据来源（逗号分隔）', ''),
+        P('msg_types', '消息类型（逗号分隔）', ''),
+        P('call_types', '呼叫类型（逗号分隔）', ''),
+        P('keyword', '消息内容关键词 keyword', ''),
+        P('min_duration', '最小时长（秒）', ''),
+        P('min_cost', '最小金额（元）', ''),
+      ];
+    }
     return [
       D('date', '基准日 date（决定「当前周期」，留空 = 今天）'),
       S('period', '对比周期 period', ['day', 'week', 'month', 'quarter', 'year'], 'month'),
@@ -17357,12 +17691,49 @@ function onCommModeChange(sel) {
 const COMM_BACKFILL_API = '/api/ha_data_store/comm/backfill';
 let commBackfillBusy = false;
 
+// 通讯列名 → 中文标签（用于提示文案）。延迟查找，避开常量初始化顺序。
+function _commColLabel(col) {
+  try {
+    const d = COMM_FIELD_DEFS.find(x => x[0] === col);
+    return d ? d[1] : col;
+  } catch (e) { return col; }
+}
+
+// 当前选择的数据类型（留空 = 后端自动探测 mode=comm 且表已存在的那个）
+function _commBackfillType() {
+  const sel = document.getElementById('commBackfillType');
+  return sel ? String(sel.value || '').trim() : '';
+}
+
+// 填充「数据类型」下拉：只列通讯（comm）模式的类型
+async function loadBackfillTypes() {
+  const sel = document.getElementById('commBackfillType');
+  if (!sel) return;
+  const cur = sel.value || '';
+  sel.innerHTML = '<option value="">（自动探测）</option>';
+  try {
+    const resp = await fetch(ATTR_TYPES_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    (json.data || [])
+      .filter(t => String(t.mode || '') === 'comm')
+      .forEach(t => {
+        const v = String(t.type_name || '');
+        if (!v) return;
+        sel.innerHTML += '<option value="' + escAttr(v) + '"'
+          + (v === cur ? ' selected' : '') + '>' + escHtml(v) + '</option>';
+      });
+    if (cur) sel.value = cur;
+  } catch (e) { /* 读不到时保留「自动探测」即可 */ }
+}
+
 async function loadCommBackfillStatus() {
   const box = document.getElementById('commBackfillStatus');
   if (!box) return;
   box.textContent = '正在读取归属地库状态…';
   try {
-    const resp = await fetch(COMM_BACKFILL_API, { credentials: 'same-origin' });
+    const _tn = _commBackfillType();
+    const resp = await fetch(COMM_BACKFILL_API
+      + (_tn ? '?type_name=' + encodeURIComponent(_tn) : ''), { credentials: 'same-origin' });
     const json = await resp.json();
     if (!json.success) {
       box.innerHTML = '⚠ ' + escHtml(json.error || '读取失败');
@@ -17382,7 +17753,15 @@ async function loadCommBackfillStatus() {
       const blankText = Object.keys(blanks).map(k => k + ' ' + blanks[k]).join('、');
       parts.push('表 <code>' + escHtml(t.table || '') + '</code> 共 ' + (t.total || 0)
         + ' 行，待回填 <b>' + (t.pending || 0) + '</b> 行'
-        + (blankText ? '（' + escHtml(blankText) + '）' : ''));
+        // 各字段待填数字较长，折叠起来，需要时再展开
+        + (blankText
+            ? '<details style="display:inline-block;vertical-align:top">'
+              + '<summary style="cursor:pointer;color:var(--accent)">各字段待填</summary>'
+              + '<div style="margin-top:2px">' + escHtml(blankText) + '</div></details>'
+            : ''));
+      const cTotal = t.contacts_total || 0;
+      parts.push('通讯录 <b>' + cTotal + '</b> 人'
+        + (cTotal ? '' : '（点「👥 通讯录」导入，才能回填「对方姓名」）'));
     } else {
       parts.push('<span style="color:#e67e22">⚠ ' + escHtml(t.error || '通讯表不可用') + '</span>');
     }
@@ -17392,8 +17771,13 @@ async function loadCommBackfillStatus() {
   }
 }
 
-async function runCommBackfill(dry) {
+// columns: 只回填指定列（如 ['party_name'] = 「按通讯录回填姓名」）；省略 = 全部
+async function runCommBackfill(dry, columns) {
   if (commBackfillBusy) return;
+  const onlyCols = Array.isArray(columns) ? columns : null;
+  const what = onlyCols
+    ? '「' + onlyCols.map(_commColLabel).join('、') + '」'
+    : '「归属地 / 运营商 / 姓名 / 坐标」';
   const box = document.getElementById('commBackfillStatus');
   const overwriteEl = document.getElementById('commBackfillOverwrite');
   const limitEl = document.getElementById('commBackfillLimit');
@@ -17401,8 +17785,10 @@ async function runCommBackfill(dry) {
   const onlyEmpty = !(overwriteEl && overwriteEl.checked);
   if (!dry && onlyEmpty) {
     const hinted = box ? (box.textContent || '').trim() : '';
-    if (!confirm('将用本地归属地库补全通讯表中的空字段（不覆盖已有内容、不联网）。\n\n'
-      + hinted + '\n\n继续？')) return;
+    if (!confirm('将回填' + what + '的空值（' + (onlyCols
+      ? '号码取自本地通讯录、不联网'
+      : '数据取自本地归属地库 / 坐标表 / 你的通讯录，不联网')
+      + '，不覆盖已有内容）。\n\n' + hinted + '\n\n继续？')) return;
   }
   commBackfillBusy = true;
   if (box) box.innerHTML = dry ? '🧪 正在预览…' : '⏳ 正在回填…';
@@ -17411,7 +17797,11 @@ async function runCommBackfill(dry) {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dry_run: dry, only_empty: onlyEmpty, limit }),
+      body: JSON.stringify({
+        type_name: _commBackfillType(),
+        dry_run: dry, only_empty: onlyEmpty, limit,
+        columns: onlyCols,
+      }),
     });
     const json = await resp.json();
     if (!json.success) {
@@ -17423,12 +17813,17 @@ async function runCommBackfill(dry) {
     const detail = Object.keys(filled).length
       ? Object.keys(filled).map(k => k + ' +' + filled[k]).join('、')
       : '无字段变化';
-    const summary = (dry ? '🧪 预览：' : '✅ 完成：')
+    const summary = (dry ? '🧪 预览' : '✅ 完成') + '（' + what + '）：'
       + '扫描 ' + (json.scanned || 0) + ' 行，'
       + (dry ? '将更新 ' : '更新 ') + (json.updated || 0) + ' 行（' + detail + '）'
       + (json.no_region ? '，号码查不到归属地 ' + json.no_region + ' 条' : '')
       + (json.no_coord ? '，地名查不到坐标 ' + json.no_coord + ' 次' : '')
-      + (json.coords_ready === false ? '（坐标表不可用，已跳过坐标）' : '');
+      + (json.no_contact ? '，通讯录里没有 ' + json.no_contact + ' 个号码'
+          + ((json.missed_numbers || []).length
+              ? '（如 ' + json.missed_numbers.slice(0, 5).join('、') + '）' : '') : '')
+      + (json.region_ready === false ? '（归属地库不可用，未补归属地）' : '')
+      + (json.coords_ready === false ? '（坐标表不可用，已跳过坐标）' : '')
+      + (json.dry_run ? '' : '。新采集的数据已自动回填，这里补的是历史数据。');
     if (box) box.innerHTML = summary;
     showToast(summary, true);
     if (!dry) loadCommBackfillStatus();
@@ -17440,11 +17835,144 @@ async function runCommBackfill(dry) {
   }
 }
 
+// ---------- 通讯录（号码 → 姓名）----------
+//   姓名无法从任何内置库推出来，只能由用户导入；存进 comm_contacts 表。
+//   采集时自动用它回填 party_name，历史数据用「📇 自动填写」补。
+const COMM_CONTACTS_API = '/api/ha_data_store/comm/contacts';
+
+function openCommContacts() {
+  const box = document.getElementById('commContactsBox');
+  if (!box) return;
+  // 再点一次收起（避免「点开就摊一大片」的观感）
+  if (box.style.display === 'block') {
+    box.style.display = 'none';
+    return;
+  }
+  box.style.display = 'block';
+  refreshCommContacts();
+  box.scrollIntoView({ block: 'nearest' });
+}
+
+async function refreshCommContacts() {
+  const box = document.getElementById('commContactsStatus');
+  if (box) box.textContent = '正在读取通讯录…';
+  try {
+    const resp = await fetch(COMM_CONTACTS_API, { credentials: 'same-origin' });
+    const json = await resp.json();
+    if (!json.success) {
+      if (box) box.innerHTML = '⚠ ' + escHtml(json.error || '读取失败');
+      return;
+    }
+    const total = json.total || 0;
+    const samples = json.samples || [];
+    const fmt = s => escHtml(s.number) + ' → ' + escHtml(s.name);
+    if (box) {
+      let h = '当前共 <b>' + total + '</b> 人';
+      if (total) {
+        // 只铺 5 条，其余折叠 —— 20 条全铺出来会把面板撑得很长
+        h += '。最近导入：' + samples.slice(0, 5).map(fmt).join('、');
+        if (samples.length > 5) {
+          h += '<details style="margin-top:4px">'
+            + '<summary style="cursor:pointer;color:var(--accent)">展开其余 '
+            + (samples.length - 5) + ' 条</summary>'
+            + '<div style="margin-top:4px">' + samples.slice(5).map(fmt).join('、') + '</div>'
+            + '</details>';
+        }
+        h += '<div class="hint" style="margin-top:4px">姓名回填对<b>新采集</b>的数据自动生效；'
+          + '历史数据请点上方「📇 自动填写」补一次。</div>';
+      } else {
+        h += '（尚未导入）';
+      }
+      box.innerHTML = h;
+    }
+  } catch (err) {
+    if (box) box.innerHTML = '⚠ 读取失败: ' + escHtml(String(err));
+  }
+}
+
+function onCommContactsFile(input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const ta = document.getElementById('commContactsText');
+    if (ta) ta.value = String(reader.result || '');
+    showToast('已读入 ' + file.name + '（' + Math.round(file.size / 1024)
+      + ' KB），确认后点「📥 导入」', true);
+  };
+  reader.onerror = () => showToast('读取文件失败', false);
+  reader.readAsText(file, 'utf-8');
+}
+
+async function importCommContacts() {
+  const ta = document.getElementById('commContactsText');
+  const box = document.getElementById('commContactsStatus');
+  const text = ta ? (ta.value || '') : '';
+  if (!text.trim()) { showToast('请先粘贴内容或选择文件', false); return; }
+  const replaceEl = document.getElementById('commContactsReplace');
+  const replaceMode = !!(replaceEl && replaceEl.checked);
+  if (replaceMode && !confirm('「先清空再导入」会删除现有全部通讯录，确定？')) return;
+  if (box) box.textContent = '⏳ 正在导入…';
+  try {
+    const resp = await fetch(COMM_CONTACTS_API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'import', text: text, mode: replaceMode ? 'replace' : 'merge',
+      }),
+    });
+    const json = await resp.json();
+    if (!json.success) {
+      if (box) box.innerHTML = '⚠ ' + escHtml(json.error || '导入失败');
+      showToast('导入失败: ' + (json.error || ''), false);
+      return;
+    }
+    const warns = json.warnings || [];
+    const msg = '✅ 导入完成：新增 ' + (json.inserted || 0) + '、更新 ' + (json.updated || 0)
+      + '，当前共 ' + (json.total || 0) + ' 人'
+      + (warns.length ? '（' + warns.join('；') + '）' : '');
+    if (box) box.textContent = msg;
+    showToast(msg, true);
+    refreshCommContacts();
+    loadCommBackfillStatus();
+  } catch (err) {
+    if (box) box.innerHTML = '⚠ 导入失败: ' + escHtml(String(err));
+    showToast('导入失败: ' + err, false);
+  }
+}
+
+async function clearCommContacts() {
+  if (!confirm('确定清空全部通讯录？此操作不可恢复。')) return;
+  try {
+    const resp = await fetch(COMM_CONTACTS_API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'clear' }),
+    });
+    const json = await resp.json();
+    if (!json.success) { showToast('清空失败: ' + (json.error || ''), false); return; }
+    showToast('已清空通讯录（删除 ' + (json.deleted || 0) + ' 条）', true);
+    const ta = document.getElementById('commContactsText');
+    if (ta) ta.value = '';
+    refreshCommContacts();
+    loadCommBackfillStatus();
+  } catch (err) {
+    showToast('清空失败: ' + err, false);
+  }
+}
+
 function renderCommHint(type, preset) {
   const el = document.getElementById('apiCommHint');
   if (!el) return;
   const isOtd = (type === 'onthisday');
-  let html = (isOtd ? '📜 <b>历史上的今日</b>：' : '📞 <b>通讯数据查询</b>：')
+  // 接口版本：这里是**期望值**，与 comm.py 的 COMM_API_VERSION 对应。
+  //   comm 的每个响应里都带 api_version —— 调一次就能核对服务端跑的是不是最新那份
+  const verTip = '🔖 接口版本 <b>comm v' + escHtml(COMM_VIEWER_EXPECTED_VERSION)
+    + '</b>（响应里的 <code>api_version</code> 应与之一致；不一致多半是改完接口后没重启 Home Assistant）';
+  let html = verTip + '<br>'
+    + (isOtd ? '📜 <b>历史上的今日</b>：' : '📞 <b>通讯数据查询</b>：')
     + escHtml(COMM_TYPE_HINTS[type] || '');
   if (type === 'stats') {
     if (preset && COMM_STATS_PRESET_HINTS[preset]) {

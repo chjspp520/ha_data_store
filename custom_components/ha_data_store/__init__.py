@@ -415,6 +415,7 @@ def _init_database(db_path: str) -> None:
                 key_field        TEXT NOT NULL DEFAULT '',
                 compare_limit    INTEGER NOT NULL DEFAULT 0,
                 decimal_places   INTEGER NOT NULL DEFAULT -2,
+                autofill         INTEGER NOT NULL DEFAULT 1,
                 created_at       TEXT NOT NULL DEFAULT '',
                 updated_at       TEXT NOT NULL DEFAULT '',
                 UNIQUE(entity_id, attr_type)
@@ -965,6 +966,7 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 "key_field TEXT NOT NULL DEFAULT ''",
                 "compare_limit INTEGER NOT NULL DEFAULT 0",
                 "decimal_places INTEGER NOT NULL DEFAULT -2",
+                "autofill INTEGER NOT NULL DEFAULT 1",
                 "created_at TEXT NOT NULL DEFAULT ''",
                 "updated_at TEXT NOT NULL DEFAULT ''",
                 "UNIQUE(entity_id, attr_type)",
@@ -984,7 +986,7 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                           "device_name", "room", "attr_type", "collect_mode",
                           "field_mapping", "field_types", "array_path",
                           "key_field", "compare_limit", "decimal_places",
-                          "created_at", "updated_at"]:
+                          "autofill", "created_at", "updated_at"]:
                     copy_cols.append(c)
 
             col_str = ", ".join(copy_cols)
@@ -1064,6 +1066,8 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
             # 数值类用哨兵默认值表示「未设置」（0 对 decimal_places 是合法值，故用 -2）
             ("compare_limit", "INTEGER NOT NULL DEFAULT 0"),
             ("decimal_places", "INTEGER NOT NULL DEFAULT -2"),
+            # 实体级「自动回填」开关：1=采集时自动补归属地/运营商/姓名/坐标，0=不补
+            ("autofill", "INTEGER NOT NULL DEFAULT 1"),
         ):
             if _col not in ec_columns:
                 conn.execute(
@@ -1357,6 +1361,13 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
                 _LOGGER.info("[HDS] %s 已同步内置指标 %d 条", TABLE_METRICS_CATALOG, added)
         except Exception as exc:
             _LOGGER.warning("[HDS] 指标目录初始化失败（不影响主流程）: %s", exc)
+        # 18) 通讯录（号码 → 姓名）：用户自行导入，供通讯记录回填 party_name
+        #     与归属地/坐标不同，姓名无法从任何内置库推出，只能用户提供。
+        try:
+            from . import comm_contacts
+            comm_contacts.ensure_table(conn)
+        except Exception as exc:
+            _LOGGER.warning("[HDS] 通讯录表初始化失败（不影响主流程）: %s", exc)
         # 迁移旧表：补缺失列、补 token、修复 url 约束
         try:
             pt_columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_PUSH_TARGETS})")]
@@ -3084,6 +3095,10 @@ def _merge_entity_mapping(row: dict[str, Any], mode: str = "") -> dict[str, Any]
     elif preset.get("key_field"):
         row["key_field"] = preset["key_field"]
 
+    # 实体级「自动回填」开关：默认开（列缺失 / 未设置时按 1 处理）
+    _af = row.pop("ec_autofill", 1)
+    row["autofill"] = 0 if str(_af) in ("0", "False", "false") else 1
+
     # 数值项：用哨兵值表示「未设置」—— compare_limit 用 <=0、decimal_places 用 <-1
     # （decimal_places 的 -1 是合法值「不限小数位」，0~6 也是合法值，故哨兵取 -2）
     try:
@@ -3403,6 +3418,35 @@ def _attr_collect_for_entity(db_path: str, entity_id: str, cfg: dict, state_obj,
             # 后续采集：表中已有数据，INSERT/UPDATE随行写入独立列
             is_first_collect = len(lookup) == 0
 
+            # 通讯模式：准备本地自动回填器（号码→归属地/运营商/姓名，地名→坐标），
+            # 让**新进来**的数据在写入前就补齐，用户不必事后再点「自动填写」。
+            # 三个数据源都带缓存，只在本次采集开始时各读一次。
+            comm_filler = None
+            # 实体级开关：`autofill=0` 时完全跳过自动回填（默认开）
+            if mode == ATTR_MODE_COMM and int(cfg.get("autofill", 1) or 0):
+                try:
+                    from . import comm_backfill as _cb
+
+                    _tbl_cols = {
+                        _r[1] for _r in conn.execute(f'PRAGMA table_info("{tbl}")')
+                    }
+                    comm_filler = _cb.build_filler(
+                        db_path, only_empty=True, table_cols=_tbl_cols
+                    )
+                    if local_logger:
+                        # 用 info：排查「为什么没补上姓名 / 归属地」时这是第一手线索
+                        local_logger.info(
+                            "[attr] 通讯自动回填已启用 entity_id=%s 归属地=%s 坐标=%s 通讯录=%d 条",
+                            entity_id,
+                            "有" if comm_filler.index is not None else "无",
+                            "有" if comm_filler.coords_ready else "无",
+                            len(comm_filler.contacts),
+                        )
+                except Exception as _exc:  # noqa: BLE001 - 回填不可用不应影响采集
+                    if local_logger:
+                        local_logger.warning("[attr] 通讯自动回填不可用: %s", _exc)
+                    comm_filler = None
+
             # 遍历数组元素
             # 独立列规则：首次采集只写最新行；后续采集只随新插入行写入，UPDATE已存在行时排除独立列
             # JSON规则：永远只写最新行
@@ -3427,6 +3471,11 @@ def _attr_collect_for_entity(db_path: str, entity_id: str, cfg: dict, state_obj,
                     row_data[target_col] = _resolve_field_value(element, src_field)
                 if mode == ATTR_MODE_COMM:
                     _normalize_comm_row(row_data)
+                    # 本地自动回填：只填空值，不动源数据已经给出的内容。
+                    # 与「📇 自动填写」按钮走的是同一份判定逻辑（comm_backfill.CommFiller），
+                    # 区别只是时机——这里在**写入前**，所以新数据一进来就是全的。
+                    if comm_filler is not None:
+                        row_data.update(comm_filler.fill(row_data))
                 _apply_decimal_places(row_data, decimal_places)
 
                 is_new_row = key_str not in lookup
@@ -3684,6 +3733,7 @@ def _get_all_attr_entities(db_path: str, collect_mode: str | None = None) -> lis
             f"  ec.field_mapping AS ec_field_mapping, ec.field_types AS ec_field_types, "
             f"  ec.array_path AS ec_array_path, ec.key_field AS ec_key_field, "
             f"  ec.compare_limit AS ec_compare_limit, ec.decimal_places AS ec_decimal_places, "
+            f"  ec.autofill AS ec_autofill, "
             f"  atd.mode, atd.array_path, atd.key_field, atd.compare_limit, atd.field_mapping, "
             f"  atd.field_types, atd.decimal_places, atd.extra_fields, atd.extra_json_nodes "
             f"FROM {TABLE_ENTITY_CONFIGS} ec "
@@ -3952,6 +4002,8 @@ async def _async_attr_event(hass: HomeAssistant, db_path: str, entity_id: str,
                            if info.get("decimal_places") is not None
                            and int(info.get("decimal_places")) >= -1
                            else None),
+        # 实体级「自动回填」开关（默认开）
+        "autofill": int(info.get("autofill", 1) or 0),
         # 实体级映射优先 → 内置预设 → 类型级
         "field_mapping": (str(info.get("field_mapping") or "").strip()
                           or (json.dumps(_pfm, ensure_ascii=False) if _pfm else "")
