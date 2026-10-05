@@ -4411,6 +4411,14 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_device_user_by_month, db_path, request)
             elif query_type == "device_user_month_dates":
                 result = await self._exec_in_executor(hass, self._query_device_user_month_dates, db_path, request)
+            elif query_type == "device_data_periods":
+                # 设备类：指定/多个/全部实体「有数据」的年 / 年月 / 年月日
+                result = await self._exec_in_executor(
+                    hass, self._query_device_data_periods, db_path, request)
+            elif query_type == "env_data_periods":
+                # 环境类：指定/多个/全部类型「有数据」的年 / 年月 / 年月日
+                result = await self._exec_in_executor(
+                    hass, self._query_env_data_periods, db_path, request)
             elif query_type == "env_history":
                 result = await self._exec_in_executor(hass, self._query_env_history, db_path, request)
             elif query_type == "env_latest":
@@ -5905,6 +5913,163 @@ class QueryView(_BaseDBView):
             return {"entities": rows}
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  数据可用性：有数据的 年 / 年月 / 年月日                               #
+    #    设备类 device_data_periods：按 entity_id（可用逗号指定多个 / 留空=全部）
+    #    环境类 env_data_periods   ：按 metric（可用逗号指定多个 / 留空=全部类型）
+    #  两者共用同一实现，只是数据源不同。                                    #
+    # ------------------------------------------------------------------ #
+    # 各表候选时间列（按优先级），与既有的 date_field 自动检测口径一致
+    _PERIOD_FIELDS = ("on_time", "datetime", "time", "date")
+
+    @staticmethod
+    def _sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+        return bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+        )
+
+    def _period_field(self, conn: sqlite3.Connection, table: str) -> str:
+        """挑出该表用于日期切分的列；找不到返回空串。
+
+        设备类历史用 `on_time`，环境/属性类用 `datetime` —— 与
+        `entity_data_dates` 的自动检测保持一致。
+        """
+        try:
+            cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
+        except sqlite3.OperationalError:
+            return ""
+        for name in self._PERIOD_FIELDS:
+            if name in cols:
+                return name
+        return ""
+
+    def _query_data_periods(
+        self, db_path: str, request: web.Request, kind: str = "device"
+    ) -> dict:
+        """返回「有数据的 年 / 年月 / 年月日」清单。
+
+        公共参数：
+
+        - `level`：`year`（默认）/ `month` / `day` —— 决定切分粒度
+        - `year`：`level=month` 时可选，只看该年
+        - `month`：`level=day` 时可选，只看该月
+
+        按 kind 区分的参数：
+
+        - `kind="device"`（type=device_data_periods）：`entity_id` 可逗号指定多个，
+          留空 = **全部实体**；数据源 `device_history`
+        - `kind="env"`（type=env_data_periods）：`metric` 可逗号指定多个，
+          留空 = **全部类型**（VALID_METRICS）；数据源 `env_<metric>` 各表，结果**跨表合并**
+
+        返回体按 level 给出 `years` / `months` / `dates`，每项含 `value` 与 `count`
+        （该桶内的数据条数），另附 `total`（总条数）与 `bucket_count`（桶个数）。
+        """
+        params = self._extract_params(request)
+        level = (request.query.get("level") or "year").strip().lower()
+        if level not in ("year", "month", "day"):
+            level = "year"
+        year = params["year"]
+        month = params["month"]
+
+        # ── 数据源：目标表清单 + 附加过滤 ──
+        if kind == "env":
+            raw_metric = params["metric"]
+            metrics = [m.strip() for m in raw_metric.split(",") if m.strip()]
+            if not metrics:
+                metrics = list(VALID_METRICS)          # 留空 = 全部类型
+            invalid = [m for m in metrics if m not in VALID_METRICS]
+            if invalid:
+                raise ValueError(
+                    f"无效的 metric: {', '.join(invalid)}，可选: {', '.join(VALID_METRICS)}"
+                )
+            targets = [(m, get_env_table_name(m)) for m in metrics]
+        else:
+            targets = [("", TABLE_DEVICE_HISTORY)]
+
+        raw_eid = params["entity_id"]
+        entity_ids = [e.strip() for e in raw_eid.split(",") if e.strip()]
+
+        cut = {"year": 4, "month": 7, "day": 10}[level]
+        buckets: Dict[str, int] = {}
+        used_tables: list[str] = []
+        skipped_tables: list[str] = []
+
+        conn = sqlite3.connect(db_path)
+        try:
+            for _label, table in targets:
+                if not self._sqlite_table_exists(conn, table):
+                    skipped_tables.append(table)
+                    continue
+                field = self._period_field(conn, table)
+                if not field:
+                    skipped_tables.append(table)
+                    continue
+
+                conditions = [f"{field} IS NOT NULL", f"TRIM(CAST({field} AS TEXT)) <> ''"]
+                args: list = []
+                if entity_ids:
+                    conditions.append(
+                        "entity_id IN (" + ",".join("?" for _ in entity_ids) + ")"
+                    )
+                    args.extend(entity_ids)
+                # year 只在「按年收窄」时有意义；level=month/day 都可叠加
+                if year and level in ("month", "day"):
+                    conditions.append(f"{field} LIKE ?")
+                    args.append(f"{year}-%")
+                if month and level == "day":
+                    conditions.append(f"{field} LIKE ?")
+                    args.append(f"{month}-%")
+
+                sql = (
+                    f'SELECT substr(CAST({field} AS TEXT), 1, {cut}) AS bucket, '
+                    f"COUNT(*) AS n FROM \"{table}\" "
+                    f"WHERE {' AND '.join(conditions)} "
+                    f"GROUP BY bucket ORDER BY bucket"
+                )
+                try:
+                    rows = conn.execute(sql, args).fetchall()
+                except sqlite3.OperationalError:
+                    skipped_tables.append(table)
+                    continue
+                for bucket, n in rows:
+                    key = str(bucket or "")
+                    if key:
+                        buckets[key] = buckets.get(key, 0) + int(n or 0)
+                used_tables.append(table)
+        finally:
+            conn.close()
+
+        items = [{"value": k, "count": v} for k, v in sorted(buckets.items())]
+        out: dict = {
+            "level": level,
+            "kind": kind,
+            "entity_ids": entity_ids,
+            "tables": used_tables,
+            "total": sum(buckets.values()),
+            "bucket_count": len(items),
+        }
+        if skipped_tables:
+            out["skipped_tables"] = skipped_tables
+        if kind == "env":
+            out["metrics"] = metrics
+        if level == "year":
+            out["years"] = items
+        elif level == "month":
+            out["year"] = year
+            out["months"] = items
+        else:
+            out["month"] = month
+            out["dates"] = items
+        return out
+
+    def _query_device_data_periods(self, db_path: str, request: web.Request) -> dict:
+        return self._query_data_periods(db_path, request, kind="device")
+
+    def _query_env_data_periods(self, db_path: str, request: web.Request) -> dict:
+        return self._query_data_periods(db_path, request, kind="env")
 
     # ------------------------------------------------------------------ #
     #  entity_data_dates：查询指定实体某月哪些日期有数据                       #

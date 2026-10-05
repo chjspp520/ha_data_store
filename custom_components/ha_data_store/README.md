@@ -2026,6 +2026,86 @@ curl -X POST /api/ha_data_store/apikey/settings \
 
 ## 更新日志
 
+### v4.17.1 「📅 数据可用性」分组提到查询类型下拉最前面（2026-10-04）
+
+v4.17.0 把它放在「按日汇总」和「聚合查询」之间（下拉共 27 个分组里的第 8 个），
+夹在中间确实不好找。
+
+现在移到**第 1 个**，打开下拉第一眼就能看到：
+
+```
+1. 📅 数据可用性（有数据的年/年月/年月日）   ← 这里
+   📡 设备类：指定/多个/全部实体 有数据的年·年月·年月日
+   🌡️ 传感器类：指定/多个/全部类型 有数据的年·年月·年月日
+2. 设备类
+3. 家庭洞察
+...
+```
+
+> 版本号 → `4.17.1`。前端改动，**硬刷新页面**（Ctrl+F5）即可。
+
+### v4.17.0 新增「数据可用性」接口：有数据的 年 / 年月 / 年月日（2026-10-03）
+
+用于回答「**哪些时间段有数据**」—— 典型场景是给日期选择器/日历做准备，
+或排查"某个实体某段时间是不是没采到"。
+
+**两个新查询类型**（`/api/ha_data_store/query`）：
+
+| type | 范围 | 按什么筛选 |
+|---|---|---|
+| `device_data_periods` | 设备类（`device_history`） | `entity_id` —— 单个 / **逗号多个** / **留空=全部实体** |
+| `env_data_periods` | 传感器类（`env_*` 各表） | `metric` —— 单个 / **逗号多个** / **留空=全部类型** |
+
+**公共参数**：
+
+- `level` = `year`（默认）/ `month` / `day` —— 决定返回哪一级
+- `year`：`level=month`/`day` 时可选，只看该年
+- `month`：`level=day` 时可选，只看该月
+
+**返回结构**（按 level 给出对应字段，每项含 `value` 与 `count`）：
+
+```json
+{
+  "level": "day", "kind": "device",
+  "entity_ids": ["switch.ac"], "tables": ["device_history"],
+  "total": 7, "bucket_count": 5,
+  "dates": [
+    {"value": "2026-02-01", "count": 2},
+    {"value": "2026-02-15", "count": 1}
+  ]
+}
+```
+
+`level=year` 时字段名是 `years`、`level=month` 是 `months`。
+
+**示例**：
+
+```
+# 全部设备有哪些年有数据
+?type=device_data_periods&level=year
+
+# switch.ac 与 switch.desk_lamp 在 2026 年有哪些月有数据
+?type=device_data_periods&level=month&year=2026&entity_id=switch.ac,switch.desk_lamp
+
+# 全部传感器类型在 2026-05 有哪些日期有数据（跨 env_* 各表合并）
+?type=env_data_periods&level=day&month=2026-05
+```
+
+**实现要点**：
+
+- 两个类型**共用一个实现**（`_query_data_periods`，靠 `kind` 区分数据源）
+- 日期列**自动检测**（`on_time` / `datetime` / `time` / `date` 依次尝试），
+  与既有 `entity_data_dates` 的口径一致
+- 空时间行会被忽略（`IS NOT NULL AND TRIM(...) <> ''`）
+- 环境类跨表合并计数；**表不存在**（如没启用 pm25）会跳过并在
+  `skipped_tables` 里列出，不算错误
+- 环境类的 `metric` 若含**无效值直接报错** —— 避免静默返回空结果，
+  让人误以为"就是没数据"
+- 前端：新增「📅 数据可用性」分组 + **数据粒度**下拉；选 `month`/`day` 时才出现
+  年 / 月输入框（不用记参数，选完自动生成 URL）
+
+> 版本号 → `4.17.0`。需重启 HA 生效。
+
 ### v4.16.7 新增「👥 按通讯录回填姓名」按钮（一键，无需输入）（2026-10-03）
 
 **问题**：「👥 通讯录」这个按钮点开是**导入面板**（让你粘贴 / 选文件），

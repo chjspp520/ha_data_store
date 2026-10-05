@@ -194,4 +194,4 @@ PUSH_CONTROL_SWITCH_KEY = "push_control_enabled"
 PUSH_CONTROL_DEFAULT_RATE_LIMIT = 60
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "4.16.7"
+VERSION = "4.17.1"

@@ -1,5 +1,112 @@
 # 更新日志
 
+## 2026-10-03 — v4.17.0 新增「数据可用性」接口：有数据的 年 / 年月 / 年月日
+
+> 用户要求：设备类增加一个 API，查询**指定实体/多实体/全部实体**有数据的
+> 年/年月/年月日；环境类增加一个，查询**指定类型/多类型/全部类型**有数据的 年/年月/年月日。
+
+### 一、两个新查询类型
+
+| type | 数据源 | 筛选维度 |
+|---|---|---|
+| `device_data_periods` | `device_history` | `entity_id` —— 单个 / 逗号多个 / **留空=全部实体** |
+| `env_data_periods` | `env_<metric>` 各表 | `metric` —— 单个 / 逗号多个 / **留空=全部类型** |
+
+公共参数：`level`（`year` 默认 / `month` / `day`）、`year`（可选，收窄到某年）、
+`month`（可选，收窄到某月）。
+
+### 二、后端实现（`http_api.py`）
+
+一个实现两用，靠 `kind` 区分数据源：
+
+```python
+def _query_data_periods(self, db_path, request, kind="device") -> dict:
+    if kind == "env":
+        metrics = [m.strip() for m in raw_metric.split(",") if m.strip()] or list(VALID_METRICS)
+        invalid = [m for m in metrics if m not in VALID_METRICS]
+        if invalid:
+            raise ValueError(...)          # 无效类型直接报错，避免"看起来没数据"
+        targets = [(m, get_env_table_name(m)) for m in metrics]
+    else:
+        targets = [("", TABLE_DEVICE_HISTORY)]
+```
+
+要点：
+
+- **日期列自动检测**：新增 `_period_field()`，按 `("on_time", "datetime", "time", "date")`
+  依次探测 —— 设备类命中 `on_time`，环境类命中 `datetime`，与既有
+  `entity_data_dates` 的口径一致
+- **切片长度即粒度**：`substr(field, 1, cut)`，`year→4` / `month→7` / `day→10`
+- **空时间行忽略**：`IS NOT NULL AND TRIM(CAST(field AS TEXT)) <> ''`
+- **环境类跨表合并**：各 metric 表分别 GROUP BY 再在 Python 里累加计数
+  （同一日期在温度与湿度各有一条时 `count` 为 2）
+- **缺表不算错**：没启用 pm25 时该表不存在 → 跳过并记入 `skipped_tables`
+- **无效 metric 报错**：而不是静默返回空结果
+
+分发注册（与既有类型并列）：
+
+```python
+elif query_type == "device_data_periods":
+    result = await self._exec_in_executor(hass, self._query_device_data_periods, db_path, request)
+elif query_type == "env_data_periods":
+    result = await self._exec_in_executor(hass, self._query_env_data_periods, db_path, request)
+```
+
+### 三、返回结构
+
+```json
+{
+  "level": "day", "kind": "device",
+  "entity_ids": ["switch.ac"], "tables": ["device_history"],
+  "total": 7, "bucket_count": 5,
+  "dates": [{"value": "2026-02-01", "count": 2}, {"value": "2026-02-15", "count": 1}]
+}
+```
+
+字段名随 level 变化：`years` / `months` / `dates`；环境类额外带 `metrics`。
+
+### 四、前端（`db_viewer.html`）
+
+- 新增分组「📅 数据可用性（有数据的年/年月/年月日）」+ 两个选项
+- 新增 **数据粒度** 下拉（`apiLevelRow` / `apiLevel`）
+- `onDataPeriodLevelChange()`：选 `month`/`day` 时才出现「年」输入框，
+  选 `day` 时才出现「月」输入框 —— 不用记参数
+- 显示控制分支：设备类显示实体输入（可逗号多选），环境类显示
+  「指标（可多选）」复选框；其余常规行（表名/房间/limit/日期模式…）全部隐藏
+- URL 生成：环境类的 `metric` 取自 **`#apiMetricsCbs`**（环境指标复选框），
+  而不是 `getSelectedApiTable()`（那是表名/属性类型）
+- 已加入 `apiHideAllParamRows()`，切走时不会残留
+- API 使用说明表补两行
+
+### 五、验证
+
+**后端约 40 项断言**（AST 抽函数 + mock self，用真实 SQLite 跑）：
+
+- 年 / 年月 / 年月日三级各测一遍，含**计数正确性**
+- 同一天多条合并计数（`2025-01-05` → 2）
+- 空时间行被忽略
+- 指定单个 / 逗号多个 / 不存在的实体
+- 环境类跨表合并（温度 + 湿度同日 → count 2）、单类型、
+  **缺失表进 `skipped_tables`**、`metrics` 回显全部类型
+- 无效 metric 报错且信息含提示
+- `level` 缺省为 `year`、非法值归一到 `year`
+- 源码接入：两个 type 分支、调用点、复用 `get_env_table_name` / `VALID_METRICS`、
+  时间列候选元组
+
+**前端约 30 项断言**：
+
+- 两个选项各出现一次、独立分组、粒度下拉三选项
+- `isDataPeriods` / `isDevicePeriods` 定义、显示分支、`apiLevelRow` 已加入隐藏清单
+- 环境类显示指标多选、设备类加载实体列表、**不再误调通用指标目录**
+- 粒度联动：`month`/`day` 显示年、仅 `day` 显示月、非本类型直接返回
+- URL 生成：环境类取 `#apiMetricsCbs`、**不再用 `getSelectedApiTable()`**、
+  带 `level`/`year`/`month`、分支有 `return`
+- 说明表两行、无重复 id、全部 `<script>` 语法通过
+
+> 版本号 → `4.17.0`。需重启 HA 生效。
+
+---
+
 ## 2026-10-03 — v4.16.8 第三页地图改用 `geoflows` + `geoflows` 支持 `md`
 
 > 用户实测："第三页的地图数据其实是不全的（全部数据 / 指定人或指定号码时尤其明显），

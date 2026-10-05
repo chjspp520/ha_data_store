@@ -2163,6 +2163,10 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div>
       <label>查询类型</label>
       <select id="apiQueryType" onchange="onApiTypeChange()">
+        <optgroup label="📅 数据可用性（有数据的年/年月/年月日）">
+          <option value="device_data_periods">📡 设备类：指定/多个/全部实体 有数据的年·年月·年月日</option>
+          <option value="env_data_periods">🌡️ 传感器类：指定/多个/全部类型 有数据的年·年月·年月日</option>
+        </optgroup>
         <optgroup label="设备类">
           <option value="device_history">设备开关记录</option>
           <option value="device_entities">🗂 设备实体清单（entity_id/name/room）</option>
@@ -2516,6 +2520,15 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="apiYearRow" style="display:none">
       <label>年份 (YYYY)</label>
       <input type="number" id="apiYear" min="2020" max="2099" placeholder="2026" onchange="generateApiUrl()">
+    </div>
+    <!-- 数据可用性查询（device_data_periods / env_data_periods）专用：粒度 -->
+    <div id="apiLevelRow" style="display:none">
+      <label>数据粒度</label>
+      <select id="apiLevel" onchange="onDataPeriodLevelChange()">
+        <option value="year">年 —— 有哪些「年」有数据</option>
+        <option value="month">年月 —— 有哪些「年月」有数据</option>
+        <option value="day">年月日 —— 有哪些「日期」有数据</option>
+      </select>
     </div>
     <div id="apiHourRow" style="display:none">
       <label>小时 (0-23)</label>
@@ -2993,6 +3006,8 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">rooms_multi_metric</td><td>多指标按日汇总 · date/metrics · 返回按房间×指标分组的温度/湿度等数据</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">vacuum_history</td><td>扫地机器人轨迹 · vacuum_id/date/limit · 返回坐标+状态序列</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entities</td><td>实体列表 · category/room</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">device_data_periods</td><td><b>设备类：有数据的 年 / 年月 / 年月日</b> · entity_id(可逗号多选，留空=全部实体)/level(year·month·day)/year(可选)/month(可选) · 返回 <code>years</code> / <code>months</code> / <code>dates</code>，每项含 value 与 count</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">env_data_periods</td><td><b>传感器类：有数据的 年 / 年月 / 年月日</b> · metric(可逗号多选，留空=全部类型)/entity_id(可选)/level/year/month · 跨 <code>env_*</code> 各表合并；无效 metric 会报错</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">entity_data_dates</td><td>设备有数据的月份查询 · entity_id/month/date_field · 返回指定月份哪些日期有数据</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">room_data_dates</td><td>房间指定月有数据日期 · room/month/category(可多选)/date_field · 返回该房间该月勾选类别哪些日期有数据</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">all_rooms_data_dates</td><td>全屋指定月有数据日期 · month/category(可多选)/date_field · 不按房间过滤，返回全屋该月勾选类别哪些日期有数据</td></tr>
@@ -13476,6 +13491,7 @@ function apiHideAllParamRows() {
     ['apiOffset', 1], ['apiOrderBy', 1], ['apiFields', 1], ['apiCategoryRow', 0],
     ['apiMetricsRow', 0], ['apiDateMode', 1], ['apiDateFieldRow', 0],
     ['apiDateSingle', 0], ['apiDateRange', 0], ['apiMonthRow', 0], ['apiYearRow', 0],
+    ['apiLevelRow', 0],
     ['apiHealthNameRow', 0], ['apiHealthTypeRow', 0], ['apiMediaUserRow', 0],
     ['apiMediaIdRow', 0], ['apiMediaNameRow', 0], ['apiDeviceUserNameRow', 0],
     ['apiDeviceUserDirRow', 0], ['apiCommRow', 0], ['apiOtdRow', 0],
@@ -13545,6 +13561,9 @@ function onApiTypeChange() {
   const isRoomsDaily = qt === 'rooms_daily';
   const isVacuumHistory = qt === 'vacuum_history';
   const isRoomsMultiMetric = qt === 'rooms_multi_metric';
+  // 数据可用性查询（设备类 / 环境类）：有数据的 年 / 年月 / 年月日
+  const isDataPeriods = qt === 'device_data_periods' || qt === 'env_data_periods';
+  const isDevicePeriods = qt === 'device_data_periods';
   const isEntityDataDates = qt === 'entity_data_dates';
   const isRoomDataDates = qt === 'room_data_dates';
   const isAllRoomsDataDates = qt === 'all_rooms_data_dates';
@@ -13788,6 +13807,29 @@ function onApiTypeChange() {
     document.getElementById('apiDateSingle').style.display = 'block';
     document.getElementById('apiCategoryRow').style.display = 'none';
     document.getElementById('apiMetricsRow').style.display = 'block';
+  } else if (isDataPeriods) {
+    // 数据可用性：设备类按实体（可逗号多选，留空=全部）；环境类按指标类型
+    document.getElementById('apiEntityId').parentNode.style.display = '';
+    document.getElementById('apiRoom').parentNode.style.display = 'none';
+    document.getElementById('apiTableRow').style.display = 'none';
+    document.getElementById('apiLimit').parentNode.style.display = 'none';
+    document.getElementById('apiOffset').parentNode.style.display = 'none';
+    document.getElementById('apiOrderBy').parentNode.style.display = 'none';
+    document.getElementById('apiFields').parentNode.style.display = 'none';
+    document.getElementById('apiDateMode').parentNode.style.display = 'none';
+    document.getElementById('apiDateSingle').style.display = 'none';
+    document.getElementById('apiDateRange').style.display = 'none';
+    document.getElementById('apiCategoryRow').style.display = 'none';
+    document.getElementById('apiDateFieldRow').style.display = 'none';
+    // 环境类显示「指标类型」多选；设备类隐藏
+    document.getElementById('apiMetricsRow').style.display = isDevicePeriods ? 'none' : 'block';
+    const lvRow = document.getElementById('apiLevelRow');
+    if (lvRow) lvRow.style.display = 'block';
+    // 从别的类型切回来时，实体列表可能还没加载（环境指标是静态复选框，无需加载）
+    if (isDevicePeriods && typeof loadApiEntitiesAndRooms === 'function') {
+      loadApiEntitiesAndRooms();
+    }
+    onDataPeriodLevelChange();
   } else if (isEntityDataDates) {
     document.getElementById('apiEntityId').parentNode.style.display = '';
     document.getElementById('apiRoom').parentNode.style.display = 'none';
@@ -15588,6 +15630,32 @@ function generateApiUrl() {
     document.getElementById('apiUrlOutput').value = url;
     return;
   }
+  // 数据可用性（有数据的 年 / 年月 / 年月日）：
+  //   设备类按实体（entity_id 可逗号多选，留空=全部）；环境类按指标类型（tables 即勾选的 metric）
+  else if (qt === 'device_data_periods' || qt === 'env_data_periods') {
+    if (qt === 'env_data_periods') {
+      // 环境指标取「指标（可多选）」复选框（apiMetricsCbs），不是表名复选框
+      const mCbs = document.querySelectorAll('#apiMetricsCbs input[type="checkbox"]:checked');
+      if (mCbs.length > 0) {
+        url += '&metric=' + encodeURIComponent(
+          Array.from(mCbs).map(cb => cb.value).join(','));
+      }
+    }
+    if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
+    const lvEl = document.getElementById('apiLevel');
+    const lv = (lvEl && lvEl.value) || 'year';
+    url += '&level=' + encodeURIComponent(lv);
+    if (lv !== 'year') {
+      const y = document.getElementById('apiYear').value;
+      if (y) url += '&year=' + encodeURIComponent(y);
+    }
+    if (lv === 'day') {
+      const m = document.getElementById('apiMonth').value;
+      if (m) url += '&month=' + encodeURIComponent(m);
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
   else if (qt.startsWith('env_')) { if (tables) url += '&metric=' + encodeURIComponent(tables); }
   if (entityId) url += '&entity_id=' + encodeURIComponent(entityId);
   if (dateMode === 'single') {
@@ -15606,6 +15674,25 @@ function generateApiUrl() {
   if (room) url += '&room=' + encodeURIComponent(room);
 
   document.getElementById('apiUrlOutput').value = url;
+}
+
+// 数据可用性查询：按「数据粒度」决定年 / 月过滤行是否出现，并刷新 URL
+//   year  → 两个都不需要
+//   month → 需要年（可选，用于收窄）
+//   day   → 需要年与月（可选）
+function onDataPeriodLevelChange() {
+  const qt = (document.getElementById('apiQueryType') || {}).value || '';
+  if (qt !== 'device_data_periods' && qt !== 'env_data_periods') return;
+  const lvEl = document.getElementById('apiLevel');
+  const lv = (lvEl && lvEl.value) || 'year';
+  const yRow = document.getElementById('apiYearRow');
+  const mEl = document.getElementById('apiMonth');
+  const mRow = document.getElementById('apiMonthRow');
+  if (yRow) yRow.style.display = (lv === 'month' || lv === 'day') ? 'block' : 'none';
+  if (mRow) mRow.style.display = (lv === 'day') ? 'block' : 'none';
+  // 只在 day 粒度才用得上「月」，其余情况自动收起输入提示
+  if (mEl) mEl.placeholder = (lv === 'day') ? '2026-10' : '';
+  generateApiUrl();
 }
 
 function toggleApiMetrics() {
