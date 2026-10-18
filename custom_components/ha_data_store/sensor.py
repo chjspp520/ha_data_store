@@ -18,8 +18,9 @@ from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
     TABLE_USER_ACTIONS, TABLE_AUTOMATIONS, TABLE_AUTOMATION_LOGS,
     CATEGORY_ATTRIBUTE, VERSION, RECENT_DAYS_ENTITY_ID,
+    TABLE_DEVICE_HISTORY,
     TODAY_IN_HISTORY_SENSOR_ID, TODAY_IN_HISTORY_RANGE_ENTITY_ID,
-    COMM_TYPE_NAME_ENTITY_ID)
+    COMM_TYPE_NAME_ENTITY_ID, MANAGER_PATH)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 from .daily_summary import build_daily_summary_sync
 from .recent_devices import compute_device_last_used_sync, get_window_days
@@ -35,6 +36,17 @@ _WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "�
 #   True  → 每 30 秒都写状态（generated_at/last_updated 持续更新，刷新节奏可见）
 #   False → 内容签名（忽略 generated_at）未变化时跳过写入，减轻 recorder 压力
 FAMILY_STATUS_FORCE_WRITE = True
+
+# ── 全屋用电/用时汇总的「本年 / 本月」节点缓存（P2） ──────────────────────
+# 这两个节点需要对 device_history 做整年 / 整月扫描 + 多列 GROUP BY
+# （16.8 万行库实测：本年 822 ms、本月 47 ms，而传感器每 60 秒刷新一次）。
+# 与「今日」节点相比它们变化极慢，故按 device_history 的 (行数, 最大 id) 签名缓存：
+#   签名变化（有新记录）→ 立即重算；签名不变 → 复用，最多复用 WHOLE_USAGE_CACHE_SECONDS。
+# 「今日」节点始终实时重算（运行中设备的时长/用电要看当下）。
+_WHOLE_USAGE_CACHE: dict[str, Any] = {
+    "sig": None, "ts": 0.0, "monthly": None, "yearly": None,
+}
+WHOLE_USAGE_CACHE_SECONDS = 300.0
 
 
 class TodayInHistorySensor(SensorEntity):
@@ -301,12 +313,16 @@ class UserActionsSensor(SensorEntity):
     # （缺失/非法/超范围回退此默认值，见 recent_devices.get_window_days）
     WINDOW_DAYS = 30
 
+    # 多入口触发时的最小刷新间隔（秒），见 _async_refresh 注释（P2 防抖）
+    MIN_REFRESH_INTERVAL = 5.0
+
     def __init__(self, hass, device_info):
         self._hass = hass
         self._attr_unique_id = f"{DOMAIN}_user_actions"
         self._attr_device_info = device_info
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
+        self._last_refresh = 0.0  # P2 防抖用（单调时钟）
 
     def _load_data(self):
         db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
@@ -446,6 +462,14 @@ class UserActionsSensor(SensorEntity):
             return f"eid:{entity_id}"
 
     async def _async_refresh(self, now=None):
+        # P2 防抖：本传感器有 4 个触发入口（30 秒定时、窗口天数设置变化、
+        # 每次操作记录上报 ActionLogView、收件箱迁入完成），一次点击就能连触发多次，
+        # 而每次都是「近 N 天 user_actions 全量聚合 + device_history 全量扫描」。
+        # 这里限制最小刷新间隔，避免同一秒重复跑同一份聚合。
+        now_mono = time.monotonic()
+        if self._last_refresh and (now_mono - self._last_refresh) < self.MIN_REFRESH_INTERVAL:
+            return
+        self._last_refresh = now_mono
         data = await self._hass.async_add_executor_job(self._load_data)
         self._attr_native_value = data.get("total_devices", 0)
         self._attr_extra_state_attributes = data
@@ -863,8 +887,30 @@ class WholeHouseUsageSensor(SensorEntity):
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
 
+    @staticmethod
+    def _device_history_signature(db_path: str):
+        """device_history 的轻量签名 (行数, 最大 id)，用于判断汇总是否需要重算。
+
+        COUNT(*) 走 idx_device_entity_time 覆盖索引（16.8 万行约 8 ms），
+        MAX(id) 走主键（O(1)）。
+        """
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*), MAX(id) FROM {TABLE_DEVICE_HISTORY}").fetchone()
+                return (row[0], row[1]) if row else None
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            return None
+
     def _load_data(self):
-        """计算 本年/本月/今日 三个三级节点（executor 线程执行）。"""
+        """计算 本年/本月/今日 三个三级节点（executor 线程执行）。
+
+        P2 优化：本年 / 本月节点走签名缓存（见 _WHOLE_USAGE_CACHE 说明），
+        今日节点始终实时计算。
+        """
         from .http_api import compute_whole_house_usage_sync
         db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
         now_dt = datetime.now()
@@ -878,8 +924,19 @@ class WholeHouseUsageSensor(SensorEntity):
         try:
             # 三个节点共用同一 now_dt，保证运行中设备的时长/用电口径一致
             daily = compute_whole_house_usage_sync(db_path, year, month, today, now_dt)
-            monthly = compute_whole_house_usage_sync(db_path, year, month, "", now_dt)
-            yearly = compute_whole_house_usage_sync(db_path, year, "", "", now_dt)
+            sig = self._device_history_signature(db_path)
+            cache = _WHOLE_USAGE_CACHE
+            fresh = (
+                sig is not None
+                and cache["sig"] == sig
+                and (time.monotonic() - cache["ts"]) < WHOLE_USAGE_CACHE_SECONDS
+            )
+            if fresh:
+                monthly, yearly = cache["monthly"], cache["yearly"]
+            else:
+                monthly = compute_whole_house_usage_sync(db_path, year, month, "", now_dt)
+                yearly = compute_whole_house_usage_sync(db_path, year, "", "", now_dt)
+                cache.update(sig=sig, ts=time.monotonic(), monthly=monthly, yearly=yearly)
         except Exception as e:
             _LOGGER.error("[HDS] all_room_usage 计算失败: %s", e)
             return {**base, "error": str(e),
@@ -1523,7 +1580,7 @@ class DbViewerUrlSensor(SensorEntity):
         try:
             # get_url 是同步函数（返回 str），非协程
             base = hass_network.get_url(self._hass).rstrip("/")
-            path = "/api/ha_data_store/db_viewer"
+            path = MANAGER_PATH
             attrs = {
                 "path": path,
                 "base_url": base,
@@ -1556,6 +1613,46 @@ class DbViewerUrlSensor(SensorEntity):
         self._attr_native_value = url
         self._attr_extra_state_attributes = attrs
         self.async_write_ha_state()
+        # 地址可能变化（用户新配了 internal_url / external_url、网络地址变动等），
+        # 同步主设备的「访问」链接，避免设备页按钮指向旧地址（HA 重启前不再刷新）。
+        if url:
+            try:
+                from . import async_set_manager_link
+                async_set_manager_link(self._hass, self._hass.data.get(DOMAIN, {}).get("entry_id"), url)
+            except Exception as e:
+                _LOGGER.warning("[HDS] 同步主设备「访问」链接失败: %s", e)
+
+
+def _staggered_interval(hass, callback, seconds: float, slot: int, slots: int):
+    """错峰注册周期任务；返回可调用的取消句柄（与 async_track_time_interval 用法一致）。
+
+    背景（P2）：本平台一次性注册了十几个 30 / 60 秒定时器，而
+    `async_track_time_interval` 以「注册时刻」为相位，于是它们**同一帧**集中触发——
+    每 30 秒一次的执行器任务风暴（多张表聚合 + 多传感器写状态）正是 CPU 尖峰的来源。
+    这里把各任务的启动时间按 slot 均匀分散到 0 ~ 1 个周期内（延迟只影响首个触发点，
+    之后各自保持错开的相位），从而把尖峰摊平。
+    """
+    offset = seconds * slot / max(1, slots)
+    state: dict = {"unsub": None, "cancelled": False}
+
+    async def _delayed_start():
+        if offset:
+            await asyncio.sleep(offset)
+        if state["cancelled"]:
+            return
+        state["unsub"] = async_track_time_interval(
+            hass, callback, timedelta(seconds=seconds))
+
+    task = hass.async_create_task(_delayed_start(), f"{DOMAIN}_stagger_{slot}_{int(seconds)}")
+
+    def _cancel():
+        state["cancelled"] = True
+        if state["unsub"] is not None:
+            state["unsub"]()
+        if not task.done():
+            task.cancel()
+
+    return _cancel
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -1777,15 +1874,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     hass.async_create_task(_first_otd_refresh())
 
+    # 注意：这些 30 秒级定时器统一走 _staggered_interval 错峰注册（见函数说明），
+    # 否则十几个任务会同帧触发形成 CPU 尖峰。
     async_track_time_interval(hass, sensor._async_refresh, timedelta(seconds=30))
     # 定时精灵：信号推送为主，30 秒轮询兜底（防止信号丢失导致状态滞留）
-    async_track_time_interval(hass, timer_elves_sensor._async_refresh, timedelta(seconds=30))
-    async_track_time_interval(hass, report_sensor._async_refresh, timedelta(seconds=30))
-    async_track_time_interval(hass, helper_summary_sensor._async_refresh, timedelta(seconds=30))
-    async_track_time_interval(hass, power_all_sensor._async_refresh, timedelta(seconds=30))
-    async_track_time_interval(hass, user_actions_sensor._async_refresh, timedelta(seconds=30))
+    _staggered_interval(hass, timer_elves_sensor._async_refresh, 30, 1, 11)
+    _staggered_interval(hass, report_sensor._async_refresh, 30, 2, 11)
+    _staggered_interval(hass, helper_summary_sensor._async_refresh, 30, 3, 11)
+    _staggered_interval(hass, power_all_sensor._async_refresh, 30, 4, 11)
+    _staggered_interval(hass, user_actions_sensor._async_refresh, 30, 5, 11)
     # 全屋用电/用时汇总：每 1 分钟刷新
-    async_track_time_interval(hass, whole_usage_sensor._async_refresh, timedelta(seconds=60))
+    _staggered_interval(hass, whole_usage_sensor._async_refresh, 60, 0, 2)
 
     # 定时精灵：启动后尽快刷一次（协调器建立任务早于本实体订阅信号）
     async def _first_timer_elves_refresh():
@@ -1809,7 +1908,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # 全屋实体：启动先刷一次拿初始值；之后每分钟只做轻量变化检测
     # （report_entities 内容变化才重建并写状态，不变则不更新）
-    async_track_time_interval(hass, all_entities_sensor._async_tick, timedelta(seconds=60))
+    _staggered_interval(hass, all_entities_sensor._async_tick, 60, 1, 2)
     async def _first_all_entities_refresh():
         try:
             await asyncio.sleep(3)
@@ -1845,16 +1944,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # 自动化状态传感器：定时轮询作为兜底；automation_logs 新数据由写日志回调触发；
     # automation.* 实体（ha_automation 节点）状态变化实时监听触发（2 秒防抖）
-    async_track_time_interval(hass, automation_status_sensor.async_trigger_refresh, timedelta(seconds=30))
+    _staggered_interval(hass, automation_status_sensor.async_trigger_refresh, 30, 6, 11)
     hass.bus.async_listen(
         EVENT_STATE_CHANGED, automation_status_sensor._async_on_automation_state_changed
     )
     # db_viewer 访问地址：每 10 分钟低频刷新（HA 外部/内部地址变化时更新）
     async_track_time_interval(hass, db_viewer_url_sensor.async_trigger_refresh, timedelta(minutes=10))
     # 系统资源占用传感器：每 30 秒刷新
-    async_track_time_interval(hass, cpu_sensor._async_refresh, timedelta(seconds=30))
-    async_track_time_interval(hass, mem_sensor._async_refresh, timedelta(seconds=30))
-    async_track_time_interval(hass, disk_sensor._async_refresh, timedelta(seconds=30))
+    _staggered_interval(hass, cpu_sensor._async_refresh, 30, 7, 11)
+    _staggered_interval(hass, mem_sensor._async_refresh, 30, 8, 11)
+    _staggered_interval(hass, disk_sensor._async_refresh, 30, 9, 11)
 
     # ── 今日家庭状态：启动后 1 分钟自动生成 + 每 30 秒更新 ──
     # 说明：设备 running / state / 操作用户需实时性，故 30 秒轮询；
@@ -1877,6 +1976,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
             _LOGGER.exception("[HDS] 定时更新今日家庭状态失败: %s", e)
 
     hass.async_create_task(_delayed_first_refresh())
-    hass.data.setdefault(DOMAIN, {})["cancel_daily_summary"] = async_track_time_interval(
-        hass, _periodic_refresh, timedelta(seconds=30),
+    hass.data.setdefault(DOMAIN, {})["cancel_daily_summary"] = _staggered_interval(
+        hass, _periodic_refresh, 30, 10, 11,
     )

@@ -36,6 +36,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .logger import get_logger
+from .db_index import ensure_time_index
 from .const import DOMAIN, TABLE_API_KEYS, TABLE_API_SETTINGS
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,6 +90,8 @@ def init_database(db_path: str) -> None:
             f"CREATE INDEX IF NOT EXISTS idx_xiaoai_entity_time "
             f"ON {TABLE_XIAOAI_CONVERSATIONS} (entity_id, conv_time)"
         )
+        # 时间列独立索引：按 `conv_time LIKE '日期%'` 汇总（daily_summary._agg_xiaoai）
+        ensure_time_index(conn, TABLE_XIAOAI_CONVERSATIONS, "conv_time")
         # 迁移：为已存在的表补充 type / other 列（CREATE TABLE IF NOT EXISTS 不会改老表）
         cols = conn.execute(f"PRAGMA table_info({TABLE_XIAOAI_CONVERSATIONS})").fetchall()
         col_names = {c[1] for c in cols}

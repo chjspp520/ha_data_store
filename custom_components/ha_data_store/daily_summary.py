@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -68,6 +69,12 @@ _VACUUM_TABLE = "vacuum_history"
 NAME_PRESENCE = "人在"     # 人在传感器
 NAME_DOOR = "入户门"       # 入户门磁
 LIGHT_KEYWORD = "灯"       # name 含"灯"视为灯光
+
+# 灯光总数（lights.total）缓存：该值只随「新增/删除灯实体」变化，与当日数据无关，
+# 但统计它需要对 device_history 做一次 `name LIKE '%灯%'` 全表扫描（16.8 万行约 220 ms）。
+# 按小时缓存，避免每 30 秒白扫一遍。
+_LIGHTS_TOTAL_CACHE: dict[str, Any] = {"ts": 0.0, "total": 0}
+LIGHTS_TOTAL_CACHE_SECONDS = 3600
 
 
 def _today_local() -> str:
@@ -320,46 +327,54 @@ def _agg_presence(conn, now=None) -> dict:
     返回：{"rooms": [有人房间], "has_person": bool,
           "door": "open"|"closed"|"", "door_name": str,
           "door_open_minutes": int|None}  # 门开着时的持续分钟数
+
+    性能（2026-10 P1）：原实现为回答"此刻"状态，把 name IN ('人在','入户门') 的
+    **全部历史**拉进 Python 遍历（实测 12.4 万行 / 277 ms，占整轮 daily_summary 六成），
+    现改为两条定点查询（未关闭行走部分索引 + 门最新一条反向 rowid 扫描）：
+    实测 277 ms → <1 ms，返回字段与旧口径在真实数据上逐字段比对一致。
     """
     if now is None:
         now = datetime.utcnow() + timedelta(hours=DEFAULT_TIMEZONE)
     try:
-        rows = conn.execute(
+        # ① 仍未关闭的行（off_time=''）——走部分索引 idx_device_history_open，
+        #    只扫「此刻开着的」那几行，与历史总量无关
+        open_rows = conn.execute(
             f"SELECT id, name, room, on_time, off_time FROM {TABLE_DEVICE_HISTORY} "
-            f"WHERE name IN (?, ?)",
+            f"WHERE off_time = '' AND name IN (?, ?)",
             (NAME_PRESENCE, NAME_DOOR),
         ).fetchall()
+        # ② 入户门最新一条（可能已关闭）——ORDER BY id DESC LIMIT 1 反向 rowid 扫描，命中即停
+        door_row = conn.execute(
+            f"SELECT id, room, on_time, off_time FROM {TABLE_DEVICE_HISTORY} "
+            f"WHERE name = ? ORDER BY id DESC LIMIT 1",
+            (NAME_DOOR,),
+        ).fetchone()
     except sqlite3.OperationalError:
         return {"rooms": [], "has_person": False, "door": "", "door_name": "", "door_open_minutes": None}
 
     rooms = []
-    door = ""
-    door_name = ""
-    door_open_minutes = None
-    latest_door_id = -1
-    for r in rows:
-        name = r["name"]
-        on_time = r["on_time"]
-        off_time = r["off_time"]
-        is_open = bool(on_time and not off_time)  # 当前处于"打开/有人"状态
-        if name == NAME_PRESENCE and is_open:
+    for r in open_rows:
+        if r["name"] == NAME_PRESENCE and r["on_time"]:
             room = (r["room"] or "").strip()
             if room:
                 rooms.append(room)
-        elif name == NAME_DOOR:
-            # 取最新一条（id 最大的那条，即当前状态）
-            if r["id"] > latest_door_id:
-                latest_door_id = r["id"]
-                door = "open" if is_open else "closed"
-                door_name = (r["room"] or "").strip() or NAME_DOOR
-                # 门开着时计算持续分钟数
-                if door == "open" and on_time:
-                    try:
-                        on_dt = datetime.strptime(on_time[:19], "%Y-%m-%d %H:%M:%S")
-                        seconds = (now - on_dt).total_seconds()
-                        door_open_minutes = int(seconds // 60) if seconds > 0 else 0
-                    except (ValueError, TypeError):
-                        door_open_minutes = None
+
+    door = ""
+    door_name = ""
+    door_open_minutes = None
+    if door_row is not None:
+        on_time = door_row["on_time"]
+        is_open = bool(on_time and not door_row["off_time"])  # 当前处于"打开"状态
+        door = "open" if is_open else "closed"
+        door_name = (door_row["room"] or "").strip() or NAME_DOOR
+        # 门开着时计算持续分钟数
+        if door == "open" and on_time:
+            try:
+                on_dt = datetime.strptime(on_time[:19], "%Y-%m-%d %H:%M:%S")
+                seconds = (now - on_dt).total_seconds()
+                door_open_minutes = int(seconds // 60) if seconds > 0 else 0
+            except (ValueError, TypeError):
+                door_open_minutes = None
 
     return {
         "rooms": sorted(set(rooms)),
@@ -373,47 +388,82 @@ def _agg_presence(conn, now=None) -> dict:
 # =========================================================================== #
 #  灯光统计（实时）                                                                #
 # =========================================================================== #
+def _lights_total_cached(conn) -> int:
+    """历史里出现过的灯数（lights.total），按 LIGHTS_TOTAL_CACHE_SECONDS 缓存。
+
+    该值与当日数据无关（只随灯具实体增删变化），但统计它需要一次
+    `name LIKE '%灯%'` 全表扫描（前置通配无法走索引，16.8 万行实测约 220 ms）。
+    原先每 30 秒随 daily_summary 白扫一次，现改为每小时最多算一次。
+    """
+    now = time.time()
+    if now - _LIGHTS_TOTAL_CACHE["ts"] < LIGHTS_TOTAL_CACHE_SECONDS:
+        return _LIGHTS_TOTAL_CACHE["total"]
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(DISTINCT entity_id) FROM {TABLE_DEVICE_HISTORY} WHERE name LIKE ?",
+            (f"%{LIGHT_KEYWORD}%",),
+        ).fetchone()
+        total = int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.OperationalError:
+        return _LIGHTS_TOTAL_CACHE["total"]
+    _LIGHTS_TOTAL_CACHE["ts"] = now
+    _LIGHTS_TOTAL_CACHE["total"] = total
+    return total
+
+
 def _agg_lights(conn) -> dict:
     """统计当前开着的灯数量（device_history 中 name 含"灯"）。
 
     - 每盏灯按 entity_id 取最新一条（id 最大）
     - 最新一条 on_time 非空 且 off_time 为空 → 该灯当前开着
     返回：{"on_count": int, "on_lights": [灯名], "on_rooms": [房间去重], "total": int}
+
+    性能（2026-10 P1）：原实现把 name LIKE '%灯%' 的**全部历史**（实测 2.9 万行 / 112 ms）
+    拉进内存做"每实体取最新"，现改为
+      ① 只取未关闭的行（off_time=''，走部分索引 idx_device_history_open，通常个位数）；
+      ② 对这批候选实体核一次「是否为该实体最新一行」，与旧口径完全等价；
+      ③ total 走小时缓存（见 _lights_total_cached）。
     """
     try:
         rows = conn.execute(
             f"SELECT id, entity_id, name, room, on_time, off_time FROM {TABLE_DEVICE_HISTORY} "
-            f"WHERE name LIKE ?",
+            f"WHERE off_time = '' AND name LIKE ?",
             (f"%{LIGHT_KEYWORD}%",),
         ).fetchall()
     except sqlite3.OperationalError:
         return {"on_count": 0, "on_lights": [], "on_rooms": [], "total": 0}
+    total = _lights_total_cached(conn)
     if not rows:
-        return {"on_count": 0, "on_lights": [], "on_rooms": [], "total": 0}
+        return {"on_count": 0, "on_lights": [], "on_rooms": [], "total": total}
 
-    # 每盏灯（entity_id）取最新一条
-    latest_by_light: dict[str, dict] = {}
-    for r in rows:
-        eid = r["entity_id"]
-        cur = latest_by_light.get(eid)
-        if cur is None or r["id"] > cur["id"]:
-            latest_by_light[eid] = dict(r)
+    # 候选实体各自的最新一行（只看候选实体，逐个走 (entity_id, on_time) 索引，代价极小）
+    entity_ids = sorted({r["entity_id"] for r in rows})
+    marks = ",".join("?" * len(entity_ids))
+    try:
+        latest = dict(conn.execute(
+            f"SELECT entity_id, MAX(id) FROM {TABLE_DEVICE_HISTORY} "
+            f"WHERE entity_id IN ({marks}) GROUP BY entity_id",
+            entity_ids,
+        ).fetchall())
+    except sqlite3.OperationalError:
+        latest = {}
 
     on_lights = []
     on_rooms = []
-    for eid, rec in latest_by_light.items():
-        on_time = rec["on_time"]
-        off_time = rec["off_time"]
-        if on_time and not off_time:  # 当前开着
-            on_lights.append(rec["name"] or eid)
-            room = (rec["room"] or "").strip()
-            if room:
-                on_rooms.append(room)
+    for r in rows:
+        if latest and latest.get(r["entity_id"]) != r["id"]:
+            continue  # 该实体后续还有更晚的一行 → 当前状态不是"开着"
+        if not r["on_time"]:
+            continue
+        on_lights.append(r["name"] or r["entity_id"])
+        room = (r["room"] or "").strip()
+        if room:
+            on_rooms.append(room)
     return {
         "on_count": len(on_lights),
         "on_lights": on_lights,
         "on_rooms": sorted(set(on_rooms)),
-        "total": len(latest_by_light),
+        "total": total,
     }
 
 

@@ -6,6 +6,10 @@ DOMAIN = "ha_data_store"
 # 数据库文件名
 DATABASE_FILENAME = "ha_data_store.db"
 
+# 管理页面（数据库浏览器）访问路径：
+#   既是 db_viewer 页面自身的 URL，也是主设备「访问」按钮（DeviceInfo.configuration_url）的地址后缀
+MANAGER_PATH = "/api/ha_data_store/db_viewer"
+
 # 数据库表名
 TABLE_ENTITY_CONFIGS = "entity_configs"
 TABLE_DEVICE_HISTORY = "device_history"
@@ -194,4 +198,4 @@ PUSH_CONTROL_SWITCH_KEY = "push_control_enabled"
 PUSH_CONTROL_DEFAULT_RATE_LIMIT = 60
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "4.17.1"
+VERSION = "5.0.0"

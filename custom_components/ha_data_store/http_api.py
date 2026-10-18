@@ -84,6 +84,7 @@ from .const import (
     PUSH_CONTROL_DEFAULT_RATE_LIMIT,
 )
 from .logger import get_logger as _log_local
+from .db_index import ensure_time_index
 from .push_control import (
     build_capabilities,
     catalog_overview,
@@ -10798,12 +10799,14 @@ def _comm_columns_sql() -> list:
 
 
 def _ensure_comm_indexes_api(conn: sqlite3.Connection, tbl: str) -> None:
-    """为通讯数据表补齐查询索引（幂等）：时间/号码/姓名/地点。"""
+    """为通讯数据表补齐查询索引（幂等）：时间/号码/姓名/地点 + 写入时间列。"""
     for suffix, cols in COMM_INDEX_DEFS:
         col_sql = ", ".join(f'"{c}"' for c in cols)
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{tbl}_{suffix} ON {tbl} ({col_sql});"
         )
+    # datetime（采集写入时间）另建 NOCASE 独立索引：按日期前缀整表过滤时用
+    ensure_time_index(conn, tbl, "datetime")
 
 
 class TableColumnsView(_BaseDBView):
@@ -11032,6 +11035,8 @@ class AttrConfigView(_BaseDBView):
                     )
                     if mode == ATTR_MODE_COMM:
                         _ensure_comm_indexes_api(conn, tbl)
+                    # 时间列独立索引：属性表按 `datetime LIKE '日期%'` 整表过滤时用
+                    ensure_time_index(conn, tbl, "datetime")
                 else:
                     # 表已存在：添加 extra_fields 列 + 确保 extra_json 列
                     existing_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({tbl})")}
@@ -11059,6 +11064,8 @@ class AttrConfigView(_BaseDBView):
                         )
                     if mode == ATTR_MODE_COMM:
                         _ensure_comm_indexes_api(conn, tbl)
+                    # 老表升级：补时间列独立索引（原先只有 (entity_id, datetime) 复合索引）
+                    ensure_time_index(conn, tbl, "datetime")
 
                 # 4. 写入 entity_configs（联合唯一 entity_id+attr_type）
                 conn.execute(

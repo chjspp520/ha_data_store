@@ -43,6 +43,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
   - [20. 整库备份](#20-整库备份)
   - [21. 通讯数据（采集 + 查询）](#21-通讯数据采集--查询)
   - [22. 数据导入 / 导出（CSV · JSON）](#22-数据导入--导出csv--json)
+  - [23. 个人账单（查询 / 分析 / 备注）](#23-个人账单查询--分析--备注)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -97,6 +98,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 | 🕘 **家庭洞察** | 统一事件流 `timeline`（设备/操作/自动化/扫地机/小爱/健康/打印机合并成一条时间线，设备记录展开 on/off）+ 房间占用排行 `room_occupancy`（严谨区间并集、含门户事件与日/小时分解）；均按天/日期/时间段查询、不分页 |
 | 📞 **通讯数据** | 属性提取新增 `comm` 采集模式：按数组展开写入 **18 个固定字段**（我方/对方号码、归属地、姓名、通讯时间、地点、消息类型、数据来源、呼叫类型、时长、金额、流量、流量类型、内容、图片路径、我的坐标、对方运营商、对方坐标），列名与类型由系统固定，目标列可选源字段或**直接填固定值**；`2026/9/1 17:24` 自动规范化为 `2026-09-01 17:24:00`，`3分53秒` 等中文时长自动换算为秒，`1.5GB` / `512MB` 等流量自动换算为 MB；`comm.py` 提供明细/日期/排行/趋势/汇总/联系人/地点/时段 8 类查询，API 工具含专属分组 |
 | 📥 **数据导入 / 导出** | 数据浏览页把 CSV / JSON 导入任意表：字段映射 + 固定值、**追加 / Upsert**（多列唯一键）、自动建表与补列、🧪 试运行、分批进度与错误明细；基础值转换（`¥1,234.5`→`1234.5`、`2026/9/1`→`2026-09-01`）；导出表数据或空模板为 CSV（UTF-8 BOM，Excel 友好） |
+| 🧾 **个人账单** | 独立模块 `personal_bill.py` + 新表 `personal_bills`（支付宝 / 微信账单落库）：**42 类查询/分析**（明细、按单号/账号/多名称、多值分类汇总、数据可用性多档、分组/趋势/排行、交叉汇总、资金流向、净现金流、同比、异常、定期订阅、固定开销、金额分位数等）+ **写接口**（增 / 批 / 改 / 删）；支持**多名称**与**逗号多值**过滤、`fields` 返回字段**手动点选**、可编辑备注 `note`（`POST /bill/remark` 单独提交、`GET /bill/notes` 取候选供点击） |
 
 ---
 
@@ -1538,6 +1540,180 @@ GET  /api/ha_data_store/export/csv?table=xxx         导出表数据为 CSV
 
 ---
 
+### 23. 个人账单（查询 / 分析 / 备注）
+
+> v5.0.0 新增，**独立模块** `personal_bill.py` + 新表 `personal_bills`。
+> 把支付宝 / 微信导出的账单落库，并提供一整套**多维度查询**与**多维分析**接口
+> （42 类查询 + 8 个写/辅助接口）。
+
+#### 23.1 表结构 `personal_bills`
+
+| 列 | 类型 | 含义 |
+|---|---|---|
+| `source` | TEXT | 数据来源（支付宝 / 微信支付 …） |
+| `bill_time` | TEXT | 交易时间 `YYYY-MM-DD HH:MM:SS` |
+| `bill_no` | TEXT | 交易单号 |
+| `category` | TEXT | 交易类型 |
+| `direction` | TEXT | 收支方向（收入 / 支出 / 不计收支） |
+| `pay_method` | TEXT | 收/支方式 |
+| `amount` | REAL | 金额 |
+| `counterparty` | TEXT | 对方 |
+| `counterparty_bill_no` | TEXT | 对方单号 |
+| `counterparty_account` | TEXT | 对方账号 |
+| `status` | TEXT | 交易状态 |
+| `product` | TEXT | 商品说明 |
+| `remark` | TEXT | 备注（导入来源） |
+| `note` | TEXT | **备注（可编辑，支持 POST 修改）** |
+| `created_at` | TEXT | 入库时间 |
+
+> `year` / `day` / `month_day` **不单独建列**，统一从 `bill_time` 用
+> `substr` / `strftime` 派生（年 / 年月 / 年月日 / 小时）。
+
+**建表**：`ensure_tables()` 在启动时调用（幂等）：`CREATE TABLE IF NOT EXISTS`
++ 逐列 `ALTER TABLE` 补列 + 5 个索引（`bill_time`、`(source,bill_time)`、
+`(category,bill_time)`、`(direction,bill_time)`、`(counterparty,bill_time)`）。
+
+**导入账单**：用「[22. 数据导入 / 导出](#22-数据导入--导出csv--json)」把
+CSV 映射到这些列即可（不在导入保护名单内）。整理账单时可直接把目标列名做成表头
+（`source,bill_time,bill_no,…,note,created_at`），导入即可 1:1 映射。
+
+#### 23.2 查询 / 分析接口（独立路径）
+
+```
+GET /api/ha_data_store/bill?type=<type>&key=你的APIKey
+```
+
+> 注意：账单查询**不走** `/api/ha_data_store/query`，而是独立路径
+> `/api/ha_data_store/bill`。
+
+**公共过滤参数**（所有类型通用）：
+
+| 参数 | 说明 |
+|---|---|
+| `source` / `category` / `direction` / `pay_method` / `status` | 精确；**逗号分隔多值**（`IN`） |
+| `counterparty` | 对方；**逗号分隔多值，每个各为一个条件**（OR 模糊）；`counterparty_exact=1` 精确 |
+| `names` | `counterparty` 的等价别名（多名称） |
+| `account` | 对方账号 / 对方单号（模糊）；`account_exact=1` 精确 |
+| `bill_no` | 本单号 / 对方单号（模糊）；`bill_no_exact=1` 精确 |
+| `keyword` | 商品 / 单号 / 对方 / 账号 模糊 |
+| `date` / `month` / `year` / `start` / `end` | 时间维度与区间 |
+| `month_day`(MM-DD) / `day_of_month`(DD) / `month_of_year`(MM) | 跨年周期过滤（如「指定月日哪些年有数据」） |
+| `min_amount` / `max_amount` | 金额区间 |
+| `fields` | **返回字段设置**（列白名单，逗号分隔；非法列忽略） |
+
+**类型一览**：
+
+| 分类 | type |
+|---|---|
+| 明细 / 定位 | `bill_history`、`bill_recent`、`bill_latest`、`bill_by_no`、`bill_by_account`、`bill_by_names`、`bill_split`、`bill_by_day`、`bill_calendar`、`bill_periods`、`bill_options`、`bill_meta` |
+| 聚合 / 分布 | `bill_summary`、`bill_group`、`bill_trend`、`bill_ranking`、`bill_top`、`bill_hour_dist`、`bill_weekday_dist`、`bill_dom_dist`、`bill_amount_dist`、`bill_status_dist`、`bill_product_top`、`bill_seasonal` |
+| 对比 / 画像 | `bill_compare`、`bill_profile`、`bill_yoy`、`bill_month_day_years`、`bill_crosstab`、`bill_heatmap`、`bill_flow` |
+| 深度分析 | `bill_first_last`、`bill_interval`、`bill_frequency`、`bill_netflow`、`bill_income_expense`、`bill_anomaly`、`bill_recurring`、`bill_fixed_cost`、`bill_percentile`、`bill_quality` |
+| 备注 | `bill_notes` |
+
+**`bill_periods`（数据可用性）多档返回**：`level` = `all|year|month|day`，
+`mode` 控制详细程度：
+
+| `mode` | 返回 |
+|---|---|
+| `minimal` 极简 | 只返回有数据的键（纯字符串数组） |
+| `simple` 精简 | 键 + 笔数 |
+| `normal` 一般 | 再含收入 / 支出 / 净额（默认） |
+| `full` 完全 | 再含合计与首末时间 |
+
+```bash
+# 指定年月 → 哪些日有数据
+GET /api/ha_data_store/bill?type=bill_periods&level=day&month=2025-10&mode=normal
+
+# 指定月日 → 哪些年有数据（极简）
+GET /api/ha_data_store/bill?type=bill_periods&level=year&month_day=10-09&mode=minimal
+```
+
+**常用示例**：
+
+```bash
+# 明细（多对方 + 只返回指定字段）
+GET /api/ha_data_store/bill?type=bill_history&counterparty=美团,滴滴,京东&fields=bill_time,amount,counterparty&limit=50
+
+# 多值分类汇总（每个输入值各一组，可带明细）
+GET /api/ha_data_store/bill?type=bill_split&dim=counterparty&values=美团,滴滴,京东&detail=1&limit=20
+
+# 指定日交易
+GET /api/ha_data_store/bill?type=bill_by_day&date=2025-10-01
+
+# 按单号 / 账号
+GET /api/ha_data_store/bill?type=bill_by_no&bill_no=2025041921001001020249316409&bill_no_exact=1
+GET /api/ha_data_store/bill?type=bill_by_account&account=126.com
+
+# 环比 / 同比（2025-10 vs 上月 / 去年同月）
+GET /api/ha_data_store/bill?type=bill_compare&period=2025-10&granularity=month
+GET /api/ha_data_store/bill?type=bill_compare&period=2025-10&granularity=month&yoy=1
+
+# 交叉汇总 / 资金流向
+GET /api/ha_data_store/bill?type=bill_crosstab&row_dim=category&col_dim=month
+GET /api/ha_data_store/bill?type=bill_flow&from_dim=counterparty&to_dim=category
+
+# 净现金流 / 金额分位数 / 异常大额 / 疑似订阅 / 固定开销
+GET /api/ha_data_store/bill?type=bill_netflow&granularity=month
+GET /api/ha_data_store/bill?type=bill_percentile
+GET /api/ha_data_store/bill?type=bill_anomaly&dim=category&factor=5
+GET /api/ha_data_store/bill?type=bill_recurring&dim=counterparty&min_count=6
+GET /api/ha_data_store/bill?type=bill_fixed_cost&dim=counterparty&min_months=12
+```
+
+#### 23.3 写接口
+
+```bash
+# 单条 / 批量提交
+POST /api/ha_data_store/bill/add     {"source":"微信支付","bill_time":"2026-09-01 12:30:00","amount":12.34,"note":"..."}
+POST /api/ha_data_store/bill/batch   {"records":[ {...}, {...} ]}
+
+# 修改（含备注）
+POST /api/ha_data_store/bill/update  {"id":1,"note":"已对账"}
+POST /api/ha_data_store/bill/update  {"ids":[1,2,3],"note":"报销中"}
+POST /api/ha_data_store/bill/update  {"id":1,"fields":{"category":"餐饮","amount":66.6}}
+
+# 单独提交备注（前台点开某条详单后按 id 直接写）
+POST /api/ha_data_store/bill/remark  {"id":123,"note":"已对账"}
+POST /api/ha_data_store/bill/remark  {"id":123,"note":"发票已上传","mode":"append"}
+
+# 删除
+DELETE /api/ha_data_store/bill/delete?id=1,2,3
+
+# 可选值 / 备注候选
+GET /api/ha_data_store/bill/types
+GET /api/ha_data_store/bill/notes?note_keyword=对账&limit=50
+```
+
+**备注（`note`）**：
+
+- `remark` = 导入来源的备注（只读语义）；`note` = 你自己的备注（可改）
+- **单独提交**：`POST /bill/remark`，只带该条 `id` + `note`；支持 `ids` 批量与
+  `mode=append` 追加
+- **候选获取**：`GET /bill/notes` 返回去重备注 + 使用次数 + 首末时间，
+  前台可渲染成**可点击的备选**（选中即用，不用手打）
+- 过滤参数用 `note_keyword`；`bill_notes` 会在内部剔除通用 `keyword` 条件，
+  避免把结果过滤空
+- 更新接口 `POST /bill/update` 的可改列有**白名单**（除 `id` / `created_at` 外全部）
+
+#### 23.4 前端（API 工具）
+
+「🔗 API 地址生成器 → 查询类型」新增 4 个分组：
+
+- **🧾 账单查询（明细 / 定位）**
+- **🧾 账单分析（多维度分析）**
+- **🧾 账单深度分析**
+- **🧾 账单提交（写接口）**
+
+选中后显示账单专属参数区（按类型动态渲染），其中：
+
+- **返回字段 `fields` 为手动点选**（列复选框），无需手输列名
+- `counterparty` 支持**逗号分隔多个**
+- 备注相关：`bill_notes` 取候选、`bill_remark` 单独提交（提示区直接给出 POST 请求体）
+- 生成的 URL 自动带选中的 API Key；写接口给出的地址 + JSON 请求体可直接复制使用
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -1665,6 +1841,25 @@ GET /api/ha_data_store/comm?type=records&date=2026-09-01&key=你的APIKey
 `type` 可取 `records` / `dates` / `stats` / `crosstab` / `compare` / `contact` / `longest` /
 `quality` / `meta` / `onthisday` / `ranking` / `trend` / `summary` / `parties` / `places` / `heatmap`；
 参数与返回结构详见 [21. 通讯数据（采集 + 查询）](#21-通讯数据采集--查询)。
+
+**个人账单接口（独立路径，不走 `/query`）：**
+
+```
+GET    /api/ha_data_store/bill?type=<bill_xxx>&...          42 类查询 / 分析
+GET    /api/ha_data_store/bill/types                        可选值清单
+GET    /api/ha_data_store/bill/notes?note_keyword=&limit=   备注候选清单
+POST   /api/ha_data_store/bill/add                          提交单条
+POST   /api/ha_data_store/bill/batch                        批量提交
+POST   /api/ha_data_store/bill/update                       修改（含备注，id/ids 批量）
+POST   /api/ha_data_store/bill/remark                       单独提交备注
+POST|DELETE /api/ha_data_store/bill/delete?id=1,2,3         删除
+```
+
+公共过滤支持 `source`/`category`/`direction`/`pay_method`/`status`（逗号多值）、
+`counterparty`（**逗号多值，每个各为一个条件**）/`names`、`account`、`bill_no`、
+`keyword`、`date`/`month`/`year`/`start`/`end`、`month_day`/`day_of_month`/`month_of_year`、
+`min_amount`/`max_amount`、`fields`（返回字段）；
+参数与返回结构详见 [23. 个人账单（查询 / 分析 / 备注）](#23-个人账单查询--分析--备注)。
 
 ### 配置管理接口
 
@@ -1873,6 +2068,7 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `custom_routes` | 自定义路由定义 |
 | `api_keys` | API 密钥 |
 | `api_settings` | API 设置（管理员密码等） |
+| `personal_bills` | 个人账单明细（支付宝 / 微信账单，独立模块 `personal_bill.py`，见 [23. 个人账单](#23-个人账单查询--分析--备注)） |
 
 ### 传感器数据表
 
@@ -2025,6 +2221,70 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v5.0.0 新增「🧾 个人账单」独立模块（2026-10-10）
+
+**大版本**（`4.17.1` → `5.0.0`）。新增独立模块 `personal_bill.py` 与新表
+`personal_bills`，把支付宝 / 微信账单落库，并提供一整套多维度查询与多维分析接口。
+
+**一、独立模块（不再塞在 `http_api.py`）**：账单的表结构、查询引擎、视图与注册
+全部收进 `personal_bill.py`，与 `printer.py` / `onthisday.py` 等保持同一约定；
+`const.py` 不再持有账单常量，`http_api.py` 里的账单代码（约 980 行）已全部移除。
+
+**二、新表 `personal_bills`**：`source` / `bill_time` / `bill_no` / `category` /
+`direction` / `pay_method` / `amount` / `counterparty` / `counterparty_bill_no` /
+`counterparty_account` / `status` / `product` / `remark` /
+**`note`（可编辑备注）** / `created_at`。
+`year` / `day` / `month_day` **不单独建列**，由 `bill_time` 派生。
+启动时 `ensure_tables()` 自动建表 + 补列 + 建 5 个索引（旧库自动补上 `note` 列）。
+
+**三、独立路径**（**不再借用 `/query`**，属不兼容变更）：
+
+```
+GET  /api/ha_data_store/bill?type=<bill_xxx>&...   查询 / 分析（42 类）
+GET  /api/ha_data_store/bill/types                 可选值清单
+GET  /api/ha_data_store/bill/notes                 备注候选（去重 + 次数，供点击选择）
+POST /api/ha_data_store/bill/add | batch           提交单条 / 批量
+POST /api/ha_data_store/bill/update                修改（含备注，id/ids 批量，列白名单）
+POST /api/ha_data_store/bill/remark                单独提交备注（mode=append 追加）
+POST|DELETE /api/ha_data_store/bill/delete?id=1,2  删除
+```
+
+**四、42 类查询 / 分析**：明细 / 定位（`bill_history`、`bill_recent`、`bill_latest`、
+`bill_by_no`、`bill_by_account`、`bill_by_names`、`bill_split`、`bill_by_day`、
+`bill_calendar`、`bill_periods`、`bill_options`、`bill_meta`）；
+聚合 / 分布（`bill_summary`、`bill_group`、`bill_trend`、`bill_ranking`、`bill_top`、
+`bill_hour_dist`、`bill_weekday_dist`、`bill_dom_dist`、`bill_amount_dist`、
+`bill_status_dist`、`bill_product_top`、`bill_seasonal`）；
+对比 / 画像（`bill_compare`、`bill_profile`、`bill_yoy`、`bill_month_day_years`、
+`bill_crosstab`、`bill_heatmap`、`bill_flow`）；
+深度分析（`bill_first_last`、`bill_interval`、`bill_frequency`、`bill_netflow`、
+`bill_income_expense`、`bill_anomaly`、`bill_recurring`、`bill_fixed_cost`、
+`bill_percentile`、`bill_quality`）；备注（`bill_notes`）。
+
+**五、过滤与字段**：
+
+- `counterparty` 支持**逗号分隔多个，每个各为一个条件**（`counterparty_exact=1` 精确）；
+  `names` 为等价别名
+- `bill_split`：把输入的多个值**各查一遍并按输入值分类汇总**（`dim` 可选对方 / 账号 /
+  单号 / 类型…），可 `detail=1` 带明细
+- **返回字段 `fields` 手动点选**（列复选框），不再手输列名
+- 数据可用性 `bill_periods` 支持 **4 档返回**（极简 / 精简 / 一般 / 完全），
+  并可跨周期查询（指定年月哪些日、指定月日 / 几号 / 月份哪些年）
+
+**六、备注 `note`**：可编辑、支持 **POST 修改**；`POST /bill/remark` 可**单独提交**
+（前台点开某条详单后按 id 直接写，支持批量与追加）；`GET /bill/notes` 获取**备注候选**
+（去重 + 使用次数），前台可渲染成可点击备选，选中即用、不用打字。
+
+**七、前端（API 工具）**：查询类型下拉新增 4 个账单分组（账单查询 / 账单分析 /
+账单深度分析 / 账单提交），账单专属参数区按类型动态渲染，提示区给出参数说明与
+POST 请求体示例；「API 使用说明」表补齐全部账单类型与接口。
+
+> 版本号 → `5.0.0`。需**重启 HA**（新增模块 + 新表 + 新接口）。
+> ⚠️ 账单接口基址由 `/api/ha_data_store/query?type=bill_*` 改为
+> `/api/ha_data_store/bill?type=bill_*`。
+> 功能与接口详见 [23. 个人账单（查询 / 分析 / 备注）](#23-个人账单查询--分析--备注)，
+> 完整改动见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
 
 ### v4.17.1 「📅 数据可用性」分组提到查询类型下拉最前面（2026-10-04）
 

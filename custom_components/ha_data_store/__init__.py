@@ -29,6 +29,7 @@ from homeassistant.helpers import entity_registry as er
 from .const import (
     DOMAIN,
     DATABASE_FILENAME,
+    MANAGER_PATH,
     TABLE_ENTITY_CONFIGS,
     TABLE_DEVICE_HISTORY,
     TABLE_ENVIRONMENT_HISTORY,
@@ -82,6 +83,7 @@ from .const import (
     SHUTDOWN_THRESHOLD_SECONDS,
 )
 from .logger import get_logger
+from .db_index import ensure_time_index, ensure_open_rows_index
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -452,6 +454,12 @@ def _init_database(db_path: str) -> None:
             f"CREATE INDEX IF NOT EXISTS idx_device_entity_time "
             f"ON {TABLE_DEVICE_HISTORY} (entity_id, on_time);"
         )
+        # 时间列独立索引：让 `on_time LIKE '2026-10-03%'` 走索引而非全表扫描
+        #（必须 NOCASE，原因见 db_index.py 模块说明；16.8 万行实测 22.9 → 2.2 ms）
+        ensure_time_index(conn, TABLE_DEVICE_HISTORY, "on_time")
+        # 「未关闭行」部分索引：实时状态判断（人在/入户门/灯）只查 off_time='' 的行，
+        # 索引体积近 0，查询代价与历史行数无关（实测 presence 277 ms → <1 ms）
+        ensure_open_rows_index(conn, TABLE_DEVICE_HISTORY, "off_time")
 
         # 迁移：已有表补充新列
         existing_cols = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_DEVICE_HISTORY})")]
@@ -496,6 +504,8 @@ def _init_database(db_path: str) -> None:
                 f"CREATE INDEX IF NOT EXISTS idx_{tbl}_entity_time "
                 f"ON {tbl} (entity_id, datetime);"
             )
+            # 时间列独立索引：环境表按 `datetime LIKE '日期%'` 整表过滤时用（19.2 万行实测 27.9 → 2.4 ms）
+            ensure_time_index(conn, tbl, "datetime")
 
         # 4) 自定义路由表（兼容：可视化查询构造器发布的定义也存于此表）
         conn.execute(
@@ -695,6 +705,11 @@ def _init_database(db_path: str) -> None:
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_health_name_time ON {TABLE_HEALTH_RECORDS} (name, date_time);"
         )
+        # 时间列独立索引（daily_summary._agg_health 用 date_time LIKE '日期%'）
+        ensure_time_index(conn, TABLE_HEALTH_RECORDS, "date_time")
+
+        # 注：个人账单表（personal_bills）为独立模块 personal_bill.py，
+        #     其建表见 personal_bill.ensure_tables()（由启动流程调用）。
         # 前端卡片实体上报表（从 room-elves-card 等前端卡片提取上报）
         # 迁移：旧表以 entity_id 为主键（不允许重复）；新表改为自增 id 主键、entity_id 允许重复。
         # 检测到旧结构（无 id 列）时 DROP 重建（该表每次全量重置，数据可安全丢弃）。
@@ -1185,6 +1200,8 @@ def _migrate_database(conn: sqlite3.Connection) -> None:
             )
             """
         )
+        # 时间列独立索引：扫地机轨迹按 `datetime LIKE '日期%'` 查询（原先该表无任何索引）
+        ensure_time_index(conn, TABLE_VACUUM_HISTORY, "datetime")
         # 实体→网络 访问目标表
         # 注：entity_id 不再唯一 —— 同一实体可挂多套配置（读写可分离给不同调用方），
         #     唯一性由 push_token / control_token 保证（见下方两处部分唯一索引）。
@@ -2747,12 +2764,14 @@ def _ensure_comm_columns(conn: sqlite3.Connection, tbl: str, existing_cols: set)
 
 
 def _ensure_comm_indexes(conn: sqlite3.Connection, tbl: str) -> None:
-    """为通讯数据表补齐查询索引（幂等）：时间/号码/姓名/地点。"""
+    """为通讯数据表补齐查询索引（幂等）：时间/号码/姓名/地点 + 写入时间列。"""
     for suffix, cols in COMM_INDEX_DEFS:
         col_sql = ", ".join(f'"{c}"' for c in cols)
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{tbl}_{suffix} ON {tbl} ({col_sql});"
         )
+    # datetime（采集写入时间）另建 NOCASE 独立索引：按日期前缀整表过滤时用
+    ensure_time_index(conn, tbl, "datetime")
 
 
 def _ensure_all_comm_tables(conn: sqlite3.Connection) -> list[str]:
@@ -3187,6 +3206,8 @@ def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
                 )
             if is_comm:
                 _ensure_comm_indexes(conn, tbl)
+            # 时间列独立索引（老表升级：原先只有 (entity_id, datetime) 复合索引）
+            ensure_time_index(conn, tbl, "datetime")
             conn.commit()
             return tbl
 
@@ -3240,6 +3261,8 @@ def _ensure_attr_table(db_path: str, type_name: str, field_mapping: dict,
         )
         if is_comm:
             _ensure_comm_indexes(conn, tbl)
+        # 时间列独立索引：属性表按 `datetime LIKE '日期%'` 整表过滤时用
+        ensure_time_index(conn, tbl, "datetime")
         conn.commit()
 
         local_logger = get_logger()
@@ -5204,6 +5227,58 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     from .data_import import register_api_views as _data_import_register_api_views
     _data_import_register_api_views(hass, db_path)
 
+    # 个人账单查询 / 提交 API（独立模块）
+    from .personal_bill import register_api_views as _bill_register_api_views
+    _bill_register_api_views(hass, db_path)
+
+
+# =========================================================================== #
+#  主设备「访问」链接（管理页面）                                                  #
+# =========================================================================== #
+def get_manager_url(hass: HomeAssistant) -> str | None:
+    """返回管理页面（数据库浏览器 db_viewer）的绝对访问地址，取不到返回 None。
+
+    device_registry 的 configuration_url 必须是带 scheme + host 的绝对地址
+    （HA 只接受 http / https / homeassistant 三种 scheme，相对路径会被直接拒绝），
+    因此用 hass_network.get_url 取 HA 当前对外的基地址——与「数据库浏览器地址」
+    传感器（DbViewerUrlSensor）口径一致：自动优先 external_url，其次 internal_url /
+    网络探测。
+    """
+    try:
+        from homeassistant.helpers import network as hass_network
+        base = hass_network.get_url(hass).rstrip("/")
+    except Exception as exc:  # 地址探测失败（NoURLAvailableError 等）不影响集成加载
+        _LOGGER.warning("[HDS] 获取管理页面地址失败（设备「访问」链接不可用）: %s", exc)
+        return None
+    return f"{base}{MANAGER_PATH}"
+
+
+@callback
+def async_set_manager_link(hass: HomeAssistant, entry_id: str | None, url: str | None = None) -> None:
+    """把管理页面地址写进主设备的 configuration_url（设备页右上角「访问」按钮）。
+
+    主设备的 identifier 是 (DOMAIN, entry.entry_id)，实体平台注册 DeviceInfo 时
+    不传 configuration_url，因此这里写入的值不会被它们覆盖。
+    url 为空时现场探测；探测失败则原样保留设备现有链接，不写 None（避免清空）。
+    """
+    if not entry_id:
+        return
+    if not url:
+        url = get_manager_url(hass)
+    if not url:
+        return
+    try:
+        device_registry = dr.async_get(hass)
+        device_registry.async_get_or_create(
+            config_entry_id=entry_id,
+            identifiers={(DOMAIN, entry_id)},
+            name="HA数据统一存储系统",
+            manufacturer="HA数据统一存储系统",
+            configuration_url=url,
+        )
+    except Exception as exc:  # 写设备注册表失败不应影响集成加载
+        _LOGGER.warning("[HDS] 写入主设备「访问」链接失败: %s", exc)
+
 
 # =========================================================================== #
 #  Config Entry 入口                                                           #
@@ -5246,6 +5321,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 打印机模块：独立建表
     from .printer import init_database as _printer_init_database
     await hass.async_add_executor_job(_printer_init_database, db_path)
+
+    # 个人账单模块：独立建表
+    from .personal_bill import ensure_tables as _bill_ensure_tables
+    await hass.async_add_executor_job(_bill_ensure_tables, db_path)
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["entry_id"] = entry.entry_id
@@ -5820,6 +5899,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.async_add_executor_job(
             local_logger.info, "[sys] 设备桥接已启动",
         )
+
+    # ── 主设备「访问」链接 → 管理页面（db_viewer） ──
+    #    写在设备注册表的 configuration_url 上，设备页右上角即出现「访问」按钮，
+    #    点击直达管理页面（同网段 + 登录保护逻辑不变）。
+    #    放在各实体平台注册完毕之后：实体侧 DeviceInfo 不带 configuration_url，
+    #    此处是本次 setup 的最后一笔写入，不会被它们覆盖。
+    async_set_manager_link(hass, entry.entry_id)
 
     return True
 

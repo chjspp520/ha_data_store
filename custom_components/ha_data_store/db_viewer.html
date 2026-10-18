@@ -2247,6 +2247,63 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="health_history">健康记录</option>
           <option value="health_latest">健康最新</option>
         </optgroup>
+        <!-- 个人账单：原来拆成 5 个 optgroup（概览 / 查询 / 分析 / 深度分析 / 提交），
+             统一收进这一个「🧾 个人账单」分组；子分类用**不可选的**分隔行保留（optgroup 不能嵌套） -->
+        <optgroup label="🧾 个人账单">
+          <option disabled>──── 概览（首页仪表盘） ────</option>
+          <option value="bill_dashboard">🏠 账单仪表盘（总计 + 收支占比 + 年度收支 + 最近 N 日小计/明细）</option>
+          <option disabled>──── 查询（明细 / 定位） ────</option>
+          <option value="bill_history">📄 账单明细（多维度过滤 · 分页）</option>
+          <option value="bill_recent">🕘 最近 N 条明细</option>
+          <option value="bill_latest">🕘 最新一条账单</option>
+          <option value="bill_by_no">#️⃣ 按单号查询（本单号 / 对方单号）</option>
+          <option value="bill_by_account">🏦 按对方账号 / 对方查询</option>
+          <option value="bill_by_names">👥 多名称查询（按名称分组 + 可选明细）</option>
+          <option value="bill_by_day">📅 指定日交易（汇总+小时+明细）</option>
+          <option value="bill_onthisday">📆 历史今日（指定月日 / 几号在往年各天的明细）</option>
+          <option value="bill_calendar">🗓 活跃日历（指定月每天是否有数据）</option>
+          <option value="bill_periods">📅 数据可用性（有数据的 年/年月/年月日 · 多档）</option>
+          <option value="bill_options">📋 可选值清单（来源/类型/方向/方式/状态）</option>
+          <option value="bill_meta">🗂 数据概览（总量/跨度/维度清单）</option>
+          <option value="bill_notes">📝 备注候选清单（去重+次数，供点击选择）</option>
+          <option disabled>──── 分析（多维度分析） ────</option>
+          <option value="bill_summary">Σ 汇总统计（收入/支出/净额/笔数）</option>
+          <option value="bill_group">📊 分组汇总（来源/类型/方向/方式/对方/年/月/日/时）</option>
+          <option value="bill_trend">📈 趋势序列（年/月/日/小时）</option>
+          <option value="bill_ranking">🏆 排行榜（按金额 / 笔数）</option>
+          <option value="bill_top">🔝 单笔 Top N（最大 / 最小金额）</option>
+          <option value="bill_hour_dist">⏰ 小时分布（几点花钱）</option>
+          <option value="bill_weekday_dist">📆 星期分布（周几消费多）</option>
+          <option value="bill_dom_dist">🔢 月内几号分布</option>
+          <option value="bill_amount_dist">💰 金额区间分布</option>
+          <option value="bill_status_dist">✅ 交易状态分布（成功/关闭/退款）</option>
+          <option value="bill_product_top">🛒 商品 / 说明 Top N</option>
+          <option value="bill_seasonal">🍂 季节性（1-12 月跨年汇总）</option>
+          <option value="bill_compare">⚖️ 周期对比（环比 / 同比 / 任意两段）</option>
+          <option value="bill_yoy">📊 逐年同月对比（同比矩阵）</option>
+          <option value="bill_profile">🧑 对方 / 账号画像</option>
+          <option value="bill_month_day_years">📅 指定月日 / 几号 → 各年汇总</option>
+          <option value="bill_crosstab">🔀 交叉汇总（行维度 × 列维度）</option>
+          <option value="bill_heatmap">🔥 时段热力图（星期 × 小时）</option>
+          <option value="bill_flow">🌊 资金流向（两维度流量 · 桑基图）</option>
+          <option disabled>──── 深度分析 ────</option>
+          <option value="bill_netflow">💵 净现金流（含累计净额）</option>
+          <option value="bill_income_expense">⚖️ 收支对比（比例 + 趋势）</option>
+          <option value="bill_percentile">📐 金额分位数（P25~P99）</option>
+          <option value="bill_first_last">🕒 首末交易（每个维度的首次/最近）</option>
+          <option value="bill_frequency">🔁 交易频率排行（笔数/跨期/日均）</option>
+          <option value="bill_interval">⏱ 交易间隔分析（相邻交易间隔天数）</option>
+          <option value="bill_recurring">🔂 疑似定期 / 订阅支出</option>
+          <option value="bill_fixed_cost">📌 固定开销（多月份都出现）</option>
+          <option value="bill_anomaly">🚨 异常 / 大额交易（组内均值倍数）</option>
+          <option value="bill_quality">🩺 数据质量检查（空值/异常/重复）</option>
+          <option disabled>──── 提交（写接口） ────</option>
+          <option value="bill_add">➕ 提交单条账单（POST）</option>
+          <option value="bill_batch">➕ 批量提交账单（POST）</option>
+          <option value="bill_update">✏️ 修改账单 / 备注（POST）</option>
+          <option value="bill_remark">📝 单独提交备注（POST · 单条/多条）</option>
+          <option value="bill_delete">🗑 删除账单（DELETE）</option>
+        </optgroup>
         <optgroup label="小爱对话">
           <option value="xiaoai_history">小爱对话记录</option>
         </optgroup>
@@ -2953,6 +3010,12 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div id="apiOtdParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
       <div id="apiOtdHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
     </div>
+    <!-- 个人账单参数区（按 bill_* 查询/提交类型动态渲染） -->
+    <div id="apiBillRow" style="display:none">
+      <label>个人账单参数（留空表示不限制）</label>
+      <div id="apiBillParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
+      <div id="apiBillHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
+    </div>
   </div>
 
   <div class="section">
@@ -3023,6 +3086,57 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <tr><td style="color:var(--green);padding-right:16px">electricity_standard</td><td>标准电费数据 · entity_id（必填）/day_table/month_table/year_table/条数限制 · 返回 state+attributes 结构</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">health_history</td><td>健康记录 · name/type/start/end/limit/offset/order_by · 返回健康记录列表</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">health_latest</td><td>健康最新 · name（必填） · 返回某人最新一条健康记录</td></tr>
+        <tr><td style="color:#e67e22;padding-right:16px">🧾 个人账单（独立模块）</td><td>以下 bill_* 与写接口走<b>独立路径</b> <code>/api/ha_data_store/bill</code>（不走 /query），由独立模块 <code>personal_bill.py</code> 提供</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_history</td><td>个人账单明细 · source/category/direction/pay_method/<b>counterparty</b>(<b>逗号多值，每个各为一个条件，任一命中</b>)/counterparty_exact/names(别名)/account/bill_no/keyword/date/month/year/start/end/min_amount/max_amount/limit/offset/order_by/<b>fields</b>(返回字段，可多选) · 返回 rows+total+summary</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_recent</td><td>最近 N 条明细 · 同上过滤 + limit</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_latest</td><td>最新一条账单 · 过滤条件同上（可选）· 返回 record</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_by_no</td><td>按单号查询 · bill_no（必填，匹配本单号或对方单号）+ bill_no_exact=1 精确 · 返回 rows+total+summary</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_by_account</td><td>按对方账号/对方查询 · account（匹配对方账号或对方单号）+ account_exact=1 精确 + counterparty · 返回 rows+summary+counterparties</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_by_names</td><td><b>多名称查询（按名称分组）</b> · names（必填，逗号分隔）+ names_exact=1 精确 + detail=1（各名称明细）+ fields（返回字段）+ limit/offset/order_by · 返回 groups[]（每个 name 含 summary[+rows]）+ matched_names</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_by_day</td><td>指定日交易 · date（必填）· 返回 summary + hours[24] + categories + pay_methods + records</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_onthisday</td><td><b>历史今日</b> · month_day（留空=今天 MM-DD）/ day_of_month / detail=1（每年明细，默认开）/ only_past=1（排除今年）/ mode / fields / limit（每年上限）· 返回 on_this_day + total + <b>years[]</b>（每年含 summary 与 rows）+ rows 平铺</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_calendar</td><td>活跃日历 · month（必填）+ fill=1 补齐整月 · 返回每天 count/income/expense/net</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_periods</td><td>账单数据可用性 · level=all|year|month|day（年/年月/年月日）+ mode=minimal|simple|normal|full（极简/精简/一般/完全）· 过滤：month/year/date + <b>month_day=MM-DD</b>（指定月日哪些年有数据）/ <b>day_of_month=DD</b>（指定几号哪些年）/ <b>month_of_year=MM</b> + 各维度 · 「指定年月哪些日有数据」= level=day&amp;month=YYYY-MM</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_options</td><td>账单可选值 · 来源/类型/方向/方式/状态 + 数据总量与时间跨度</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_meta</td><td>数据概览 · 总量/时间跨度/天数/对方数/单号数 + 维度取值清单</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_dashboard</td><td><b>首页仪表盘（一次取全）</b> · days（最近天数，默认 7）+ recent_limit（最近明细条数，默认 80）+ 全部维度过滤 · 返回 <b>summary</b>（收入/支出/净额/笔数）+ <b>ratio</b>（收支占比/储蓄率）+ <b>sources[]</b>（各来源占比与金额，剔除 source 过滤、按流水倒序）+ <b>years[]</b>（年度收支，倒序）+ <b>days[]</b>（逐日小计，已补齐空日）+ <b>days_total</b> + <b>recent[]</b>（最近 N 日明细）+ meta（总量/跨度/天数/对方数）+ base_date/start_date</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_summary</td><td>账单汇总 · 过滤条件同上 · 返回 income/expense/net/count/极值</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_group</td><td>账单分组汇总 · group_by=来源/类型/方向/方式/对方/状态/year/month/day/hour · 返回各分组金额与笔数</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_trend</td><td>账单趋势 · granularity=year|month|day|hour · 返回时间桶序列（收入/支出/净额/笔数）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_ranking</td><td>账单排行 · dimension × by=amount|count · Top N</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_top</td><td>单笔 Top N · order=desc|asc/limit · 返回最大/最小金额明细</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_hour_dist</td><td>小时分布 · 00-23 各小时笔数与金额</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_weekday_dist</td><td>星期分布 · 周日~周六 笔数与金额</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_dom_dist</td><td>月内几号分布 · 1-31 号笔数与金额</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_amount_dist</td><td>金额区间分布 · step 自动分桶 或 buckets=0,10,50,100 自定义边界</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_compare</td><td>周期对比 · period+granularity（默认环比，yoy=1 同比）或 start1/end1/start2/end2 · 返回 A/B 汇总 + delta + change_pct</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_profile</td><td>对方/账号画像 · counterparty / account / <b>names</b>（多名称→profiles[] 按名称返回）· 返回汇总 + 年/月/类型/方式/方向/小时分布 + 近期（fields 可指定字段）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_month_day_years</td><td>指定月日/几号 → 各年汇总 · month_day=MM-DD 或 day_of_month=DD + mode</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_crosstab</td><td>交叉汇总 · row_dim × col_dim（维度或 year/month/day/hour/weekday）· 返回 rows + matrix</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_heatmap</td><td>时段热力图 · 星期 × 小时 笔数矩阵</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_quality</td><td>数据质量检查 · 空值/零值/负金额计数 + 疑似重复单号</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_split</td><td><b>多值分类汇总</b> · dim(分类维度)+values(逗号多值，每个各为一组)+exact+detail+fields+limit/offset/order_by · 返回 groups[]（每个 value 含 summary[+rows]）+ total + matched_values</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_first_last</td><td>首末交易 · dim+order(last/first/amount/count)+limit · 返回每个值的 first_time/last_time/笔数/金额</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_frequency</td><td>交易频率排行 · dim+limit · 笔数/活跃天数/活跃月数/跨度/月均/日均</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_interval</td><td>交易间隔分析 · dim+min_count+limit · 相邻交易平均/最小/最大间隔天数</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_netflow</td><td>净现金流 · granularity+limit · 收支净额序列 + cumulative_net</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_income_expense</td><td>收支对比 · 占比/储蓄率 + 按粒度收支序列</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_status_dist</td><td>交易状态分布</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_product_top</td><td>商品/说明 Top N · by=amount|count</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_seasonal</td><td>季节性 · 1-12 月跨年汇总</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_yoy</td><td>逐年同月对比（同比矩阵）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_flow</td><td>资金流向 · from_dim → to_dim · 返回 nodes + links（桑基图）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_anomaly</td><td>异常/大额交易 · dim+factor+min_count+fields · 金额 ≥ 组内均值×factor</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_recurring</td><td>疑似定期/订阅 · dim+min_count+min_days/max_days</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_fixed_cost</td><td>固定开销 · dim+min_months · 月均固定支出 est_monthly_cost</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_percentile</td><td>金额分位数 · P25/P50/P75/P90/P95/P99</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">bill_notes</td><td>备注候选清单 · note_keyword/limit · 去重备注 + 使用次数 + 首末时间（供点击选择）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /bill/add</td><td>提交单条账单 · body 见字段说明（可含 note 备注）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /bill/batch</td><td>批量提交账单 · body <code>{"records":[...]}</code></td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /bill/update</td><td>修改账单 / 备注 · body <code>{"id":1,"note":"已对账"}</code> 或 <code>{"ids":[1,2],"note":"x"}</code> 或 <code>{"id":1,"fields":{...}}</code> · 可改除 id/created_at 外所有列（<b>note</b>=可编辑备注，remark=导入来源备注，支持批量）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /bill/remark</td><td><b>单独提交备注</b> · body <code>{"id":123,"note":"已对账"}</code>（或 <code>{"ids":[1,2],"note":"x"}</code> 批量；<code>mode=append</code> 追加一行）· 前台点开某条详单后按 id 直接提交，无需改其它字段</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">GET /bill/notes</td><td><b>获取备注候选</b> · note_keyword/limit · 返回去重备注+次数+首末时间，供前台点击选择（等价于 <code>/bill?type=bill_notes</code>）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">DELETE /bill/delete</td><td>删除账单 · <code>?id=1,2,3</code></td></tr>
         <tr><td style="color:var(--green);padding-right:16px">xiaoai_history</td><td>小爱对话记录 · entity_id（必填）/start/end/limit · 返回对话列表（user_text=用户说话，ai_text=AI回复，conv_time=对话时间）</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">user_actions_daily</td><td>用户动作·指定日期 · date=YYYY-MM-DD/entity_id(可选)/limit · 返回该日操作记录</td></tr>
         <tr><td style="color:var(--green);padding-right:16px">user_actions_range</td><td>用户动作·日期段 · start/end=YYYY-MM-DD/entity_id(可选)/limit · 返回日期段操作记录</td></tr>
@@ -5703,9 +5817,11 @@ function toggleAutoRefresh() {
     btn.style.background = 'var(--orange)';
     btn.style.borderColor = 'var(--orange)';
     autoRefreshTimer = setInterval(() => {
+      // P3：后台标签页暂停轮询（看不见的页面没必要每 10 秒拉一次整份日志）
+      if (document.hidden) return;
       const date = document.getElementById('logDateSelect').value;
       if (date) loadLog();
-    }, 10000);
+    }, 15000);
   } else {
     btn.textContent = '自动刷新: 关';
     btn.style.background = '';
@@ -6928,7 +7044,12 @@ function toggleMonitorAuto() {
     btn.textContent = '自动刷新: 开';
     btn.style.background = 'var(--orange)';
     btn.style.borderColor = 'var(--orange)';
-    monitorAutoTimer = setInterval(loadMonitor, 15000);
+    // P3：监控页一轮要打约 10 个后端接口（每个都新建 SQLite 连接并做全量遍历），
+    // 间隔由 15s 放宽到 30s，并在后台标签页暂停轮询。
+    monitorAutoTimer = setInterval(() => {
+      if (document.hidden) return;
+      loadMonitor();
+    }, 30000);
   } else {
     btn.textContent = '自动刷新: 关';
     btn.style.background = '';
@@ -13210,7 +13331,8 @@ function _hideAllApiFormRows() {
     'apiEleMonthLimitRow','apiEleYearLimitRow','apiEleTranslatedFieldRow',
     'apiHealthNameRow','apiHealthTypeRow','apiMediaUserRow','apiMediaIdRow','apiMediaNameRow',
     'apiDeviceUserNameRow','apiDeviceUserDirRow',
-    'apiAutoIdRow','apiAutoKeywordRow','apiAutoFuzzyRow','apiAutoStatusRow','apiAutoForceRow'];
+    'apiAutoIdRow','apiAutoKeywordRow','apiAutoFuzzyRow','apiAutoStatusRow','apiAutoForceRow',
+    'apiBillRow'];
   ids.forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.style.display = 'none';
@@ -13495,6 +13617,7 @@ function apiHideAllParamRows() {
     ['apiHealthNameRow', 0], ['apiHealthTypeRow', 0], ['apiMediaUserRow', 0],
     ['apiMediaIdRow', 0], ['apiMediaNameRow', 0], ['apiDeviceUserNameRow', 0],
     ['apiDeviceUserDirRow', 0], ['apiCommRow', 0], ['apiOtdRow', 0],
+    ['apiBillRow', 0],
   ];
   rows.forEach(function (item) {
     const el = document.getElementById(item[0]);
@@ -13735,6 +13858,15 @@ function onApiTypeChange() {
     if (elOtdRow) elOtdRow.style.display = 'block';
     const otdParts = qt.slice('otd:'.length).split(':');
     renderOtdParams(otdParts[0], otdParts[1] || 'stats');
+    return;
+  }
+
+  if (qt.startsWith('bill_')) {
+    // 个人账单：隐藏所有常规输入行，只显示账单专属参数区（按查询/提交类型动态渲染）
+    apiHideAllParamRows();
+    const elBillRow = document.getElementById('apiBillRow');
+    if (elBillRow) elBillRow.style.display = 'block';
+    renderBillParams(qt);
     return;
   }
 
@@ -14769,6 +14901,62 @@ function generateApiUrl() {
     if (pickedOtdFields.length) otdUrl += '&fields=' + encodeURIComponent(pickedOtdFields.join(','));
     document.getElementById('apiUrlOutput').value = otdUrl;
     renderOtdHint(otdSource, otdMode);
+    return;
+  }
+
+  // 个人账单：查询走 /query?type=bill_*；提交/删除走独立 RESTful 路径 /bill/*
+  if (qt.startsWith('bill_')) {
+    let billUrl = '';
+    if (qt === 'bill_add') {
+      billUrl = BASE_PATH + '/api/ha_data_store/bill/add'
+        + (selectedApiKey ? ('?key=' + encodeURIComponent(selectedApiKey)) : '');
+    } else if (qt === 'bill_batch') {
+      billUrl = BASE_PATH + '/api/ha_data_store/bill/batch'
+        + (selectedApiKey ? ('?key=' + encodeURIComponent(selectedApiKey)) : '');
+    } else if (qt === 'bill_update') {
+      billUrl = BASE_PATH + '/api/ha_data_store/bill/update'
+        + (selectedApiKey ? ('?key=' + encodeURIComponent(selectedApiKey)) : '');
+    } else if (qt === 'bill_delete') {
+      const delEl = document.querySelector('#apiBillParamsBox [data-name="id"]');
+      const delId = delEl ? String(delEl.value || '').trim() : '';
+      const qp = [];
+      if (delId) qp.push('id=' + encodeURIComponent(delId));
+      if (selectedApiKey) qp.push('key=' + encodeURIComponent(selectedApiKey));
+      billUrl = BASE_PATH + '/api/ha_data_store/bill/delete' + (qp.length ? ('?' + qp.join('&')) : '');
+    } else if (qt === 'bill_remark') {
+      billUrl = BASE_PATH + '/api/ha_data_store/bill/remark'
+        + (selectedApiKey ? ('?key=' + encodeURIComponent(selectedApiKey)) : '');
+    } else if (qt === 'bill_options') {
+      billUrl = BASE_PATH + '/api/ha_data_store/bill/types'
+        + (selectedApiKey ? ('?key=' + encodeURIComponent(selectedApiKey)) : '');
+    } else if (qt === 'bill_notes') {
+      const kwEl = document.querySelector('#apiBillParamsBox [data-name="note_keyword"]');
+      const limEl = document.querySelector('#apiBillParamsBox [data-name="limit"]');
+      const qp = [];
+      if (selectedApiKey) qp.push('key=' + encodeURIComponent(selectedApiKey));
+      if (kwEl && String(kwEl.value || '').trim()) {
+        qp.push('keyword=' + encodeURIComponent(String(kwEl.value).trim()));
+      }
+      if (limEl && String(limEl.value || '').trim()) {
+        qp.push('limit=' + encodeURIComponent(String(limEl.value).trim()));
+      }
+      billUrl = BASE_PATH + '/api/ha_data_store/bill/notes' + (qp.length ? ('?' + qp.join('&')) : '');
+    } else {
+      billUrl = BASE_PATH + '/api/ha_data_store/bill?type=' + encodeURIComponent(qt);
+      if (selectedApiKey) billUrl += '&key=' + encodeURIComponent(selectedApiKey);
+      document.querySelectorAll('#apiBillParamsBox [data-name]').forEach(function (inp) {
+        const key = inp.getAttribute('data-name');
+        const val = String(inp.value || '').trim();
+        if (key && val !== '') billUrl += '&' + encodeURIComponent(key) + '=' + encodeURIComponent(val);
+      });
+      // 返回字段：手动点选的列
+      const pickedBillFields = _billPickedFields();
+      if (pickedBillFields.length) {
+        billUrl += '&fields=' + encodeURIComponent(pickedBillFields.join(','));
+      }
+    }
+    document.getElementById('apiUrlOutput').value = billUrl;
+    renderBillHint(qt, billUrl);
     return;
   }
 
@@ -17763,6 +17951,597 @@ function _renderParamSpecs(box, specs) {
 function renderCommParams(type, preset) {
   _renderParamSpecs(document.getElementById('apiCommParamsBox'),
     _commFieldSpecs(type, preset || ''));
+}
+
+// ==============================
+//  个人账单（personal_bills）参数区 / 提示
+// ==============================
+let __billOptions = null;   // {sources,categories,directions,pay_methods,statuses,total,min_time,max_time}
+
+async function loadBillOptions() {
+  if (__billOptions) return __billOptions;
+  try {
+    let u = '/api/ha_data_store/bill/types';
+    if (typeof selectedApiKey !== 'undefined' && selectedApiKey) {
+      u += '?key=' + encodeURIComponent(selectedApiKey);
+    }
+    const resp = await fetch(u, { credentials: 'same-origin' });
+    const json = await resp.json();
+    __billOptions = (json && json.data) || null;
+  } catch (e) {
+    __billOptions = null;
+  }
+  return __billOptions
+    || { sources: [], categories: [], directions: [], pay_methods: [], statuses: [] };
+}
+
+function _billFieldSpecs(qt) {
+  const opt = __billOptions || {};
+  const P = function (name, label, ph, def) {
+    return { name: name, label: label, ph: ph || '', type: 'text', def: def || '' };
+  };
+  const D = function (name, label) { return { name: name, label: label, ph: '', type: 'date', def: '' }; };
+  const M = function (name, label) { return { name: name, label: label, ph: '', type: 'month', def: '' }; };
+  const S = function (name, label, options, def) {
+    return { name: name, label: label, ph: '', type: 'select', options: options, def: def || '' };
+  };
+  const selOpts = function (list) { return [''].concat(list || []); };
+
+  // 通用过滤维度（查询/汇总/分组/趋势/排行共用）
+  const dims = [
+    S('source', '数据来源 source', selOpts(opt.sources)),
+    S('category', '交易类型 category', selOpts(opt.categories)),
+    S('direction', '收支方向 direction', selOpts(opt.directions)),
+    S('pay_method', '收/支方式 pay_method', selOpts(opt.pay_methods)),
+    P('counterparty', '对方 counterparty（模糊）', '对方名称'),
+    P('names', '多名称 names（逗号分隔，任一命中）', '张三,李四,美团'),
+    S('names_exact', '名称精确匹配 names_exact', ['', '1'], ''),
+    D('start', '开始日期 start'),
+    D('end', '结束日期 end'),
+    M('month', '指定月份 month'),
+    P('year', '指定年份 year', '2026'),
+    P('hour', '指定小时 hour（0-23，多个用逗号分隔）', '12'),
+    P('keyword', '关键词 keyword', '商品/单号/对方/账号'),
+    P('min_amount', '最小金额 min_amount', ''),
+    P('max_amount', '最大金额 max_amount', ''),
+  ];
+  // 返回字段设置：手动点选列（全不勾选 = 全部列）
+  const F = function (name, label) {
+    return {
+      name: name, label: label, ph: '', type: 'fields', defs: [],
+      options: ['id', 'source', 'bill_time', 'bill_no', 'category', 'direction',
+        'pay_method', 'amount', 'counterparty', 'counterparty_bill_no',
+        'counterparty_account', 'status', 'product', 'remark', 'created_at'],
+    };
+  };
+  const fieldsSpec = F('fields', '返回字段 fields（点选需要的列；全不勾选 = 全部）');
+  const detailSpec = S('detail', '是否返回明细 detail', ['', '1'], '');
+
+  if (qt === 'bill_dashboard') {
+    // 仪表盘：一次返回总计 / 收支占比 / 年度收支 / 最近 N 日小计与明细
+    return dims.concat([
+      P('days', '最近天数 days', '7', '7'),
+      P('recent_limit', '最近明细条数 recent_limit', '80', '80'),
+    ]);
+  }
+  if (qt === 'bill_history') {
+    return dims.concat([
+      S('order_by', '排序 order_by（任意可排序列，前缀 - = 降序）',
+        ['', 'bill_time', '-bill_time', 'amount', '-amount',
+          'counterparty', '-counterparty', 'category', '-category',
+          'pay_method', '-pay_method', 'source', '-source', 'id', '-id'], '-bill_time'),
+      P('limit', '条数 limit', '100', '100'),
+      P('offset', '偏移 offset', '0'),
+      fieldsSpec,
+    ]);
+  }
+  if (qt === 'bill_latest') return dims.concat([fieldsSpec]);
+  if (qt === 'bill_periods') {
+    return [
+      S('level', '返回粒度 level（有数据的年/年月/年月日）',
+        ['all', 'year', 'month', 'day'], 'all'),
+      S('mode', '返回程度 mode',
+        ['minimal', 'simple', 'normal', 'full'], 'normal'),
+      M('month', '指定年月 month（查该月哪些日有数据）'),
+      P('year', '指定年 year', '2026'),
+      P('month_day', '指定月日 month_day（查哪些年有数据）', '10-09'),
+      P('day_of_month', '指定几号 day_of_month（查哪些年有数据）', '09'),
+      P('month_of_year', '指定月份 month_of_year（查哪些年有数据）', '10'),
+      S('source', '数据来源 source', selOpts(opt.sources)),
+    ];
+  }
+  if (qt === 'bill_summary') return dims;
+  if (qt === 'bill_group') {
+    return dims.concat([
+      S('group_by', '分组维度 group_by',
+        ['category', 'source', 'direction', 'pay_method', 'counterparty', 'status',
+         'year', 'month', 'day', 'hour'], 'category'),
+      P('limit', '分组数上限 limit', '100', '100'),
+    ]);
+  }
+  if (qt === 'bill_trend') {
+    return dims.concat([
+      S('granularity', '时间粒度 granularity', ['year', 'month', 'day', 'hour'], 'month'),
+      P('limit', '最大桶数 limit', '2000', '2000'),
+    ]);
+  }
+  if (qt === 'bill_ranking') {
+    return dims.concat([
+      S('dimension', '排行维度 dimension',
+        ['counterparty', 'pay_method', 'source', 'category', 'direction', 'status'], 'counterparty'),
+      S('by', '排行依据 by', ['amount', 'count'], 'amount'),
+      P('limit', '条数 limit', '20', '20'),
+    ]);
+  }
+  // 仅维度过滤（不含时间，供周期对比自建时间段的接口使用）
+  const dimOnly = [
+    S('source', '数据来源 source', selOpts(opt.sources)),
+    S('category', '交易类型 category', selOpts(opt.categories)),
+    S('direction', '收支方向 direction', selOpts(opt.directions)),
+    S('pay_method', '收/支方式 pay_method', selOpts(opt.pay_methods)),
+    P('counterparty', '对方 counterparty（模糊）', '对方名称'),
+    P('names', '多名称 names（逗号分隔，任一命中）', '张三,李四'),
+    S('names_exact', '名称精确匹配 names_exact', ['', '1'], ''),
+    P('keyword', '关键词 keyword', '商品/单号/对方/账号'),
+    P('min_amount', '最小金额 min_amount', ''),
+    P('max_amount', '最大金额 max_amount', ''),
+  ];
+  const sortSpec = S('order_by', '排序 order_by',
+    ['', 'bill_time', '-bill_time', 'amount', '-amount'], '-bill_time');
+
+  if (qt === 'bill_recent') {
+    return dims.concat([P('limit', '条数 limit', '20', '20'), fieldsSpec]);
+  }
+  if (qt === 'bill_by_no') {
+    return dims.concat([
+      P('bill_no', '单号 bill_no（必填）', '本单号 / 对方单号'),
+      S('bill_no_exact', '精确匹配 bill_no_exact', ['', '1'], ''),
+      sortSpec,
+      P('limit', '条数 limit', '200', '200'),
+      P('offset', '偏移 offset', '0'),
+      fieldsSpec,
+    ]);
+  }
+  if (qt === 'bill_by_account') {
+    return dims.concat([
+      P('account', '对方账号 account', '银行卡号 / 邮箱 / 手机号'),
+      S('account_exact', '精确匹配 account_exact', ['', '1'], ''),
+      sortSpec,
+      P('limit', '条数 limit', '200', '200'),
+      P('offset', '偏移 offset', '0'),
+      fieldsSpec,
+    ]);
+  }
+  if (qt === 'bill_by_names') {
+    // 多名称查询：按名称分组返回；detail=1 附带明细，可指定 fields
+    return [
+      P('names', '多名称 names（必填，逗号分隔）', '美团,支付宝,京东'),
+      S('names_exact', '名称精确匹配 names_exact', ['', '1'], ''),
+      detailSpec,
+      fieldsSpec,
+      sortSpec,
+      P('limit', '每个名称明细上限 limit', '100', '100'),
+      P('offset', '偏移 offset', '0'),
+      S('source', '数据来源 source', selOpts(opt.sources)),
+      S('category', '交易类型 category', selOpts(opt.categories)),
+      S('direction', '收支方向 direction', selOpts(opt.directions)),
+      S('pay_method', '收/支方式 pay_method', selOpts(opt.pay_methods)),
+      D('start', '开始日期 start'),
+      D('end', '结束日期 end'),
+      M('month', '指定月份 month'),
+      P('year', '指定年份 year', '2026'),
+      P('keyword', '关键词 keyword', '商品/单号/对方/账号'),
+    ];
+  }
+  if (qt === 'bill_by_day') {
+    return [
+      D('date', '指定日期 date（必填）'),
+      S('source', '数据来源 source', selOpts(opt.sources)),
+      P('record_limit', '明细条数 record_limit', '1000', '1000'),
+      fieldsSpec,
+    ];
+  }
+  if (qt === 'bill_onthisday') {
+    // 历史今日：默认取「今天」的月日；detail 默认 1（返回每年明细）
+    return [
+      P('month_day', '月日 month_day（留空 = 今天）', '10-10'),
+      P('day_of_month', '只看几号 day_of_month（跨所有月）', '10'),
+      S('detail', '是否返回每年明细 detail', ['1', '0'], '1'),
+      S('only_past', '只看往年 only_past（排除今年）', ['', '1'], ''),
+      S('mode', '年度汇总程度 mode', ['minimal', 'simple', 'normal', 'full'], 'normal'),
+      fieldsSpec,
+      sortSpec,
+      P('limit', '每年明细上限 limit', '50', '50'),
+      S('source', '数据来源 source', selOpts(opt.sources)),
+      S('category', '交易类型 category', selOpts(opt.categories)),
+      S('direction', '收支方向 direction', selOpts(opt.directions)),
+      S('pay_method', '收/支方式 pay_method', selOpts(opt.pay_methods)),
+      P('names', '多名称 names（逗号分隔，任一命中）', '美团,滴滴'),
+    ];
+  }
+  if (qt === 'bill_calendar') {
+    return [
+      M('month', '指定月份 month（必填）'),
+      S('fill', '补齐整月 fill（含无数据日）', ['', '1'], ''),
+      S('source', '数据来源 source', selOpts(opt.sources)),
+    ];
+  }
+  if (qt === 'bill_meta') return dims;
+  if (qt === 'bill_top') {
+    return dims.concat([
+      S('order', '排序方向 order', ['desc', 'asc'], 'desc'),
+      P('limit', '条数 limit', '20', '20'),
+      fieldsSpec,
+    ]);
+  }
+  if (qt === 'bill_hour_dist' || qt === 'bill_weekday_dist' ||
+      qt === 'bill_dom_dist' || qt === 'bill_heatmap') {
+    return dims;
+  }
+  if (qt === 'bill_amount_dist') {
+    return dims.concat([
+      P('step', '区间步长 step', '100（不填按此步长自动分桶）'),
+      P('buckets', '自定义边界 buckets', '0,10,50,100,500,1000'),
+    ]);
+  }
+  if (qt === 'bill_compare') {
+    return dimOnly.concat([
+      S('granularity', '对比粒度 granularity', ['month', 'day', 'year'], 'month'),
+      P('period', '基准周期 period', '2025-10 / 2025-10-09 / 2025'),
+      S('yoy', '同比 yoy（空=环比）', ['', '1'], ''),
+      P('start1', '本期开始 start1', '选填，与 end1 配套'),
+      P('end1', '本期结束 end1', ''),
+      P('start2', '对比期开始 start2', ''),
+      P('end2', '对比期结束 end2', ''),
+    ]);
+  }
+  if (qt === 'bill_profile') {
+    return dims.concat([
+      P('account', '对方账号 account', '银行卡号 / 邮箱 / 手机号'),
+      S('account_exact', '精确匹配 account_exact', ['', '1'], ''),
+      fieldsSpec,
+    ]);
+  }
+  if (qt === 'bill_month_day_years') {
+    return [
+      P('month_day', '指定月日 month_day', '10-09'),
+      P('day_of_month', '指定几号 day_of_month', '09'),
+      S('mode', '返回程度 mode', ['minimal', 'simple', 'normal', 'full'], 'normal'),
+      S('source', '数据来源 source', selOpts(opt.sources)),
+    ];
+  }
+  if (qt === 'bill_crosstab') {
+    const dimOpts = ['category', 'source', 'direction', 'pay_method', 'counterparty', 'status',
+                     'year', 'month', 'day', 'hour', 'weekday'];
+    return dims.concat([
+      S('row_dim', '行维度 row_dim', dimOpts, 'category'),
+      S('col_dim', '列维度 col_dim', dimOpts, 'month'),
+    ]);
+  }
+  if (qt === 'bill_quality') return dims;
+  // ---- 分类汇总 / 深度分析 参数 ----
+  const dimOpts = ['counterparty', 'account', 'bill_no', 'source', 'category', 'direction',
+    'pay_method', 'status', 'year', 'month', 'day', 'hour', 'weekday'];
+  const splitDims = ['counterparty', 'account', 'bill_no', 'source', 'category',
+    'direction', 'pay_method', 'status'];
+  if (qt === 'bill_split') {
+    return [
+      S('dim', '分类维度 dim', splitDims, 'counterparty'),
+      P('values', '输入值 values（必填，逗号分隔，每个各为一组）', '美团,滴滴,京东'),
+      S('exact', '精确匹配 exact', ['', '1'], ''),
+      detailSpec,
+      fieldsSpec,
+      sortSpec,
+      P('limit', '每组明细上限 limit', '100', '100'),
+      P('offset', '偏移 offset', '0'),
+      S('source', '数据来源 source', selOpts(opt.sources)),
+      S('category', '交易类型 category', selOpts(opt.categories)),
+      S('direction', '收支方向 direction', selOpts(opt.directions)),
+      S('pay_method', '收/支方式 pay_method', selOpts(opt.pay_methods)),
+      D('start', '开始日期 start'),
+      D('end', '结束日期 end'),
+      M('month', '指定月份 month'),
+      P('year', '指定年份 year', '2026'),
+    ];
+  }
+  if (qt === 'bill_first_last') {
+    return dims.concat([
+      S('dim', '统计维度 dim', dimOpts, 'counterparty'),
+      S('order', '排序 order', ['last', 'first', 'amount', 'count'], 'last'),
+      P('limit', '条数 limit', '100', '100'),
+    ]);
+  }
+  if (qt === 'bill_interval') {
+    return dims.concat([
+      S('dim', '统计维度 dim', dimOpts, 'counterparty'),
+      P('min_count', '最少交易次数 min_count', '3', '3'),
+      P('limit', '条数 limit', '100', '100'),
+    ]);
+  }
+  if (qt === 'bill_frequency') {
+    return dims.concat([
+      S('dim', '统计维度 dim', dimOpts, 'counterparty'),
+      P('limit', '条数 limit', '100', '100'),
+    ]);
+  }
+  if (qt === 'bill_netflow' || qt === 'bill_income_expense') {
+    return dims.concat([
+      S('granularity', '时间粒度 granularity', ['year', 'month', 'day', 'hour'], 'month'),
+      P('limit', '最大桶数 limit', '5000', '5000'),
+    ]);
+  }
+  if (qt === 'bill_yoy' || qt === 'bill_percentile') return dims;
+  if (qt === 'bill_product_top') {
+    return dims.concat([
+      S('by', '排序依据 by', ['amount', 'count'], 'amount'),
+      P('limit', 'Top N limit', '20', '20'),
+    ]);
+  }
+  if (qt === 'bill_flow') {
+    return dims.concat([
+      S('from_dim', '起点维度 from_dim', dimOpts, 'counterparty'),
+      S('to_dim', '终点维度 to_dim', dimOpts, 'category'),
+      P('limit', '流向条数 limit', '500', '500'),
+    ]);
+  }
+  if (qt === 'bill_anomaly') {
+    return dims.concat([
+      S('dim', '组内维度 dim', dimOpts, 'category'),
+      P('factor', '倍数阈值 factor', '3（金额 ≥ 组内均值×factor）', '3'),
+      P('min_count', '组内最少条数 min_count', '3', '3'),
+      P('limit', '条数 limit', '100', '100'),
+      fieldsSpec,
+    ]);
+  }
+  if (qt === 'bill_recurring') {
+    return dims.concat([
+      S('dim', '统计维度 dim', dimOpts, 'counterparty'),
+      P('min_count', '最少交易次数 min_count', '3', '3'),
+      P('min_days', '最小间隔天数 min_days', '26', '26'),
+      P('max_days', '最大间隔天数 max_days', '35', '35'),
+      P('limit', '条数 limit', '100', '100'),
+    ]);
+  }
+  if (qt === 'bill_fixed_cost') {
+    return dims.concat([
+      S('dim', '统计维度 dim', dimOpts, 'counterparty'),
+      P('min_months', '最少月份数 min_months', '6', '6'),
+      P('limit', '条数 limit', '100', '100'),
+    ]);
+  }
+  if (qt === 'bill_options') return [];
+  if (qt === 'bill_notes') {
+    return [
+      P('note_keyword', '备注关键词 note_keyword（模糊过滤备注）', '已对账 / 报销'),
+      P('limit', '条数 limit', '50', '50'),
+    ];
+  }
+  if (qt === 'bill_remark') {
+    return [
+      P('id', '记录 ID id / ids（必填，逗号分隔可批量）', '123 或 1,2,3'),
+      P('note', '备注 note（必填）', '已对账'),
+      S('mode', '写入方式 mode（空=覆盖 / append=追加）', ['', 'append'], ''),
+    ];
+  }
+  if (qt === 'bill_update') {
+    return [
+      P('id', '记录 ID id / ids（必填，逗号分隔可批量）', '1 或 1,2,3'),
+      P('note', '备注 note（可编辑）', '已对账 / 报销中…'),
+      P('remark', '备注 remark（导入来源）', ''),
+      P('category', '交易类型 category', ''),
+      P('direction', '收支方向 direction', ''),
+      P('pay_method', '收/支方式 pay_method', ''),
+      P('status', '交易状态 status', ''),
+      P('product', '商品说明 product', ''),
+      P('counterparty', '对方 counterparty', ''),
+      P('amount', '金额 amount', ''),
+    ];
+  }
+  if (qt === 'bill_delete') {
+    return [P('id', '记录 ID id（逗号分隔可多删）', '1 或 1,2,3')];
+  }
+  // 提交类（bill_add / bill_batch）：填写提交字段
+  return [
+    P('source', '数据来源 source', '支付宝 / 微信支付'),
+    P('bill_time', '交易时间 bill_time', '2026-09-01 12:30:00'),
+    P('bill_no', '交易单号 bill_no', ''),
+    P('category', '交易类型 category', '商户消费 / 转账红包'),
+    P('direction', '收支方向 direction', '支出 / 收入 / 不计收支'),
+    P('pay_method', '收/支方式 pay_method', '招商银行 / 余额'),
+    P('amount', '金额 amount', '0.00'),
+    P('counterparty', '对方 counterparty', ''),
+    P('counterparty_bill_no', '对方单号 counterparty_bill_no', ''),
+    P('counterparty_account', '对方账号 counterparty_account', ''),
+    P('status', '交易状态 status', '交易成功'),
+    P('product', '商品说明 product', ''),
+    P('remark', '备注 remark（导入来源）', ''),
+    P('note', '备注 note（可编辑）', ''),
+  ];
+}
+
+function renderBillParams(qt) {
+  _renderParamSpecs(document.getElementById('apiBillParamsBox'), _billFieldSpecs(qt));
+  // 首次：异步加载可选值（来源/类型/方向/方式）后重渲染，补全下拉选项
+  if (!__billOptions) {
+    loadBillOptions().then(function () {
+      if (document.getElementById('apiQueryType').value === qt) {
+        _renderParamSpecs(document.getElementById('apiBillParamsBox'), _billFieldSpecs(qt));
+      }
+    });
+  }
+}
+
+function _billReadParams() {
+  const out = {};
+  document.querySelectorAll('#apiBillParamsBox [data-name]').forEach(function (inp) {
+    const k = inp.getAttribute('data-name');
+    const v = String(inp.value || '').trim();
+    if (k && v !== '') out[k] = v;
+  });
+  return out;
+}
+
+// 返回字段：读取手动点选的列（checkbox）
+function _billPickedFields() {
+  const picked = [];
+  document.querySelectorAll('#apiBillParamsBox input[data-field-check]:checked').forEach(function (cb) {
+    picked.push(cb.getAttribute('data-field-check'));
+  });
+  return picked;
+}
+
+function renderBillHint(qt, url) {
+  const box = document.getElementById('apiBillHint');
+  if (!box) return;
+  const params = _billReadParams();
+  const esc = function (s) { return escHtml(String(s == null ? '' : s)); };
+  const pre = function (obj) {
+    return '<pre style="white-space:pre-wrap;margin:4px 0;background:#0d1117;'
+      + 'padding:8px;border-radius:6px;font-size:11px">'
+      + esc(JSON.stringify(obj, null, 2)) + '</pre>';
+  };
+
+  if (qt === 'bill_add') {
+    const body = {
+      source: params.source || '支付宝',
+      bill_time: params.bill_time || '2026-09-01 12:30:00',
+      bill_no: params.bill_no || '',
+      category: params.category || '商户消费',
+      direction: params.direction || '支出',
+      pay_method: params.pay_method || '',
+      amount: params.amount ? Number(params.amount) : 12.34,
+      counterparty: params.counterparty || '',
+      counterparty_bill_no: params.counterparty_bill_no || '',
+      counterparty_account: params.counterparty_account || '',
+      status: params.status || '交易成功',
+      product: params.product || '',
+      remark: params.remark || '',
+    };
+    box.innerHTML = '提交方式：<code>POST</code> ' + esc(url)
+      + '<div style="margin-top:6px">请求体（JSON）：</div>' + pre(body)
+      + '<div>返回：<code>{"success":true,"id":123,"message":"账单已提交"}</code></div>';
+    return;
+  }
+  if (qt === 'bill_batch') {
+    const one = {
+      source: params.source || '支付宝',
+      bill_time: params.bill_time || '2026-09-01 12:30:00',
+      amount: params.amount ? Number(params.amount) : 12.34,
+      direction: params.direction || '支出',
+      counterparty: params.counterparty || '',
+      remark: params.remark || '',
+    };
+    box.innerHTML = '提交方式：<code>POST</code> ' + esc(url)
+      + '<div style="margin-top:6px">请求体（JSON，records 为数组，可含多条）：</div>'
+      + pre({ records: [one, one] })
+      + '<div>返回：<code>{"success":true,"inserted":2,"skipped":0}</code></div>';
+    return;
+  }
+  if (qt === 'bill_notes') {
+    box.innerHTML = '获取<b>备注候选清单</b>：去重后的备注 + 使用次数 + 首末时间，'
+      + '可用于前台展示成可点击的备选，选中即用，不必手动输入。<br>'
+      + '<div style="margin-top:4px">返回：<code>{"success":true,"data":{"notes":[{"note":"已对账","count":12,...}]}}</code></div>';
+    return;
+  }
+  if (qt === 'bill_remark') {
+    const ids = (params.id || '').split(',').map(function (x) { return Number(x.trim()); })
+      .filter(function (n) { return !isNaN(n) && n > 0; });
+    const body = { ids: ids, note: params.note || '已对账' };
+    if (params.mode) body.mode = params.mode;
+    box.innerHTML = '单独提交备注：<code>POST</code> ' + esc(url)
+      + '<div style="margin-top:6px">请求体（JSON）：</div>' + pre(body)
+      + '<div>返回：<code>{"success":true,"updated":1,"ids":[123],"note":"已对账","mode":"set"}</code></div>'
+      + '<div style="margin-top:4px">前台点开某条详单后，直接用带该条 <code>id</code> 的地址提交即可；'
+      + '<code>mode=append</code> 表示在原有备注后追加一行。</div>';
+    return;
+  }
+  if (qt === 'bill_update') {
+    const patch = {};
+    ['note', 'remark', 'category', 'direction', 'pay_method', 'status',
+      'product', 'counterparty', 'amount'].forEach(function (k) {
+      if (params[k] !== undefined && params[k] !== '') patch[k] = params[k];
+    });
+    const ids = (params.id || '').split(',').map(function (x) { return Number(x.trim()); })
+      .filter(function (n) { return !isNaN(n) && n > 0; });
+    const body = { ids: ids, ...patch };
+    if (!Object.keys(patch).length) body.note = '已对账';
+    box.innerHTML = '修改方式：<code>POST</code> ' + esc(url)
+      + '<div style="margin-top:6px">请求体（JSON）：</div>' + pre(body)
+      + '<div>返回：<code>{"success":true,"updated":1,"ids":[...],"fields":["note"]}</code></div>'
+      + '<div style="margin-top:4px">备注：<code>note</code>（可编辑，支持 POST 修改）；'
+      + '<code>remark</code> 为导入来源的备注。</div>';
+    return;
+  }
+  if (qt === 'bill_delete') {
+    box.innerHTML = '删除方式：<code>DELETE</code> ' + esc(url)
+      + '<div style="margin-top:4px">支持逗号分隔多个 id：<code>?id=1,2,3</code></div>';
+    return;
+  }
+  if (qt === 'bill_periods') {
+    box.innerHTML = '返回「有数据」的周期清单。<br>'
+      + '· <b>level</b>：all / year / month / day —— 年 / 年月 / 年月日；<br>'
+      + '· <b>mode</b>：minimal(极简：只返回存在的键) / simple(精简：含笔数)'
+      + ' / normal(一般：含收入·支出·净额) / full(完全：再含合计与首末时间)；<br>'
+      + '· 指定年月查哪些日：<code>level=day&month=2026-09</code>；<br>'
+      + '· 指定月日 / 几号 / 月份查哪些年：<code>level=year&month_day=10-09</code>、'
+      + '<code>level=year&day_of_month=09</code>、<code>level=year&month_of_year=10</code>。';
+    return;
+  }
+  if (qt === 'bill_options') {
+    box.innerHTML = '返回来源 / 类型 / 方向 / 方式 / 状态 的可选值清单，以及数据总量与时间跨度。';
+    return;
+  }
+  const desc = {
+    bill_dashboard: '首页仪表盘：<b>一次取全</b>概览页需要的全部数据 —— 总计 <code>summary</code> + 收支占比 <code>ratio</code> + 来源分布 <code>sources[]</code> + 年度收支 <code>years[]</code> + 最近 N 日小计 <code>days[]</code>/<code>days_total</code> + 最近 N 日明细 <code>recent[]</code>。'
+      + '<br><code>days</code>（默认 7）为最近天数；<code>recent_limit</code>（默认 80）为最近明细条数。'
+      + '<br>注意两条时间口径：<b>总计 / 年度收支 / 来源分布</b> 吃全部过滤（含 year/month）；<b>最近 N 日</b> 只吃维度过滤，基准日取「最新一笔账单的日期」（<code>base_date</code>），因此导入的历史账也能正确出图。'
+      + '<br><b>来源分布</b> 刻意剔除 <code>source</code> 过滤（否则选了某个来源就只剩自己一项），每条含 <code>source</code>/<code>count</code>/<code>income</code>/<code>expense</code>/<code>net</code>/<code>amount</code>（流水总额=收入+支出）/ <code>pct</code>（占流水总额百分比），按 amount 倒序。',
+    bill_history: '账单明细：支持来源/类型/方向/方式/对方/单号/账号/关键词/时间/金额区间过滤（含 <code>hour</code> 按小时过滤，多个逗号分隔）+ 分页；附带 summary 汇总。'
+      + '<br><code>order_by</code> 支持任意可排序列（<code>bill_time</code>/<code>amount</code>/<code>counterparty</code>/<code>category</code>/<code>pay_method</code>/<code>source</code>/<code>id</code>…），前缀 <code>-</code> 表示降序；'
+      + '<b>第二排序键恒为 <code>id DESC</code></b>（单字段排序遇到相同值时顺序不确定，翻页会重复/漏条）。',
+    bill_recent: '返回满足条件的最近 N 条明细（按时间倒序）。',
+    bill_latest: '返回满足过滤条件的最新一条账单。',
+    bill_periods: '数据可用性：level=all 返回 years / months / dates；也可只取其一（year/month/day）。',
+    bill_summary: '汇总统计：income(收入) / expense(支出) / net(净额) / count(笔数) + 极值。',
+    bill_group: '分组汇总：按 group_by 维度聚合，返回各分组的收入/支出/净额/笔数（按金额降序）。',
+    bill_trend: '趋势序列：granularity=year|month|day|hour，返回时间桶序列。',
+    bill_ranking: '排行榜：按 dimension 分组、by=amount|count 排序取前 N。',
+    bill_by_no: '按单号查询：<code>bill_no</code> 匹配本单号或对方单号，<code>bill_no_exact=1</code> 精确，默认模糊。',
+    bill_by_account: '按对方账号 / 对方查询：<code>account</code> 匹配对方账号或对方单号，<code>account_exact=1</code> 精确。返回附 counterparties 命中清单。',
+    bill_by_names: '多名称查询：<code>names</code> 逗号分隔多个名称，<b>按名称分组返回</b>（groups[] 各自含 summary）；<code>detail=1</code> 附带各名称明细 rows；<code>fields=bill_time,amount</code> 指定返回字段；<code>names_exact=1</code> 精确匹配。',
+    bill_by_day: '指定日交易（<code>date</code> 必填）：返回当日 summary + 24 小时分布 + 类型/方式分布 + 明细 records。',
+    bill_onthisday: '历史今日：今天（月-日）在<b>往年各天</b>的账单。默认 <code>month_day</code>=今天（可传 <code>MM-DD</code> 或 <code>day_of_month</code> 覆盖）；<code>detail=1</code>（默认）返回每年明细，<code>fields</code> 可指定字段；<code>only_past=1</code> 只看往年；<code>mode</code> 控制年度汇总的详细程度。返回 <code>on_this_day</code> + <code>total</code> + <code>years[]</code>（每年含 summary 与 rows）+ <code>rows</code>（平铺全部明细）。',
+    bill_calendar: '活跃日历：指定 <code>month</code>，返回每天是否有数据（count/income/expense/net）；<code>fill=1</code> 补齐整月无数据日。',
+    bill_meta: '数据概览：总量、时间跨度、天数、对方数、单号数 + 来源/类型/方向/方式/状态取值清单。',
+    bill_top: '单笔 Top N：<code>order=desc</code> 最大金额、<code>asc</code> 最小金额。',
+    bill_hour_dist: '小时分布：00-23 各小时的笔数 / 收入 / 支出 / 净额（几点花钱）。',
+    bill_weekday_dist: '星期分布：周日~周六 的笔数与金额。',
+    bill_dom_dist: '月内几号分布：每月 1-31 号的笔数与金额。',
+    bill_amount_dist: '金额区间分布：按 <code>step</code> 自动分桶，或用 <code>buckets=0,10,50,100</code> 自定义边界。',
+    bill_compare: '周期对比：<code>period</code> + <code>granularity</code>（默认环比；<code>yoy=1</code> 同比），或用 start1/end1 与 start2/end2 自定义两段。返回 A/B 汇总 + 差值 delta + 变化率 change_pct。',
+    bill_profile: '对方 / 账号画像：给定 counterparty 或 account，返回汇总 + 按年/月/类型/方式/方向/小时分布 + 近期记录。',
+    bill_month_day_years: '指定月日 / 几号 → 各年汇总（跨年分析）；支持 mode 极简/精简/一般/完全。',
+    bill_crosstab: '交叉汇总：<code>row_dim</code> × <code>col_dim</code>（维度或 year/month/day/hour/weekday），返回长表 rows + 透视 matrix。',
+    bill_heatmap: '时段热力图：星期 × 小时 的笔数矩阵 matrix。',
+    bill_split: '多值分类汇总：values 每个值各为一组，分别返回 summary（可选明细）。',
+    bill_netflow: '净现金流：按 granularity 分桶的 income/expense/net，并附带累计净额 cumulative_net。',
+    bill_income_expense: '收支对比：总览 summary + 收入/支出占比、储蓄率，以及按粒度的收支序列。',
+    bill_percentile: '金额分位数：min / P25 / P50 / P75 / P90 / P95 / P99 / max。',
+    bill_first_last: '首末交易：按 dim 分组，返回每个值的首次 first_time、最近 last_time、笔数与金额。',
+    bill_frequency: '交易频率排行：笔数、活跃天数/月数、时间跨度、月均/日均笔数。',
+    bill_interval: '交易间隔分析：同一维度值相邻交易的间隔（平均/最小/最大天数）。',
+    bill_recurring: '疑似定期/订阅：间隔落在 [min_days,max_days]（默认 26~35 天）且次数达标的维度值。',
+    bill_fixed_cost: '固定开销：在 ≥ min_months 个不同月份都出现的维度值，并估算月均固定支出 est_monthly_cost。',
+    bill_anomaly: '异常/大额交易：金额 ≥ 同 dim 组内均值 × factor 的记录（附 ratio 倍数）。',
+    bill_flow: '资金流向：from_dim → to_dim 的流量（nodes + links），可直接用于桑基图。',
+    bill_status_dist: '交易状态分布：成功/关闭/退款等各状态的笔数与金额。',
+    bill_product_top: '商品/说明 Top N：按金额或笔数排序。',
+    bill_seasonal: '季节性：按月份（01-12）跨年汇总的笔数与金额。',
+    bill_yoy: '逐年同月对比：每年每月金额 + 相对上一年同月的同比 yoy_expense_pct（矩阵）。',
+    bill_quality: '数据质量检查：空时间/空金额/零金额/空来源/空类型/负金额计数，以及疑似重复单号（同单号多条）。',
+  };
+  box.innerHTML = esc(desc[qt] || '个人账单查询。')
+    + '<br><span style="color:var(--text2)">时间维度由 bill_time 派生（year/month/day/hour），无需单独字段。</span>';
 }
 
 // 切换「历史今日」输出模式：重建参数区（各模式的字段集不同）
