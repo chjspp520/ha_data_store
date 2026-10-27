@@ -13593,9 +13593,22 @@ class VirtualDeviceView(_BaseDBView):
             return check
 
         vd_list = hass.data.get(DOMAIN, {}).get("virtual_devices", [])
-        data = [{"entity_id": d["entity_id"], "device_type": d["device_type"],
-                  "device_name": d["device_name"], "entity_count": d["entity_count"]}
-                 for d in vd_list]
+        # 灯光调光相关属性（前端「🎛 调光」面板要读当前亮度/色温/颜色）
+        light_keys = ("brightness", "color_mode", "color_temp_kelvin",
+                      "min_color_temp_kelvin", "max_color_temp_kelvin",
+                      "rgb_color", "hs_color", "supported_color_modes")
+        data = []
+        for d in vd_list:
+            st = hass.states.get(d["entity_id"])
+            attrs = dict(st.attributes) if st is not None else {}
+            data.append({
+                "entity_id": d["entity_id"],
+                "device_type": d["device_type"],
+                "device_name": d["device_name"],
+                "entity_count": d["entity_count"],
+                "state": st.state if st is not None else None,
+                "attributes": {k: attrs[k] for k in light_keys if attrs.get(k) is not None},
+            })
         return self.json({"success": True, "data": data})
 
     async def post(self, request: web.Request) -> web.Response:
@@ -13640,6 +13653,12 @@ class VirtualDeviceView(_BaseDBView):
             "max": body.get("max"),
             "step": body.get("step"),
             "options": body.get("options"),
+            # 虚拟灯光调光参数（支持模式 / 色温范围 / 初始亮度）
+            "supported_color_modes": body.get("supported_color_modes"),
+            "min_color_temp_kelvin": body.get("min_color_temp_kelvin"),
+            "max_color_temp_kelvin": body.get("max_color_temp_kelvin"),
+            "default_brightness": body.get("default_brightness"),
+            "default_color_temp_kelvin": body.get("default_color_temp_kelvin"),
         }
 
         try:
@@ -13767,6 +13786,116 @@ class VirtualDeviceImportView(_BaseDBView):
         except Exception as exc:
             _LOGGER.exception("[virtual] 导入虚拟设备失败")
             return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# ===========================================================================
+#  虚拟设备控制 API — VirtualDeviceStateView                                    #
+# ===========================================================================
+class VirtualDeviceStateView(_BaseDBView):
+    """控制虚拟设备（主要用于虚拟灯光：开关 / 亮度 / 色温 / 颜色）。
+
+    POST /api/ha_data_store/virtual_device/state
+    Body: {
+      "entity_id": "light.test",
+      "action": "on" | "off" | "toggle",          // 缺省 on
+      "brightness": 1-255,
+      "color_temp_kelvin": 2000-6500,
+      "rgb_color": [255, 0, 0],
+      "hs_color": [30, 80]
+    }
+    走标准服务调用（light.turn_on / switch.turn_on / …），不直接改内部字段，
+    所以状态、属性、自动化联动都与真实设备一致。
+    """
+
+    url = "/api/ha_data_store/virtual_device/state"
+    name = "api:ha_data_store:virtual_device_state"
+
+    _DOMAINS = ("light", "switch", "fan", "cover", "climate")
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        check = self._check_api_enabled(request)
+        if check is not None:
+            return check
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体需为 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return self.json({"success": False, "error": "请求体需为 JSON 对象"}, status_code=400)
+
+        entity_id = str(body.get("entity_id") or "").strip()
+        if "." not in entity_id:
+            return self.json({"success": False, "error": "entity_id 必填（如 light.test）"},
+                             status_code=400)
+        domain = entity_id.split(".", 1)[0]
+        if domain not in self._DOMAINS:
+            return self.json(
+                {"success": False,
+                 "error": f"只支持 {', '.join(self._DOMAINS)} 域的实体，收到 {domain}"},
+                status_code=400,
+            )
+
+        action = str(body.get("action") or body.get("state") or "").strip().lower()
+        data: dict[str, Any] = {"entity_id": entity_id}
+
+        def _int_range(key: str, low: int, high: int) -> None:
+            raw = body.get(key)
+            if raw is None or raw == "":
+                return
+            try:
+                data[key] = max(low, min(high, int(round(float(raw)))))
+            except (TypeError, ValueError):
+                pass
+
+        def _seq(key: str, size: int, cast) -> None:
+            raw = body.get(key)
+            if not isinstance(raw, (list, tuple)) or len(raw) < size:
+                return
+            try:
+                data[key] = [cast(x) for x in list(raw)[:size]]
+            except (TypeError, ValueError):
+                pass
+
+        _int_range("brightness", 1, 255)
+        _int_range("color_temp_kelvin", 1000, 12000)
+        _seq("rgb_color", 3, int)
+        _seq("hs_color", 2, float)
+        if body.get("effect") not in (None, ""):
+            data["effect"] = str(body["effect"])
+
+        try:
+            if action == "off":
+                await hass.services.async_call(
+                    domain, "turn_off", {"entity_id": entity_id}, blocking=True)
+            elif action == "toggle":
+                await hass.services.async_call(
+                    domain, "toggle", {"entity_id": entity_id}, blocking=True)
+            else:
+                if domain == "cover":  # 窗帘没有 turn_on，按开/关处理
+                    service = "close_cover" if action in ("close", "closed") else "open_cover"
+                    await hass.services.async_call(
+                        domain, service, {"entity_id": entity_id}, blocking=True)
+                else:
+                    await hass.services.async_call(domain, "turn_on", data, blocking=True)
+        except Exception as exc:
+            _LOGGER.exception("[virtual] 控制虚拟设备失败: %s", entity_id)
+            return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+        state = hass.states.get(entity_id)
+        _lg = _log_local()
+        if _lg:
+            _lg.info("[virtual] POST 控制虚拟设备 entity_id=%s action=%s data=%s state=%s",
+                     entity_id, action or "on", data, state.state if state else None)
+        return self.json({
+            "success": True,
+            "data": {
+                "entity_id": entity_id,
+                "state": state.state if state else None,
+                "attributes": dict(state.attributes) if state else {},
+            },
+        })
 
 
 # ===========================================================================

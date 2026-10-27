@@ -13,3 +13,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # 存储回调，供虚拟设备动态创建
     hass.data.setdefault(DOMAIN, {})["async_add_media_player"] = async_add_entities
     _LOGGER.info("[media_player] 平台已就绪，虚拟设备回调已存储")
+
+    # 实体编组：媒体编组（成员全是 media_player / kind=media）投影成媒体实体
+    try:
+        from .entity_group_entities import async_setup_entity_group_media_players
+        await async_setup_entity_group_media_players(hass, async_add_entities)
+    except Exception as e:  # noqa: BLE001
+        _LOGGER.exception("[entity_group] 编组 media_player 初始化失败: %s", e)

@@ -1676,6 +1676,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     disk_sensor = DiskUsageSensor(hass, device_info)
     timer_elves_sensor = TimerElvesSensor(hass, device_info)
     today_in_history_sensor = TodayInHistorySensor(hass, device_info)
+    # 实体编组（挂在「编组设备」下）：
+    #   sensor.ha_data_store_entity_groups  目录 sensor，属性即全量快照
+    #   sensor.ha_data_store_group_entities 所有编组实体，属性只留 icon/name
+    from .entity_group_entities import async_setup_entity_group_sensor
+    entity_group_sensor, group_entities_sensor = await async_setup_entity_group_sensor(hass)
     # 存引用，供按钮/服务触发按需刷新
     hass.data.setdefault(DOMAIN, {})["today_family_sensor"] = summary_sensor
     hass.data.setdefault(DOMAIN, {})["user_actions_sensor"] = user_actions_sensor
@@ -1687,7 +1692,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 helper_summary_sensor, power_all_sensor, whole_usage_sensor,
                 all_entities_sensor,
                 cpu_sensor, mem_sensor, disk_sensor, timer_elves_sensor,
-                today_in_history_sensor]
+                today_in_history_sensor, entity_group_sensor,
+                group_entities_sensor]
     # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
     url, attrs = await db_viewer_url_sensor._fetch_url()
     db_viewer_url_sensor._attr_native_value = url

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta
 
 from homeassistant.components.sensor import SensorEntity
@@ -38,6 +39,13 @@ _LOGGER = logging.getLogger(__name__)
 SAMPLE_SECONDS = 10        # 采样/积分间隔
 PERSIST_SECONDS = 60       # 日表落盘间隔
 GAP_DROP_SECONDS = 300     # 采样间隔超过此值丢弃该空窗（防 HA 停机误算）
+
+# 用电传感器「最小写状态间隔」（秒）。调大更省数据库/事件，调小更实时。
+# 原实现：每次源功率变化（约 10 秒）就重建 1.9KB 列表属性并写状态，
+# 63 个计量 × 3 个周期 ≈ 19 次/秒的 state_changed 事件；且 updated_at
+# 每次都变，使 recorder 的 attributes 去重完全失效（每天约 350MB）。
+# 用电量是缓慢累积量，10 分钟粒度完全够用（跨日仍会强制写一次）。
+POWER_SENSOR_WRITE_INTERVAL = 600  # 600=每 10 分钟；想更实时可改 60
 
 
 def _now_str() -> str:
@@ -287,6 +295,55 @@ def _merge_period_list(
     return items
 
 
+def _push_period_state(
+    ent,
+    period: str,
+    field: str,
+    list_field: str,
+    key: str,
+    date: str,
+    value: float,
+    list_value: float,
+) -> None:
+    """写入日/月/年用电传感器的状态（脏检查 + 节流 + 属性稳定化）。
+
+    三个实体共用同一份逻辑，改这里即可同时生效：
+      · 值没变且未跨日 → 直接返回，连 state_changed 事件都不产生；
+      · 同一日期内最多每 POWER_SENSOR_WRITE_INTERVAL 秒写一次；
+      · 跨日强制写一次，保证新一天的第一条数据不延迟。
+    """
+    cfg = ent._cfg
+    eid = cfg["entity_id"]
+    now = time.monotonic()
+    new_value = round(value, 3)
+    date_changed = ent._last_date != date
+
+    if not date_changed and new_value == ent._attr_native_value:
+        return
+    if not date_changed and now - ent._last_write < POWER_SENSOR_WRITE_INTERVAL:
+        return
+
+    attrs = {
+        "room": cfg.get("room") or "",
+        "device_name": cfg.get("device_name") or "",
+        "source_entity": eid,
+        "period": period,
+        "date": date,
+        "updated_at": _now_str(),
+        list_field: ent._mgr.period_list_of(eid, field, key, list_value),
+    }
+    if attrs == ent._attr_extra_state_attributes:
+        ent._last_write = now
+        ent._last_date = date
+        return
+
+    ent._last_write = now
+    ent._last_date = date
+    ent._attr_native_value = new_value
+    ent._attr_extra_state_attributes = attrs
+    ent.async_write_ha_state()
+
+
 class PowerDailySensor(SensorEntity):
     """今日用电量传感器（固定 ID）。"""
 
@@ -305,24 +362,18 @@ class PowerDailySensor(SensorEntity):
         self._attr_device_info = mgr.device_info(cfg)
         self._attr_native_value = 0.0
         self._attr_extra_state_attributes = {}
+        # 写状态节流状态（见 _push_period_state）
+        self._last_write = 0.0
+        self._last_date = ""
         # 固定实体 ID
         self.entity_id = f"sensor.ha_data_store_{slug}_daily_ele"
 
     def refresh_from_mgr(self) -> None:
-        cfg = self._cfg
-        eid = cfg["entity_id"]
-        cur = self._mgr.state_of(eid)
-        self._attr_native_value = round(cur["daily"], 3)
-        self._attr_extra_state_attributes = {
-            "room": cfg.get("room") or "",
-            "device_name": cfg.get("device_name") or "",
-            "source_entity": eid,
-            "period": "daily",
-            "date": cur["date"],
-            "updated_at": _now_str(),
-            "daylist": self._mgr.period_list_of(eid, "day", cur["date"], cur["daily"]),
-        }
-        self.async_write_ha_state()
+        cur = self._mgr.state_of(self._cfg["entity_id"])
+        _push_period_state(
+            self, "daily", "day", "daylist",
+            cur["date"], cur["date"], cur["daily"], cur["daily"],
+        )
 
 
 class PowerMonthlySensor(SensorEntity):
@@ -343,23 +394,17 @@ class PowerMonthlySensor(SensorEntity):
         self._attr_device_info = mgr.device_info(cfg)
         self._attr_native_value = 0.0
         self._attr_extra_state_attributes = {}
+        # 写状态节流状态（见 _push_period_state）
+        self._last_write = 0.0
+        self._last_date = ""
         self.entity_id = f"sensor.ha_data_store_{slug}_monthly_ele"
 
     def refresh_from_mgr(self) -> None:
-        cfg = self._cfg
-        eid = cfg["entity_id"]
-        cur = self._mgr.state_of(eid)
-        self._attr_native_value = round(cur["monthly"], 3)
-        self._attr_extra_state_attributes = {
-            "room": cfg.get("room") or "",
-            "device_name": cfg.get("device_name") or "",
-            "source_entity": eid,
-            "period": "monthly",
-            "date": cur["date"],
-            "updated_at": _now_str(),
-            "monthlist": self._mgr.period_list_of(eid, "month", cur["date"][:7], cur["monthly"]),
-        }
-        self.async_write_ha_state()
+        cur = self._mgr.state_of(self._cfg["entity_id"])
+        _push_period_state(
+            self, "monthly", "month", "monthlist",
+            cur["date"][:7], cur["date"], cur["monthly"], cur["monthly"],
+        )
 
 
 class PowerYearlySensor(SensorEntity):
@@ -380,23 +425,17 @@ class PowerYearlySensor(SensorEntity):
         self._attr_device_info = mgr.device_info(cfg)
         self._attr_native_value = 0.0
         self._attr_extra_state_attributes = {}
+        # 写状态节流状态（见 _push_period_state）
+        self._last_write = 0.0
+        self._last_date = ""
         self.entity_id = f"sensor.ha_data_store_{slug}_yearly_ele"
 
     def refresh_from_mgr(self) -> None:
-        cfg = self._cfg
-        eid = cfg["entity_id"]
-        cur = self._mgr.state_of(eid)
-        self._attr_native_value = round(cur["yearly"], 3)
-        self._attr_extra_state_attributes = {
-            "room": cfg.get("room") or "",
-            "device_name": cfg.get("device_name") or "",
-            "source_entity": eid,
-            "period": "yearly",
-            "date": cur["date"],
-            "updated_at": _now_str(),
-            "yearlist": self._mgr.period_list_of(eid, "year", cur["date"][:4], cur["yearly"]),
-        }
-        self.async_write_ha_state()
+        cur = self._mgr.state_of(self._cfg["entity_id"])
+        _push_period_state(
+            self, "yearly", "year", "yearlist",
+            cur["date"][:4], cur["date"], cur["yearly"], cur["yearly"],
+        )
 
 
 class PowerEnergyManager:

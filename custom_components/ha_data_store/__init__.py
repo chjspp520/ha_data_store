@@ -5066,6 +5066,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         VirtualDeviceView,
         VirtualDeviceExportView,
         VirtualDeviceImportView,
+        VirtualDeviceStateView,
         HelperScanView,
         HelperExportView,
         HelperImportView,
@@ -5169,6 +5170,7 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(VirtualDeviceView(db_path))
     hass.http.register_view(VirtualDeviceExportView(db_path))
     hass.http.register_view(VirtualDeviceImportView(db_path))
+    hass.http.register_view(VirtualDeviceStateView(db_path))
     hass.http.register_view(HelperScanView(db_path))
     hass.http.register_view(HelperExportView(db_path))
     hass.http.register_view(HelperImportView(db_path))
@@ -5230,6 +5232,10 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     # 个人账单查询 / 提交 API（独立模块）
     from .personal_bill import register_api_views as _bill_register_api_views
     _bill_register_api_views(hass, db_path)
+
+    # 实体编组 API（独立模块：编组壳 + 成员子资源 + 批量/排序/反查）
+    from .entity_group_views import register_api_views as _entity_group_register_api_views
+    _entity_group_register_api_views(hass, db_path)
 
 
 # =========================================================================== #
@@ -5326,6 +5332,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .personal_bill import ensure_tables as _bill_ensure_tables
     await hass.async_add_executor_job(_bill_ensure_tables, db_path)
 
+    # 实体编组模块：独立建表（entity_groups / entity_group_members / entity_groups_meta）
+    from .entity_group_store import EntityGroupStore
+    entity_group_store = EntityGroupStore(db_path)
+    await hass.async_add_executor_job(entity_group_store.ensure_schema)
+
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["entry_id"] = entry.entry_id
     hass.data[DOMAIN]["db_path"] = db_path
@@ -5339,6 +5350,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].setdefault("allow_remote_access", False)
     # 实体→网络 控制总开关：默认关闭（由 switch 实体在 async_added_to_hass 中恢复/覆盖）
     hass.data[DOMAIN].setdefault(PUSH_CONTROL_SWITCH_KEY, False)
+    # 实体编组存储（纯 sqlite，无 HA 依赖）：HTTP 视图与实体层共用一个实例
+    hass.data[DOMAIN]["entity_group_store"] = entity_group_store
 
     # ── 用户操作记录"收件箱"：POST /action_log 先落 JSON 临时文件，后台迁入 SQLite，
     #    防止 SQLite 瞬时锁库/写入失败导致前端上报（含 sendBeacon 无响应投递）丢数据 ──
@@ -5407,6 +5420,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }),
     )
     hass.data.setdefault(DOMAIN, {})["async_generate_daily_summary"] = _async_generate_daily_summary
+
+    # ── 实体编组：执行预设动作 / 内置 on·off（自动化与外部脚本的统一入口） ──
+    async def _async_run_entity_group_action(call) -> None:
+        data = call.data or {}
+        group_id = str(data.get("group_id") or "").strip()
+        action_id = str(data.get("action_id") or "").strip() or None
+        command = str(data.get("command") or "").strip().lower() or None
+        if not group_id:
+            _LOGGER.warning("[HDS] run_entity_group_action 缺少 group_id")
+            return
+        store = hass.data.get(DOMAIN, {}).get("entity_group_store")
+        if store is None:
+            _LOGGER.warning("[HDS] 编组存储未初始化，忽略执行请求")
+            return
+        if action_id:
+            command = None
+        elif command not in ("on", "off"):
+            command = "on"
+        try:
+            group = await hass.async_add_executor_job(store.get_group, group_id, True)
+            if not group:
+                _LOGGER.warning("[HDS] 编组不存在，无法执行: %s", group_id)
+                return
+            from .entity_group_actions import async_execute_group_action
+            await async_execute_group_action(
+                hass, group, action_id or None, command, source="service"
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.exception("[HDS] 执行编组动作失败: %s", exc)
+
+    hass.services.async_register(
+        DOMAIN,
+        "run_entity_group_action",
+        _async_run_entity_group_action,
+        schema=vol.Schema({
+            vol.Required("group_id"): cv.string,
+            vol.Optional("action_id", default=""): cv.string,
+            vol.Optional("command", default=""): cv.string,
+        }),
+    )
+
+    # 手动同步编组实体（排查"编组没生成 switch"用：调用后看日志里的三项数字）
+    async def _async_sync_entity_groups(call) -> None:
+        from .entity_group_entities import get_manager
+        try:
+            manager = get_manager(hass)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("[entity_group] 同步失败（管理器未就绪）: %s", exc)
+            return
+        snapshot = await manager.async_reload()
+        _LOGGER.warning(
+            "[entity_group] 手动同步完成：快照 %d 个编组 / 已建 switch %d 个 / 回调就绪=%s",
+            len(snapshot.get("groups") or []), len(manager._switches),
+            manager._add_switch is not None,
+        )
+
+    hass.services.async_register(
+        DOMAIN, "sync_entity_groups", _async_sync_entity_groups,
+        schema=vol.Schema({}),
+    )
 
     # ── 按钮：手动回填 device_history.icon（历史数据，按 report_entities 覆盖更新） ──
     async def _async_fill_device_icon() -> int:
@@ -5944,6 +6017,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await power_manager.async_stop()
         except Exception:
             _LOGGER.exception("[power] 用电计量停止异常")
+
+    entity_group_manager = hass.data.get(DOMAIN, {}).get("entity_group_manager")
+    if entity_group_manager is not None:
+        try:
+            entity_group_manager.async_shutdown()
+        except Exception:
+            _LOGGER.debug("[entity_group] 管理器停止异常", exc_info=True)
 
     for key in ("cancel_bus_listener", "cancel_env_poll", "cancel_attr_poll", "cancel_file_src", "cancel_api_src", "cancel_midnight_split", "cancel_correction_scan", "cancel_daily_summary", "cancel_backup_tick"):
         cancel = hass.data.get(DOMAIN, {}).get(key)

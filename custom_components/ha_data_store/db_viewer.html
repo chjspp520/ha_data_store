@@ -266,6 +266,22 @@
   .form-grid label { display: block; color: var(--text2); font-size: 12px; margin-bottom: 3px; }
   .form-grid input, .form-grid select { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px; box-sizing: border-box; }
   .form-grid input:focus, .form-grid select:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+  /* 固定前缀输入框（编组 ID 的 eg_ / 虚拟设备实体 ID 的 <域>.）：前缀只读，输入框只填后半段 */
+  .id-prefix-wrap { display: flex; align-items: stretch; width: 100%; }
+  .id-prefix-wrap .id-prefix {
+    display: flex; align-items: center; padding: 0 10px; white-space: nowrap;
+    background: #161b22; color: var(--accent);
+    border: 1px solid var(--border); border-right: none; border-radius: 6px 0 0 6px;
+    font-family: 'Consolas', 'Courier New', monospace; font-size: 13px;
+    user-select: none; cursor: default;
+  }
+  .id-prefix-wrap input[type="text"] {
+    flex: 1 1 auto; min-width: 0; width: auto; box-sizing: border-box;
+    background: #0d1117; color: var(--text); border: 1px solid var(--border);
+    border-radius: 0 6px 6px 0; padding: 7px 10px; font-size: 13px;
+    font-family: 'Consolas', 'Courier New', monospace;
+  }
+  .id-prefix-wrap input[type="text"]:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
   .form-actions { display: flex; justify-content: center; margin-top: 18px; gap: 10px; }
   .toast { position: fixed; top: 16px; right: 16px; padding: 12px 24px; border-radius: 8px; font-size: 14px;
            z-index: 999; animation: fadeOut 3s forwards; opacity: 0.95; }
@@ -565,6 +581,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('recent')">🕘 近期使用设备<span class="sub-tab-badge" id="badge-recent"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('onthisday')">📜 历史今日<span class="sub-tab-badge" id="badge-onthisday"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('metrics')">📊 指标管理<span class="sub-tab-badge" id="badge-metrics"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('groups')">🧩 实体编组<span class="sub-tab-badge" id="badge-groups"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('backfill')">📇 其他数据回填<span class="sub-tab-badge" id="badge-backfill"></span></button>
   </div>
 
@@ -573,11 +590,15 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <div id="manageListDevice"></div>
     <div class="section">
       <h3>添加设备类实体</h3>
-      <textarea id="txtDevice" placeholder="每行一个，格式：房间, 设备名称, 实体ID, [电量传感器ID|功率值W]&#10;&#10;示例：&#10;厨房, 烧水壶, input_boolean.shao_shui_hu, sensor.xxx   # 有电量传感器&#10;卧室, 台灯, switch.desk_lamp, 10                     # 固定功率10W&#10;客厅, switch.ac, sensor.ac_energy                     # 旧格式&#10;climate.hall                                           # 仅实体ID&#10;&#10;【注意】第4个参数含 . 视为电量传感器ID，纯数字视为固定功率(瓦特)"></textarea>
-      <div class="hint">第4参数：含 <code>.</code> 为电量传感器ID，纯数字为固定功率(W)。房间、设备名称均为选配。</div>
-          <div class="row">
-            <button class="btn-green" onclick="addDeviceEntities()">批量添加设备</button>
-          </div>
+      <div class="hint" style="margin-bottom:6px;line-height:1.75">
+        每行一个设备：<code>房间, 设备名称, 实体ID, 功率</code>，除实体ID外均可省略。<br>
+        功率填 <code>sensor.xxx</code> 为电量传感器，填数字为固定功率(W)；<code>#</code> 之后为注释。<br>
+        <span style="display:block;margin-top:4px;font-family:'Consolas',monospace">厨房, 烧水壶, input_boolean.shao_shui_hu, sensor.xxx<br>卧室, 台灯, switch.desk_lamp, 10<br>客厅, switch.ac, sensor.ac_energy<br>climate.hall</span>
+      </div>
+      <textarea id="txtDevice" placeholder="在此粘贴或输入设备行"></textarea>
+      <div class="row">
+        <button class="btn-green" onclick="addDeviceEntities()">批量添加设备</button>
+      </div>
         </div>
       </div>
 
@@ -586,11 +607,15 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <div id="manageListEnv"></div>
         <div class="section">
           <h3>添加传感器类实体</h3>
-      <textarea id="txtEnv" placeholder="每行一个，格式：指标: 房间, 实体ID, 采集频率(分钟), 可选int&#10;&#10;示例：&#10;temperature: 客厅, sensor.temp, 30&#10;humidity: sensor.hum, 30&#10;power: 厨房, sensor.power, 10, int&#10;sensor: 卧室, sensor.illuminance, 15&#10;&#10;可选指标: temperature/humidity/pm25/co2/power/sensor&#10;房间为选配，频率默认30分钟。int 表示整分钟采集（如10,int=每10分钟整点采集）"></textarea>
-      <div class="hint">可选指标: temperature / humidity / pm25 / co2 / power / sensor。房间和频率为选配。末尾加 <code>, int</code> 表示整分钟采集。</div>
-          <div class="row">
-            <button class="btn-green" onclick="addEnvEntities()">批量添加传感器</button>
-          </div>
+      <div class="hint" style="margin-bottom:6px;line-height:1.75">
+        每行一个传感器：<code>指标: 房间, 实体ID, 频率(分钟), int</code>，指标前缀必填，其余可省略（频率默认 30）。<br>
+        指标可选 <code>temperature</code> / <code>humidity</code> / <code>pm25</code> / <code>co2</code> / <code>power</code> / <code>sensor</code>；末尾加 <code>int</code> 表示按整分钟采集。<br>
+        <span style="display:block;margin-top:4px;font-family:'Consolas',monospace">temperature: 客厅, sensor.temp, 30<br>humidity: sensor.hum, 30<br>power: 厨房, sensor.power, 10, int<br>sensor: 卧室, sensor.illuminance, 15</span>
+      </div>
+      <textarea id="txtEnv" placeholder="在此粘贴或输入传感器行"></textarea>
+      <div class="row">
+        <button class="btn-green" onclick="addEnvEntities()">批量添加传感器</button>
+      </div>
         </div>
       </div>
 
@@ -1297,8 +1322,11 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           </select>
         </div>
         <div>
-          <label>实体 ID（纯英文，如 switch.test_flag）</label>
-          <input type="text" id="vdEntityId" placeholder="light.my_test_light" style="width:100%">
+          <label>实体 ID（前缀由设备类型决定，只需填后半段）</label>
+          <div class="id-prefix-wrap">
+            <span class="id-prefix" id="vdEntityPrefix">switch.</span>
+            <input type="text" id="vdEntityId" placeholder="my_test_switch">
+          </div>
         </div>
         <div>
           <label>设备名称（不填自动生成）</label>
@@ -1991,6 +2019,88 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 实体编组（entity_groups：一组实体当一个设备控制） -->
+  <div id="sub-groups" class="sub-panel">
+    <div class="section">
+      <h3>🧩 实体编组</h3>
+      <div class="hint">
+        把一组实体当成一个设备控制：编组状态按成员汇总，开关按成员所在域分派服务
+        （映射见 <code>const.py</code> 的 <code>ENTITY_GROUP_DOMAIN_SERVICE_MAP</code>）。
+        每个启用编组会投影成一个实体，<b>实体域完全由「类型」决定</b>（与成员域无关）：
+        lights/light → <code>light.hds_eg_*</code>、curtain → <code>cover.hds_eg_*</code>、
+        media → <code>media_player.hds_eg_*</code>、ac → <code>climate.hds_eg_*</code>，
+        socket / mixed（混编）/ device → 聚合开关 <code>switch.hds_eg_*</code>；
+        改类型后旧实体自动删除、按新域重建。目录见
+        <code>sensor.ha_data_store_entity_groups</code>。
+      </div>
+      <div class="form-actions">
+        <button class="btn-accent" onclick="loadEntityGroups()">🔄 刷新</button>
+        <button class="btn-green" onclick="egNew()">➕ 新建编组</button>
+        <span class="hint" id="egListHint"></span>
+      </div>
+      <div id="egListWrap">加载中...</div>
+    </div>
+
+    <div class="section" id="egEditor" style="display:none">
+      <h4 class="sep-title" id="egEditorTitle">新建编组</h4>
+      <div class="form-row">
+        <div class="full">
+          <label>编组 ID（前缀固定 <code>eg_</code>，只需填后半段；决定实体 id）</label>
+          <div class="id-prefix-wrap">
+            <span class="id-prefix">eg_</span>
+            <input type="text" id="egGroupId" placeholder="留空自动生成；如 ke_ting" maxlength="29"
+                   oninput="egPreviewEntityId()">
+          </div>
+          <div class="hint" id="egIdHint">entity_id：switch.hds_eg_&lt;自动生成&gt;</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>名称</label>
+          <input type="text" id="egName" placeholder="客厅主灯" maxlength="50">
+        </div>
+        <div>
+          <label>类型（决定编组实体域：lights→light、curtain→cover、media→media_player、ac→climate，其余→switch）</label>
+          <select id="egKind" onchange="egPreviewEntityId()">
+            <option value="mixed">mixed（混编 → switch）</option>
+            <option value="lights">lights（灯光组 → light）</option>
+            <option value="light">light（单灯 → light）</option>
+            <option value="socket">socket（插座 → switch）</option>
+            <option value="ac">ac（空调 → climate）</option>
+            <option value="curtain">curtain（窗帘 → cover）</option>
+            <option value="media">media（媒体 → media_player）</option>
+            <option value="device">device（设备 → switch）</option>
+          </select>
+        </div>
+        <div>
+          <label>图标（可选）</label>
+          <input type="text" id="egIcon" placeholder="mdi:lightbulb-group">
+        </div>
+        <div>
+          <label>启用</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:12px;margin-top:6px">
+            <input type="checkbox" id="egEnabled" checked> 参与实体投影
+          </label>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="full">
+          <label>成员（每行一个：<code>entity_id</code> 或 <code>entity_id, 显示名</code>）</label>
+          <textarea id="egMembers" rows="6" placeholder="light.ke_ting_zhu_deng&#10;light.ke_ting_deng_dai, 灯带&#10;switch.ke_ting_cha_zuo"></textarea>
+        </div>
+      </div>
+      <div class="hint">
+        顺序即开关内的成员顺序；只读域（sensor / binary_sensor 等）可以进编组用于展示与统计，
+        但不会参与开/关。禁止把编组（<code>eg_*</code>）当成员。
+      </div>
+      <div class="form-actions">
+        <button class="btn-green" onclick="egSave()">💾 保存</button>
+        <button class="btn-accent" onclick="egCloseEditor()">取消</button>
+        <span class="hint" id="egEditorHint"></span>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <!-- ================================================ -->
@@ -2423,6 +2533,28 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="otd:env:detail">环境 · 历年今日明细（逐条采样记录）</option>
           <option value="otd:env:ranking">环境 · 历年今日排行（按实体 / 房间）</option>
           <option value="otd:env:crosstab">环境 · 历年今日交叉汇总（房间 × 实体）</option>
+        </optgroup>
+        <optgroup label="🧩 实体编组">
+          <option disabled>──── 读接口（GET） ────</option>
+          <option value="eg:list">📋 编组列表（含成员 · enabled/kind/entity/keyword/分页）</option>
+          <option value="eg:version">🔢 编组版本号（脏检查用）</option>
+          <option value="eg:by_entity">🔎 按实体反查所属编组</option>
+          <option value="eg:detail">📄 编组详情（按编组 id）</option>
+          <option value="eg:members">👥 编组成员列表（可 ?entity= 查单个 / ?domain= 过滤）</option>
+          <option value="eg:diag">🩺 编组自检（逐方法探测，排查 500）</option>
+          <option disabled>──── 写接口（POST / PUT / PATCH / DELETE） ────</option>
+          <option value="eg:create">➕ 新建编组（POST）</option>
+          <option value="eg:batch">📦 批量新建 / 整库导入（POST）</option>
+          <option value="eg:order">↕ 编组排序（POST）</option>
+          <option value="eg:update">✏️ 全量更新编组（PUT · 可改名换实体 id）</option>
+          <option value="eg:patch">🩹 局部更新编组（PATCH · 成员不动）</option>
+          <option value="eg:delete">🗑 删除编组（DELETE · 成员级联）</option>
+          <option value="eg:members_add">➕ 批量新增成员（POST · 幂等 upsert）</option>
+          <option value="eg:member_put">✏️ 整体替换单个成员（PUT）</option>
+          <option value="eg:member_patch">🩹 局部更新单个成员（PATCH · extra 浅合并）</option>
+          <option value="eg:member_delete">🗑 移除单个成员（DELETE）</option>
+          <option value="eg:members_remove">🧹 批量移除成员（POST）</option>
+          <option value="eg:members_order">↕ 成员排序（POST）</option>
         </optgroup>
         <optgroup label="自定义路由" id="apiCustomRoutesGroup">
         </optgroup>
@@ -3016,6 +3148,12 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div id="apiBillParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
       <div id="apiBillHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
     </div>
+    <!-- 实体编组参数区（按 eg:* 查询类型动态渲染） -->
+    <div id="apiEgRow" style="display:none">
+      <label>实体编组参数（按接口动态变化，留空表示默认）</label>
+      <div id="apiEgParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
+      <div id="apiEgHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
+    </div>
   </div>
 
   <div class="section">
@@ -3157,6 +3295,34 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         在「查询类型」下拉的 <b>🌐 实体→网络</b> 分组里选一条，即可直接生成带真实 token 的地址
         （token 即密钥，地址<b>不需要</b>再带 <code>key</code>）。
         控制还需 HA 开关「实体网络控制」开启 + 该配置勾选「启用控制」，且动作必须在配置里授权过。
+      </div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">🧩 实体编组（独立路径，不走 type 参数）</div>
+      <table style="font-size:12px;line-height:1.6">
+        <tr><td style="color:var(--green);padding-right:16px">GET /entity_groups</td><td>编组列表 · enabled(1/0/all)/kind/entity/keyword/include_members/limit/offset</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">GET /entity_groups/version</td><td>版本号 + 编组数 + 最近更新时间（前端脏检查用）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">GET /entity_groups/by-entity/{entity_id}</td><td>反查该实体属于哪些编组</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">GET /entity_groups/_diag</td><td>自检 · 逐个探测存储层方法，定位 500 根因</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">GET /entity_groups/{group_id}</td><td>编组详情 · include_members</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">GET /entity_groups/{group_id}/members</td><td>成员列表 · ?entity= 查单个 / ?domain= 过滤</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /entity_groups</td><td>新建编组（可带自定义 id，如 <code>{"id":"eg_ke_ting","name":"客厅"}</code>）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /entity_groups/batch</td><td>批量 upsert / 整库导入</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /entity_groups/order</td><td>编组排序 · body <code>{"order":["eg_a","eg_b"]}</code></td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">PUT /entity_groups/{group_id}</td><td>全量更新（body 带新 <code>id</code> 即改名 → 重建 switch 实体）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">PATCH /entity_groups/{group_id}</td><td>局部更新（不传 members 则成员不动）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">DELETE /entity_groups/{group_id}</td><td>删除编组（成员级联删除）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST /entity_groups/{group_id}/members</td><td>批量新增成员（幂等 upsert）</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">PUT|PATCH|DELETE …/members?entity=</td><td>整体替换 / 局部更新（extra 浅合并）/ 移除 单个成员</td></tr>
+        <tr><td style="color:var(--green);padding-right:16px">POST …/members/remove · …/members/order</td><td>批量移除成员 · 成员排序</td></tr>
+      </table>
+      <div style="color:var(--text2);margin-top:6px">
+        编组实体：<b>由「类型」决定实体域</b>（与成员域无关）：<b>灯光组 → <code>light.hds_eg_&lt;后缀&gt;</code>、
+        窗帘组 → <code>cover.hds_eg_&lt;后缀&gt;</code>、媒体组 → <code>media_player.hds_eg_&lt;后缀&gt;</code>、
+        空调组 → <code>climate.hds_eg_&lt;后缀&gt;</code></b>，socket / 混编 / 设备 → 聚合开关
+        <code>switch.hds_eg_&lt;后缀&gt;</code>；改类型会让旧实体删除、按新域重建；
+        另有 <code>sensor.ha_data_store_entity_groups</code>（目录快照）、
+        <code>sensor.ha_data_store_group_entities</code>（所有编组实体 · entity_id/name/icon）。
+        读接口只需「API 访问」开关，写接口还需「数据库修改」开关；改 / 删可用 <code>rev</code> 做冲突校验（不匹配回 409）。
       </div>
 
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">rooms_multi_metric 参数（新增）</div>
@@ -4294,6 +4460,303 @@ function renderTimerApiHint(qt, url, values) {
   box.innerHTML = '<div style="color:var(--accent);font-weight:600;margin-bottom:4px">调用方式：POST（JSON body）</div>'
     + '<div class="push-guide-code" style="white-space:pre-wrap">' + escHtml(curl) + '</div>' + extra
     + '<div class="hint" style="margin-top:6px">写接口需「API 访问」与「数据库修改」两个开关都开启。</div>';
+}
+
+// ============================================================
+//  实体编组 API：地址生成器的参数区 / 调用示例
+//  接口根：/api/ha_data_store/entity_groups
+//  读：GET  list / version / by-entity / {id} / {id}/members / _diag
+//  写：POST create / batch / order / {id}/members[/remove|/order]
+//      PUT|PATCH {id}、PUT|PATCH|DELETE {id}/members?entity=
+//      DELETE {id}
+// ============================================================
+function _egFieldSpecs(qt) {
+  function T(name, label, ph, def) {
+    return { name: name, label: label, ph: ph || '', def: (def === undefined ? '' : def) };
+  }
+  function S(name, label, options, def) {
+    return { name: name, label: label, options: options, def: (def === undefined ? options[0] : def) };
+  }
+  function A(name, label, ph, def) {
+    return { name: name, label: label, ph: ph || '', def: (def === undefined ? '' : def), multiline: true };
+  }
+  function gid(ph) { return T('gid', '编组 ID（必填，eg_xxx）', ph || '如 eg_ke_ting'); }
+  function entity(label, ph) { return T('entity', label || '实体 ID（必填）', ph || '如 light.ke_ting'); }
+  function members(label) { return T('members', label || '成员实体（逗号分隔）', 'light.ke_ting,switch.cha_zuo'); }
+  function shell(extra) {
+    return [
+      T('name', '名称 name', '如 客厅灯'),
+      S('kind', '类型 kind', ['mixed', 'lights', 'socket', 'ac', 'curtain', 'media', 'device'], 'mixed'),
+      T('icon', '图标 icon', '如 mdi:lightbulb-group'),
+      S('enabled', '启用 enabled', ['1', '0'], '1'),
+    ].concat(extra || []);
+  }
+
+  switch (qt) {
+    case 'eg:list':
+      return [
+        S('enabled', '启用过滤 enabled', ['all', '1', '0'], 'all'),
+        T('kind', '类型 kind', '如 lights'),
+        T('entity', '包含该实体 entity', '如 light.ke_ting'),
+        T('keyword', '名称关键词 keyword', '按编组名模糊匹配'),
+        S('include_members', '返回成员 include_members', ['1', '0'], '1'),
+        T('limit', '每页条数 limit', '留空=全部'),
+        T('offset', '偏移 offset', '默认 0'),
+      ];
+    case 'eg:version':
+    case 'eg:diag':
+      return [];
+    case 'eg:by_entity':
+      return [entity('实体 ID（必填）')];
+    case 'eg:detail':
+      return [gid(), S('include_members', '返回成员 include_members', ['1', '0'], '1')];
+    case 'eg:members':
+      return [gid(), T('entity', '只看某个成员 entity', '留空=全部成员'), T('domain', '按域过滤 domain', '如 light')];
+    case 'eg:create':
+      return [T('gid', '编组 ID（可留空自动生成 eg_xxxx）', '如 eg_ke_ting')].concat(shell([members()]));
+    case 'eg:batch':
+      return [
+        A('groups', '编组数组 groups（JSON 数组 · 留空用示例）',
+          '[{"name":"客厅","kind":"lights","members":[{"entity_id":"light.ke_ting"}]}]'),
+        S('mode', '模式 mode', ['upsert', 'replace'], 'upsert'),
+        T('deleted', '要删除的编组 id（逗号分隔，可选）', 'eg_old1,eg_old2'),
+      ];
+    case 'eg:order':
+      return [T('order', '编组顺序 order（逗号分隔 id）', 'eg_a,eg_b,eg_c')];
+    case 'eg:update':
+    case 'eg:patch':
+      return [gid()].concat(shell([
+        members(),
+        T('new_id', '改名后的新 ID（可选，会重建 switch 实体）', '如 eg_ke_ting_2'),
+        T('rev', '版本 rev（可选，冲突校验）', '如 2'),
+      ]));
+    case 'eg:delete':
+      return [gid(), T('rev', '版本 rev（可选，冲突校验）', '如 2')];
+    case 'eg:members_add':
+      return [gid(), members()];
+    case 'eg:member_put':
+    case 'eg:member_patch':
+      return [gid(), entity(), T('name', '成员名称 name', '留空不改'), T('icon', '成员图标 icon', '如 mdi:lightbulb')];
+    case 'eg:member_delete':
+      return [gid(), entity()];
+    case 'eg:members_remove':
+      return [gid(), members('要移除的实体（逗号分隔）')];
+    case 'eg:members_order':
+      return [gid(), T('order', '成员顺序 order（逗号分隔实体）', 'light.a,light.b')];
+  }
+  return [];
+}
+
+function _egValues() {
+  const out = {};
+  document.querySelectorAll('#apiEgParamsBox [data-name]').forEach(function (el) {
+    const key = el.getAttribute('data-name');
+    if (!key) return;
+    out[key] = (el.value || '').trim();
+  });
+  return out;
+}
+
+function _egMethod(qt) {
+  if (qt === 'eg:create' || qt === 'eg:batch' || qt === 'eg:order' ||
+      qt === 'eg:members_add' || qt === 'eg:members_remove' || qt === 'eg:members_order') return 'POST';
+  if (qt === 'eg:update' || qt === 'eg:member_put') return 'PUT';
+  if (qt === 'eg:patch' || qt === 'eg:member_patch') return 'PATCH';
+  if (qt === 'eg:delete' || qt === 'eg:member_delete') return 'DELETE';
+  return 'GET';
+}
+
+function _egPath(qt, v) {
+  const gid = encodeURIComponent(v.gid || '');
+  switch (qt) {
+    case 'eg:list':
+    case 'eg:create':
+      return '';
+    case 'eg:version':
+      return '/version';
+    case 'eg:diag':
+      return '/_diag';
+    case 'eg:by_entity':
+      return '/by-entity/' + encodeURIComponent(v.entity || '');
+    case 'eg:batch':
+      return '/batch';
+    case 'eg:order':
+      return '/order';
+    case 'eg:detail':
+    case 'eg:update':
+    case 'eg:patch':
+    case 'eg:delete':
+      return '/' + gid;
+    case 'eg:members':
+    case 'eg:members_add':
+      return '/' + gid + '/members';
+    case 'eg:members_remove':
+      return '/' + gid + '/members/remove';
+    case 'eg:members_order':
+      return '/' + gid + '/members/order';
+    case 'eg:member_put':
+    case 'eg:member_patch':
+    case 'eg:member_delete':
+      return '/' + gid + '/members';
+  }
+  return '';
+}
+
+// 查询串参数（写接口也用 query 传 entity / rev）
+function _egQueryParams(qt, v) {
+  const q = {};
+  if (qt === 'eg:list') {
+    if (v.enabled && v.enabled !== 'all') q.enabled = v.enabled;
+    if (v.kind) q.kind = v.kind;
+    if (v.entity) q.entity = v.entity;
+    if (v.keyword) q.keyword = v.keyword;
+    if (v.include_members) q.include_members = v.include_members;
+    if (v.limit) q.limit = v.limit;
+    if (v.offset) q.offset = v.offset;
+  } else if (qt === 'eg:detail') {
+    if (v.include_members) q.include_members = v.include_members;
+  } else if (qt === 'eg:members') {
+    if (v.entity) q.entity = v.entity;
+    if (v.domain) q.domain = v.domain;
+  } else if (qt === 'eg:member_put' || qt === 'eg:member_patch' || qt === 'eg:member_delete') {
+    if (v.entity) q.entity = v.entity;
+  }
+  if ((qt === 'eg:update' || qt === 'eg:patch' || qt === 'eg:delete') && v.rev) q.rev = v.rev;
+  return q;
+}
+
+// 写接口的 JSON body；GET / DELETE 返回 null
+function _egBody(qt, v) {
+  function list(x) {
+    return String(x || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+  function memberObjs(x) {
+    return list(x).map(function (e) { return { entity_id: e }; });
+  }
+  function shellPayload() {
+    const body = {};
+    if (v.name) body.name = v.name;
+    if (v.kind) body.kind = v.kind;
+    if (v.icon) body.icon = v.icon;
+    if (v.enabled !== '' && v.enabled !== undefined) body.enabled = (v.enabled !== '0');
+    if (v.new_id) body.id = v.new_id;
+    const ms = memberObjs(v.members);
+    if (ms.length) body.members = ms;
+    return body;
+  }
+  switch (qt) {
+    case 'eg:create': {
+      const body = shellPayload();
+      if (v.gid) body.id = v.gid;
+      return body;
+    }
+    case 'eg:batch': {
+      let arr = null;
+      try { arr = JSON.parse(v.groups || '[]'); } catch (e) { arr = null; }
+      const body = {
+        mode: v.mode || 'upsert',
+        groups: (Array.isArray(arr) && arr.length)
+          ? arr
+          : [{ name: '客厅', kind: 'lights', members: [{ entity_id: 'light.ke_ting' }] }],
+      };
+      const del = list(v.deleted);
+      if (del.length) body.deleted = del;
+      return body;
+    }
+    case 'eg:update':
+    case 'eg:patch':
+      return shellPayload();
+    case 'eg:order':
+      return { order: list(v.order) };
+    case 'eg:members_add':
+      return memberObjs(v.members);
+    case 'eg:member_put':
+    case 'eg:member_patch': {
+      const body = {};
+      if (v.name) body.name = v.name;
+      if (v.icon) body.icon = v.icon;
+      return body;
+    }
+    case 'eg:members_remove':
+      return { entities: list(v.members) };
+    case 'eg:members_order':
+      return { order: list(v.order) };
+  }
+  return null;
+}
+
+function renderEgParams(qt) {
+  const box = document.getElementById('apiEgParamsBox');
+  if (!box) return;
+  const specs = _egFieldSpecs(qt);
+  box.innerHTML = '';
+  if (!specs.length) {
+    box.innerHTML = '<div class="hint" style="grid-column:1/-1">该接口无需参数，直接用生成的地址（可选填 API Key）。</div>';
+    generateApiUrl();
+    return;
+  }
+  specs.forEach(function (sp) {
+    const wrap = document.createElement('div');
+    if (sp.multiline) wrap.style.gridColumn = '1/-1';
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:11px;color:var(--text2);margin-bottom:2px';
+    label.textContent = sp.label;
+    let el;
+    if (sp.options) {
+      el = document.createElement('select');
+      sp.options.forEach(function (o) {
+        const opt = document.createElement('option');
+        opt.value = o;
+        opt.textContent = o === '' ? '（默认）' : o;
+        el.appendChild(opt);
+      });
+      el.value = sp.def;
+      el.onchange = generateApiUrl;
+    } else if (sp.multiline) {
+      el = document.createElement('textarea');
+      el.rows = 4;
+      el.placeholder = sp.ph || '';
+      el.value = sp.def || '';
+      el.oninput = generateApiUrl;
+    } else {
+      el = document.createElement('input');
+      el.type = 'text';
+      el.placeholder = sp.ph || '';
+      el.value = sp.def || '';
+      el.oninput = generateApiUrl;
+    }
+    el.setAttribute('data-name', sp.name);
+    el.style.cssText = 'width:100%;padding:6px;font-size:12px;background:var(--input-bg);'
+      + 'color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-family:inherit';
+    wrap.appendChild(label);
+    wrap.appendChild(el);
+    box.appendChild(wrap);
+  });
+  generateApiUrl();
+}
+
+function renderEgApiHint(qt, url, v) {
+  const box = document.getElementById('apiEgHint');
+  if (!box) return;
+  const method = _egMethod(qt);
+  const head = '<div style="color:var(--accent);font-weight:600;margin-bottom:4px">调用方式：'
+    + method + (method === 'GET' ? '（直接访问地址）' : '（JSON body）') + '</div>';
+  const auth = '<div class="hint" style="margin-top:6px">鉴权：<code>?key=</code> 传 API Key（与其它接口一致）；'
+    + '不带 key 时按管理页惯例只校验「API 访问」总开关。</div>';
+  if (method === 'GET') {
+    box.innerHTML = head
+      + '<div class="push-guide-code" style="white-space:pre-wrap">' + escHtml('curl "' + url + '"') + '</div>'
+      + auth;
+    return;
+  }
+  const body = _egBody(qt, v);
+  const curl = 'curl -X ' + method + ' "' + url + '"'
+    + (body === null ? '' : ' \\\n  -H "Content-Type: application/json" \\\n  -d \''
+      + JSON.stringify(body, null, 2) + '\'');
+  box.innerHTML = head
+    + '<div class="push-guide-code" style="white-space:pre-wrap">' + escHtml(curl) + '</div>' + auth
+    + '<div class="hint" style="margin-top:6px">写接口需「API 访问」与「数据库修改」两个开关都开启；'
+    + '改 / 删编组可用 <code>rev</code> 做冲突校验（不匹配回 409）。</div>';
 }
 
 // 初始化时加载路由列表 + 新接口列表 + 填充地址生成器下拉
@@ -5915,6 +6378,7 @@ const MONITOR_SEC_LABELS = {
   media: '🎵 媒体播放列表', recent: '🕘 最近使用设备', metrics: '📊 指标管理',
   automation: '🤖 自动化',
   timer: '⏱ 定时精灵',
+  groups: '🧩 实体编组',
 };
 
 // 给区块标题标注 data-sec（按标题文字匹配，忽略图标/角标/统计数字的差异）
@@ -6102,6 +6566,7 @@ async function loadMonitor() {
       '<div class="summary-card c-online" id="virtualCard" data-target="virtual" title="点击展开下方对应内容" onclick="expandMonitorSection(\'virtual\')"><div class="num">--</div><div class="lbl">🔮 虚拟设备</div><div class="card-sub"></div></div>' +
       '<div class="summary-card c-online" id="helperCard" data-target="helper" title="点击展开下方对应内容" onclick="expandMonitorSection(\'helper\')"><div class="num">--</div><div class="lbl">🧩 辅助元素</div><div class="card-sub"></div></div>' +
       '<div class="summary-card c-online" id="powerCard" data-target="power" title="点击展开下方对应内容" onclick="expandMonitorSection(\'power\')"><div class="num">--</div><div class="lbl">⚡ 用电计量</div><div class="card-sub"></div></div>' +
+      '<div class="summary-card c-online" id="groupCard" data-target="groups" title="点击展开下方对应内容" onclick="expandMonitorSection(\'groups\')"><div class="num">--</div><div class="lbl">🧩 实体编组</div><div class="card-sub"></div></div>' +
       makeCard('xiaoai','💬 小爱对话','xiaoaiCard') +
       makeCard('printer','🖨️ 打印机','printerCard') +
       makeCard('recent','🕘 最近使用设备','recentCard') +
@@ -6405,6 +6870,9 @@ async function loadMonitor() {
     html += '<h4 class="section-head title-good">⏱ 定时精灵 <span style="font-weight:400;font-size:11px;color:var(--text2)" id="timerStat">加载中...</span></h4>';
     html += '<div class="section-content collapsed"><div id="timerTbl" style="padding:8px;color:var(--text2)">加载中...</div></div>';
 
+    // -- 实体编组（数据取自 /api/ha_data_store/entity_groups，只含启用的编组）--
+    html += groupMonitorSectionHtml();
+
     content.innerHTML = html;
 
     // 绑定 section-head 点击展开/折叠（同时标注 data-sec，供 summary 卡片定位）
@@ -6429,6 +6897,7 @@ async function loadMonitor() {
     loadMonitorMedia();
     loadMonitorAutomation();
     loadMonitorTimer();
+    loadMonitorGroups();
   } catch(e) {
     content.innerHTML = '<div class="empty">请求失败: ' + e + '</div>';
     document.getElementById('pagination').style.display = 'none';
@@ -6897,6 +7366,453 @@ async function loadMonitorTimer() {
   } catch (e) { /* silent */ }
 }
 
+// ==============================
+//  🧩 实体编组（entity_groups）
+//  后端：entity_group_views.py / entity_group_store.py
+//  - 列表 GET  /entity_groups?enabled=all&include_members=1
+//  - 新建 POST /entity_groups
+//  - 更新 PUT  /entity_groups/{id}      （传 members 即整组替换）
+//  - 删除 DELETE /entity_groups/{id}    （成员级联）
+//  - 排序 POST /entity_groups/order     （sort = index*10）
+//  注：页面已对 /api/* 自动补 key（见 getPageKey 附近的 fetch 猴补丁），这里不用手动拼。
+// ==============================
+const ENTITY_GROUPS_API = '/api/ha_data_store/entity_groups';
+let egGroups = [];       // 最近一次列表（按 sort 顺序）
+let egVersion = 0;       // 全局 version（脏检查用）
+let egEditingId = '';    // 当前编辑中的编组 id；空 = 新建
+let egOriginalMembers = [];   // 编辑前的成员（保存时保留 extra/icon，避免文本框覆盖丢掉参数）
+
+async function egFetchJSON(url, opts) {
+  try {
+    const resp = await fetch(url, Object.assign({ credentials: 'same-origin' }, opts || {}));
+    let json;
+    try { json = await resp.json(); } catch (e2) { json = { success: false, error: 'HTTP ' + resp.status }; }
+    if (!json || typeof json !== 'object') json = { success: false, error: '响应不是 JSON' };
+    if (!json.success) json.error = json.error || ('HTTP ' + resp.status);
+    return json;
+  } catch (e) {
+    return { success: false, error: String(e) };
+  }
+}
+
+// 编组 id + kind → 编组实体 id（与后端 group_entity_domain() 完全同一规则）
+//   ac → climate、lights/light → light、curtain → cover、
+//   media → media_player、socket → switch、
+//   mixed（混编）/ device / 未知 → switch
+//   后端只看 kind、不看成员域，所以这里的预览就是最终实体前缀。
+// 编组 ID 的 `eg_` 前缀已固定在输入框左侧，输入框里只填后半段（完整 id = 'eg_' + 后半段）。
+// 后半段：2~32 位小写字母/数字/下划线，且不能以 _ 开头 → 拼出来一定是合法 entity object_id。
+const EG_SLUG_RE = /^[a-z0-9][a-z0-9_]{1,31}$/;
+const EG_KIND_DOMAIN = {
+  ac: 'climate', climate: 'climate',
+  lights: 'light', light: 'light',
+  socket: 'switch', switch: 'switch',
+  curtain: 'cover', cover: 'cover',
+  media: 'media_player', media_player: 'media_player',
+};
+
+function egDomainOf(kind) {
+  const k = String(kind || '').trim().toLowerCase();
+  return EG_KIND_DOMAIN[k] || 'switch';
+}
+
+const EG_DOMAIN_NOTE = {
+  climate: '（空调编组 → climate 实体，可用空调卡片控制温度/模式）',
+  light: '（灯光编组 → light 实体，可用灯光卡片调亮度/色温/颜色）',
+  cover: '（窗帘编组 → cover 实体，可用窗帘卡片开合/设位置）',
+  media_player: '（媒体编组 → media_player 实体，可用媒体卡片播放/音量）',
+  switch: '（socket / 混编 / 设备 → 聚合开关 switch 实体）',
+};
+
+function egEntityIdOf(groupId, kind) {
+  return egDomainOf(kind) + '.hds_eg_' + String(groupId || '').replace(/^eg_/, '');
+}
+
+// 编组 ID 输入框里只有后半段（`eg_` 前缀固定显示在输入框左侧）
+function egSlugOfInput() {
+  const el = document.getElementById('egGroupId');
+  return el ? String(el.value || '').trim().replace(/^eg_/i, '') : '';
+}
+
+function egPreviewEntityId() {
+  const el = document.getElementById('egGroupId');
+  const hint = document.getElementById('egIdHint');
+  if (!el || !hint) return;
+  // 前缀已固定：粘贴进来的 eg_ 自动剥掉，避免出现 eg_eg_xxx
+  const cleaned = String(el.value || '').replace(/^\s*eg_/i, '');
+  if (cleaned !== el.value) el.value = cleaned;
+  const slug = cleaned.trim();
+  const kindEl = document.getElementById('egKind');
+  const kind = kindEl ? kindEl.value : '';
+  const dom = egDomainOf(kind);
+  if (!slug) {
+    hint.innerHTML = 'entity_id：<code>' + dom + '.hds_eg_&lt;自动生成&gt;</code>（也可留空，保存后仍可改）';
+    return;
+  }
+  if (!EG_SLUG_RE.test(slug)) {
+    hint.innerHTML = '<span style="color:#e05252">后半段格式不对：2~32 位小写字母/数字/下划线，'
+      + '且不能以 <code>_</code> 开头（前缀 <code>eg_</code> 已自动带上）</span>';
+    return;
+  }
+  const raw = 'eg_' + slug;
+  const changed = egEditingId && raw !== egEditingId;
+  // 填了已存在的 id：提前告警（否则保存只会得到一句「编组已存在」）
+  const owner = egGroups.find(function(g) { return g.id === raw; });
+  if (owner && !(egEditingId && raw === egEditingId)) {
+    hint.innerHTML = '<span style="color:#e05252">该 ID 已被「' + escHtml(owner.name || raw)
+      + '」占用' + (egEditingId ? '，改 ID 会冲突，请换一个。'
+        : '；保存时会询问是否改为更新它。想新建请换一个 ID。') + '</span>'
+      + '<br>entity_id：<code>' + escHtml(egEntityIdOf(raw, kind)) + '</code>'
+      + (EG_DOMAIN_NOTE[dom] ? '<span style="color:var(--text2)">' + EG_DOMAIN_NOTE[dom] + '</span>' : '');
+    return;
+  }
+  hint.innerHTML = 'entity_id：<code>' + escHtml(egEntityIdOf(raw, kind)) + '</code>'
+    + (changed ? '<span style="color:#e0a052">（改 id 会删除旧实体并按新 id 重建）</span>' : '')
+    + (EG_DOMAIN_NOTE[dom] ? '<span style="color:var(--text2)">' + EG_DOMAIN_NOTE[dom] + '</span>' : '');
+}
+
+function egKindLabel(kind) {
+  const map = {
+    mixed: '混编', lights: '灯光组', light: '单灯', socket: '插座', ac: '空调',
+    curtain: '窗帘', media: '媒体', device: '设备',
+  };
+  return map[kind] || kind || '-';
+}
+
+// ── 系统监控区块 ──────────────────────────────────────────────
+function groupMonitorSectionHtml() {
+  return '<h4 class="section-head title-good">🧩 实体编组 '
+    + '<span style="font-weight:400;font-size:11px;color:var(--text2)" id="groupStat">加载中...</span></h4>'
+    + '<div class="section-content collapsed"><div id="groupMonitorTbl" '
+    + 'style="padding:8px;color:var(--text2)">加载中...</div></div>';
+}
+
+async function loadMonitorGroups() {
+  try {
+    const json = await egFetchJSON(ENTITY_GROUPS_API + '?enabled=all&include_members=1');
+    const stat = document.getElementById('groupStat');
+    const tbl = document.getElementById('groupMonitorTbl');
+    const card = document.getElementById('groupCard');
+    if (!json.success) {
+      if (stat) stat.textContent = '加载失败';
+      if (card) card.querySelector('.num').textContent = '--';
+      if (tbl) tbl.innerHTML = '<div class="hint" style="padding:6px 0">编组加载失败：' + escHtml(json.error || '') + '</div>';
+      return;
+    }
+    const groups = Array.isArray(json.groups) ? json.groups : [];
+    let memberTotal = 0;
+    let enabledCount = 0;
+    groups.forEach(function(g) {
+      memberTotal += (g.members || []).length;
+      if (g.enabled) enabledCount += 1;
+    });
+    if (stat) {
+      stat.textContent = '共 ' + groups.length + ' 个（启用 ' + enabledCount + '） · 成员 '
+        + memberTotal + ' · 版本 v' + (json.version || 0);
+    }
+    if (card) card.querySelector('.num').textContent = groups.length;
+    syncSummarySub('groups');   // 标题行（启用数/成员数/版本）→ 卡片第三行
+    setSubTabBadge('groups', groups.length);
+    if (!tbl) return;
+    if (!groups.length) {
+      tbl.innerHTML = '<div class="hint" style="padding:6px 0">还没有编组，'
+        + '<a href="javascript:void(0)" onclick="gotoEntityGroupManage()" style="color:var(--accent)">前往配置新建</a></div>';
+      return;
+    }
+    let html = '<div style="display:flex;justify-content:space-between;align-items:center;'
+      + 'gap:8px;flex-wrap:wrap;margin-bottom:8px">'
+      + '<span class="hint">编组实体按域投影：light / cover / media_player / climate / switch · 目录传感器 sensor.ha_data_store_entity_groups</span>'
+      + '<button class="btn-accent" style="font-size:12px;padding:4px 10px" '
+      + 'onclick="gotoEntityGroupManage()">⚙ 前往配置</button></div>'
+      + '<div class="table-wrap"><table><thead><tr>'
+      + '<th style="width:24%">编组</th><th style="width:9%">类型</th><th style="width:8%">成员</th>'
+      + '<th style="width:9%">启用</th><th style="width:32%">成员（前 4 个）</th>'
+      + '<th style="width:18%">更新</th></tr></thead><tbody>';
+    groups.forEach(function(g) {
+      const members = Array.isArray(g.members) ? g.members : [];
+      const sample = members.slice(0, 4).map(function(m) {
+        return escHtml(m.name ? (m.name + ' · ' + m.entity_id) : m.entity_id);
+      }).join('<br>')
+        + (members.length > 4 ? '<br><span class="hint">…还有 ' + (members.length - 4) + ' 个</span>' : '');
+      html += '<tr>'
+        + '<td><b>' + escHtml(g.name || '-') + '</b><br>'
+        + '<span class="hint">' + escHtml(g.id || '') + '</span><br>'
+        + '<span class="hint" style="opacity:.75">' + escHtml(egEntityIdOf(g.id, g.kind)) + '</span></td>'
+        + '<td style="font-size:12px">' + escHtml(egKindLabel(g.kind)) + '</td>'
+        + '<td>' + members.length + '</td>'
+        + '<td><span class="badge ' + (g.enabled ? 'badge-online' : 'badge-offline') + '">'
+        + (g.enabled ? '启用' : '停用') + '</span></td>'
+        + '<td style="font-size:12px;color:var(--text2)">'
+        + (sample || '<span class="hint">（无成员）</span>') + '</td>'
+        + '<td style="font-size:12px;color:var(--text2)">' + escHtml(fmtTime(g.updated_at)) + '</td>'
+        + '</tr>';
+    });
+    html += '</tbody></table></div>';
+    tbl.innerHTML = html;
+  } catch (e) { /* silent */ }
+}
+
+function gotoEntityGroupManage() {
+  if (typeof switchTab === 'function') switchTab('manage');
+  if (typeof switchSubTab === 'function') switchSubTab('groups');
+}
+
+// ── 系统配置子选项卡 ──────────────────────────────────────────
+async function loadEntityGroups() {
+  const wrap = document.getElementById('egListWrap');
+  if (wrap) wrap.innerHTML = '<div class="hint">加载中...</div>';
+  const json = await egFetchJSON(ENTITY_GROUPS_API + '?enabled=all&include_members=1');
+  if (!json.success) {
+    if (wrap) wrap.innerHTML = '<div class="hint">加载失败：' + escHtml(json.error || '') + '</div>';
+    return;
+  }
+  egGroups = Array.isArray(json.groups) ? json.groups : [];
+  egVersion = json.version || 0;
+  renderEntityGroupList();
+  setSubTabBadge('groups', egGroups.length);
+}
+
+function renderEntityGroupList() {
+  const wrap = document.getElementById('egListWrap');
+  const hint = document.getElementById('egListHint');
+  if (!wrap) return;
+  if (hint) {
+    hint.textContent = '共 ' + egGroups.length + ' 个 · 版本 v' + egVersion
+      + '（保存后即时生效，无需重启 HA）';
+  }
+  if (!egGroups.length) {
+    wrap.innerHTML = '<div class="empty">还没有编组，点「➕ 新建编组」创建</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr>'
+    + '<th style="width:22%">名称</th><th style="width:9%">类型</th><th style="width:7%">成员</th>'
+    + '<th style="width:8%">启用</th><th style="width:24%">成员（前 4 个）</th>'
+    + '<th style="width:12%">更新时间</th><th style="width:18%">操作</th>'
+    + '</tr></thead><tbody>';
+  egGroups.forEach(function(g, idx) {
+    const members = Array.isArray(g.members) ? g.members : [];
+    const sample = members.slice(0, 4).map(function(m) {
+      return escHtml(m.name ? (m.name + ' · ' + m.entity_id) : m.entity_id);
+    }).join('<br>')
+      + (members.length > 4 ? '<br><span class="hint">…还有 ' + (members.length - 4) + ' 个</span>' : '');
+    const gid = escAttr(g.id);
+    html += '<tr>'
+      + '<td><b>' + escHtml(g.name || '-') + '</b><br>'
+      + '<span class="hint">' + escHtml(g.id || '') + '</span><br>'
+      + '<span class="hint" style="opacity:.75">' + escHtml(egEntityIdOf(g.id, g.kind)) + '</span></td>'
+      + '<td style="font-size:12px">' + escHtml(egKindLabel(g.kind)) + '</td>'
+      + '<td>' + members.length + '</td>'
+      + '<td><span class="badge ' + (g.enabled ? 'badge-online' : 'badge-offline') + '">'
+      + (g.enabled ? '启用' : '停用') + '</span></td>'
+      + '<td style="font-size:12px;color:var(--text2)">'
+      + (sample || '<span class="hint">（无成员）</span>') + '</td>'
+      + '<td style="font-size:12px;color:var(--text2)">' + escHtml(fmtTime(g.updated_at)) + '</td>'
+      + '<td><div style="display:flex;gap:4px;flex-wrap:wrap">'
+      + '<button class="btn-accent" style="font-size:12px;padding:3px 8px" '
+      + 'onclick="egEdit(\'' + gid + '\')">✏ 编辑</button>'
+      + '<button class="btn-accent" style="font-size:12px;padding:3px 8px" '
+      + 'onclick="egMove(\'' + gid + '\',-1)"' + (idx === 0 ? ' disabled' : '') + '>↑</button>'
+      + '<button class="btn-accent" style="font-size:12px;padding:3px 8px" '
+      + 'onclick="egMove(\'' + gid + '\',1)"' + (idx === egGroups.length - 1 ? ' disabled' : '') + '>↓</button>'
+      + '<button class="btn-del" style="font-size:12px;padding:3px 8px" '
+      + 'onclick="egDelete(\'' + gid + '\')">🗑 删除</button>'
+      + '</div></td></tr>';
+  });
+  html += '</tbody></table></div>';
+  wrap.innerHTML = html;
+}
+
+function egNew() {
+  egEditingId = '';
+  egOriginalMembers = [];
+  const box = document.getElementById('egEditor');
+  if (!box) return;
+  document.getElementById('egEditorTitle').textContent = '新建编组';
+  document.getElementById('egGroupId').value = '';
+  document.getElementById('egName').value = '';
+  document.getElementById('egKind').value = 'mixed';
+  egPreviewEntityId();   // 必须在 kind 设好之后，才能显示正确的实体域（switch / climate）
+  document.getElementById('egIcon').value = '';
+  document.getElementById('egEnabled').checked = true;
+  document.getElementById('egMembers').value = '';
+  document.getElementById('egEditorHint').textContent = '';
+  box.style.display = '';
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function egEdit(gid) {
+  const g = egGroups.find(function(x) { return x.id === gid; });
+  if (!g) {
+    showToast('本地列表里没有 ' + gid + '，请先点「🔄 刷新」再编辑', false);
+    return;
+  }
+  egEditingId = gid;
+  egOriginalMembers = Array.isArray(g.members) ? g.members : [];
+  const box = document.getElementById('egEditor');
+  if (!box) return;
+  document.getElementById('egEditorTitle').textContent = '编辑编组 · ' + (g.name || gid);
+  document.getElementById('egGroupId').value = (g.id || '').replace(/^eg_/, '');
+  document.getElementById('egName').value = g.name || '';
+  document.getElementById('egKind').value = g.kind || 'mixed';
+  egPreviewEntityId();   // 同上：kind 设好后再刷新 entity_id 预览
+  document.getElementById('egIcon').value = g.icon || '';
+  document.getElementById('egEnabled').checked = !!g.enabled;
+  document.getElementById('egMembers').value = (g.members || []).map(function(m) {
+    return m.name ? (m.entity_id + ', ' + m.name) : m.entity_id;
+  }).join('\n');
+  document.getElementById('egEditorHint').textContent = 'id=' + gid + ' · rev=' + (g.rev || 1);
+  box.style.display = '';
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function egCloseEditor() {
+  egEditingId = '';
+  egOriginalMembers = [];
+  const box = document.getElementById('egEditor');
+  if (box) box.style.display = 'none';
+}
+
+// 「entity_id」或「entity_id, 显示名」→ 成员数组（顺序即输入顺序）
+function egParseMembers(text) {
+  const out = [];
+  const seen = {};
+  String(text || '').split(/\r?\n/).forEach(function(line) {
+    let s = line.trim();
+    if (!s) return;
+    let eid = s;
+    let name = '';
+    const idx = s.indexOf(',');
+    if (idx >= 0) {
+      eid = s.slice(0, idx).trim();
+      name = s.slice(idx + 1).trim();
+    }
+    if (!eid || eid.indexOf('.') < 0) return;   // 无域名的行直接跳过
+    if (seen[eid]) return;
+    seen[eid] = 1;
+    out.push(name ? { entity_id: eid, name: name } : { entity_id: eid });
+  });
+  return out;
+}
+
+async function egSave() {
+  const hint = document.getElementById('egEditorHint');
+  const name = (document.getElementById('egName').value || '').trim();
+  if (!name) { showToast('请填写编组名称', false); return; }
+  // 输入框只有后半段，eg_ 前缀由程序补上（前缀已固定显示在输入框左侧）
+  const rawSlug = egSlugOfInput();
+  if (rawSlug && !EG_SLUG_RE.test(rawSlug)) {
+    showToast('编组 ID 格式不对：后半段需 2~32 位小写字母/数字/下划线，且不能以 _ 开头', false);
+    return;
+  }
+  const rawId = rawSlug ? ('eg_' + rawSlug) : '';
+  // 文本框只承载 entity_id / 显示名；编辑既有编组时把原有 extra、icon 带回去，
+  // 否则 PUT 整组替换会把这些参数清空。
+  const members = egParseMembers(document.getElementById('egMembers').value).map(function(m) {
+    const old = egOriginalMembers.find(function(o) { return o.entity_id === m.entity_id; });
+    if (!old) return m;
+    const merged = { entity_id: m.entity_id };
+    if (m.name) merged.name = m.name;
+    if (old.icon) merged.icon = old.icon;
+    if (old.extra && Object.keys(old.extra).length) merged.extra = old.extra;
+    return merged;   // 不继承 sort：顺序以文本框为准，服务端按 index*10 重排
+  });
+  const body = {
+    name: name,
+    kind: document.getElementById('egKind').value,
+    icon: (document.getElementById('egIcon').value || '').trim() || null,
+    enabled: document.getElementById('egEnabled').checked,
+    members: members,
+  };
+  if (rawId) body.id = rawId;   // 留空 → 后端自动生成；与当前 id 不同 → 后端改名（换实体 id）
+  // 实际要「更新」的编组 id；空 = 新建。
+  let targetId = egEditingId;
+  // 新建时填了已存在的 id：后端只会回 409「编组已存在」，这里先问一句，
+  // 允许直接转成更新（常见场景：想把已有编组改成别的类型/成员）。
+  if (!targetId && rawId) {
+    const taken = egGroups.find(function(g) { return g.id === rawId; });
+    if (taken) {
+      const ok = confirm('编组 ID「' + rawId + '」已存在（' + (taken.name || rawId) + '）。\n\n'
+        + '确定 = 改为更新它（用当前表单覆盖名称/类型/成员）\n'
+        + '取消 = 返回换一个 ID');
+      if (!ok) { if (hint) hint.textContent = '请换一个编组 ID'; return; }
+      targetId = rawId;
+    }
+  }
+  if (hint) hint.textContent = '保存中...';
+  const send = function(updateId) {
+    const isUpdate = !!updateId;
+    return egFetchJSON(
+      isUpdate ? (ENTITY_GROUPS_API + '/' + encodeURIComponent(updateId)) : ENTITY_GROUPS_API,
+      {
+        method: isUpdate ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+  };
+  let json = await send(targetId);
+  // 兜底：列表没刷新（本地 egGroups 过旧）时后端仍会回 409，同样允许一键改更新。
+  if (!json.success && !targetId && rawId && json.error === 'conflict'
+      && confirm('编组 ID「' + rawId + '」已存在。\n\n改为更新这个已有编组？')) {
+    targetId = rawId;
+    if (hint) hint.textContent = '保存中（改为更新）...';
+    json = await send(targetId);
+  }
+  if (!json.success) {
+    const msg = (json.error || '') + (json.detail ? ('：' + json.detail) : '');
+    if (hint) hint.textContent = '保存失败：' + msg;
+    showToast('保存失败：' + msg, false);
+    if (json.traceback) {
+      console.error('[entity_group] 服务端异常（' + (json.operation || '') + '）',
+                    Array.isArray(json.traceback) ? json.traceback.join('\n') : json.traceback);
+    }
+    return;
+  }
+  const warns = Array.isArray(json.warnings) ? json.warnings : [];
+  if (hint) hint.textContent = '已保存';
+  showToast('已保存「' + name + '」' + (warns.length ? '（有 ' + warns.length + ' 条提示）' : ''), true);
+  if (warns.length) console.warn('[entity_group] warnings:', warns);
+  egCloseEditor();
+  await loadEntityGroups();
+  if (typeof loadMonitorGroups === 'function') loadMonitorGroups();
+}
+
+async function egDelete(gid) {
+  const g = egGroups.find(function(x) { return x.id === gid; });
+  const label = g ? (g.name || gid) : gid;
+  if (!confirm('确定删除编组「' + label + '」？\n成员关系会一并删除，设备本身不受影响。')) return;
+  const json = await egFetchJSON(ENTITY_GROUPS_API + '/' + encodeURIComponent(gid), { method: 'DELETE' });
+  if (!json.success) {
+    showToast('删除失败：' + (json.error || '') + (json.detail ? ('：' + json.detail) : ''), false);
+    return;
+  }
+  showToast('已删除「' + label + '」（移除成员 ' + (json.removed_members || 0) + ' 个）', true);
+  if (egEditingId === gid) egCloseEditor();
+  await loadEntityGroups();
+  if (typeof loadMonitorGroups === 'function') loadMonitorGroups();
+}
+
+// 上移/下移：本地换位后整表提交顺序（服务端 sort = index*10）
+async function egMove(gid, dir) {
+  const idx = egGroups.findIndex(function(x) { return x.id === gid; });
+  const target = idx + dir;
+  if (idx < 0 || target < 0 || target >= egGroups.length) return;
+  const order = egGroups.map(function(x) { return x.id; });
+  const tmp = order[idx];
+  order[idx] = order[target];
+  order[target] = tmp;
+  const json = await egFetchJSON(ENTITY_GROUPS_API + '/order', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order: order }),
+  });
+  if (!json.success) {
+    showToast('排序失败：' + (json.error || ''), false);
+    return;
+  }
+  await loadEntityGroups();
+  if (typeof loadMonitorGroups === 'function') loadMonitorGroups();
+}
+
 // 从监控页「🤖 自动化」区块跳转到「自动化」选项卡（自动化列表）
 function gotoAutoManage() {
   if (typeof switchTab === 'function') switchTab('automation');
@@ -7110,7 +8026,14 @@ async function loadEntities(cat) {
 
     ents.forEach(e => {
       const catLabel = e.category === 'device' ? '设备' : (e.category === 'attribute' ? '属性' : '环境');
-      const metric = e.metric_type || (e.power_entity || '-');
+      // 指标列：属性/环境=metric_type；设备=电量传感器ID，若还配置了固定功率则一并显示（如 sensor.xxx · 10W）
+      let metric = e.metric_type || '';
+      if (!metric) {
+        const rating = parseFloat(e.power_rating) || 0;
+        if (e.power_entity) metric = e.power_entity;
+        if (rating > 0) metric = metric ? (metric + ' · ' + rating + 'W') : (rating + 'W');
+        if (!metric) metric = '-';
+      }
       html += '<tr>';
       html += '<td><input type="checkbox" class="row-check" value="' + escAttr(e.entity_id) + '" onchange="updateBatchCnt(\'list-' + catArg + '\')"></td>';
       html += '<td>' + escHtml(e.entity_id) + '</td>';
@@ -7574,6 +8497,7 @@ function switchSubTab(name) {
   if (name === 'recent') { loadRecentExclude(); }
   if (name === 'onthisday') { loadOtdExclude(); }
   if (name === 'metrics') { loadMetrics(); }
+  if (name === 'groups') { loadEntityGroups(); }
   if (name === 'backfill') { loadBackfillTypes(); loadCommBackfillStatus(); }
 }
 
@@ -12008,15 +12932,17 @@ async function reloadBridge() {
 // ==============================
 const VD_API = '/api/ha_data_store/virtual_device';
 
+// 虚拟设备的实体域：media / speaker 两个类型都映射到 media_player
+function vdDomainOf(t) {
+  return (t === 'media' || t === 'speaker') ? 'media_player' : String(t || 'switch');
+}
+
 function onVdTypeChange() {
   var t = document.getElementById('vdType').value;
   var div = document.getElementById('vdExtraFields');
-  // 自动填充实体 ID 前缀
-  var eidInput = document.getElementById('vdEntityId');
-  if (!eidInput.value || eidInput.value.endsWith('.')) {
-    var prefix = (t === 'media' || t === 'speaker') ? 'media_player' : t;
-    eidInput.value = prefix + '.';
-  }
+  // 实体 ID 的「域.」前缀固定显示在输入框左侧，随类型变化；用户只填后半段
+  var prefixEl = document.getElementById('vdEntityPrefix');
+  if (prefixEl) prefixEl.textContent = vdDomainOf(t) + '.';
   if (t === 'sensor') {
     div.style.display = 'block';
     div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
@@ -12038,6 +12964,23 @@ function onVdTypeChange() {
     div.style.display = 'block';
     div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
       '<div><label>初始状态</label><select id="vdInitVal" style="width:100%"><option value="">OFF</option><option value="1">ON</option></select></div></div>';
+  } else if (t === 'light') {
+    // 虚拟灯光：支持模式 + 色温范围 + 初始亮度/色温（创建后也能在「🎛 调光」面板里实时调整）
+    div.style.display = 'block';
+    div.innerHTML = '<div class="form-grid" style="margin-top:8px">' +
+      '<div class="full"><label>支持模式（HA 规定 onoff / brightness 只能单独出现）</label>' +
+        '<select id="vdColorModes" style="width:100%">' +
+          '<option value="color_temp,hs">色温 + 颜色（推荐，含亮度）</option>' +
+          '<option value="color_temp">仅色温（含亮度）</option>' +
+          '<option value="hs">仅颜色（含亮度）</option>' +
+          '<option value="brightness">仅亮度</option>' +
+          '<option value="onoff">仅开关</option>' +
+        '</select></div>' +
+      '<div><label>最低色温（K）</label><input type="number" id="vdMinKelvin" value="2000" min="1000" max="10000" style="width:100%"></div>' +
+      '<div><label>最高色温（K）</label><input type="number" id="vdMaxKelvin" value="6500" min="1001" max="12000" style="width:100%"></div>' +
+      '<div><label>初始亮度（1-255）</label><input type="number" id="vdBrightness" value="255" min="1" max="255" style="width:100%"></div>' +
+      '<div><label>初始色温（K）</label><input type="number" id="vdKelvin" value="4000" min="1000" max="12000" style="width:100%"></div>' +
+      '<div class="full hint">创建后点列表里的「🎛 调光」可实时调 亮度 / 色温 / 颜色</div></div>';
   } else {
     div.style.display = 'none';
   }
@@ -12055,18 +12998,34 @@ async function loadVirtualDevices() {
     }
     var html = '<h4>已创建的虚拟设备 (' + devices.length + '个)</h4>' +
       '<div class="table-wrap"><table><thead><tr>' +
-      '<th>实体 ID</th><th>类型</th><th>设备名</th><th>实体数</th><th style="width:60px">操作</th>' +
+      '<th>实体 ID</th><th>类型</th><th>设备名</th><th>状态</th><th>实体数</th><th style="width:150px">操作</th>' +
       '</tr></thead><tbody>';
     devices.forEach(function(d) {
+      var a = d.attributes || {};
+      var stateTxt = d.state == null ? '-' : d.state;
+      if (a.brightness != null) stateTxt += ' · 亮度 ' + Math.round(a.brightness / 255 * 100) + '%';
+      if (a.color_temp_kelvin != null) stateTxt += ' · ' + a.color_temp_kelvin + 'K';
+      if (Array.isArray(a.rgb_color)) {
+        stateTxt += ' · <span style="display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:-1px;border:1px solid var(--border);background:'
+          + vdRgbToHex(a.rgb_color) + '"></span>';
+      }
       html += '<tr>' +
         '<td>' + escHtml(d.entity_id) + '</td>' +
         '<td>' + escHtml(d.device_type) + '</td>' +
         '<td>' + escHtml(d.device_name) + '</td>' +
+        '<td class="hint">' + stateTxt + '</td>' +
         '<td>' + d.entity_count + '</td>' +
-        '<td><button class="btn-del" onclick="delVirtualDevice(&quot;' + d.entity_id + '&quot;)">删除</button></td>' +
+        '<td style="white-space:nowrap">' +
+          (d.device_type === 'light'
+            ? '<button class="btn" style="margin-right:4px" onclick="vdLightPanel(&quot;' + d.entity_id + '&quot;,&quot;'
+              + escHtml(d.device_name || '') + '&quot;)">🎛 调光</button>'
+            : '') +
+          '<button class="btn-del" onclick="delVirtualDevice(&quot;' + d.entity_id + '&quot;)">删除</button>' +
+        '</td>' +
         '</tr>';
     });
-    html += '</tbody></table></div>';
+    html += '</tbody></table></div>' +
+      '<div class="card" id="vdLightPanel" style="display:none;margin-top:10px"></div>';
     div.innerHTML = html;
   } catch(e) {
     div.innerHTML = '<div class="hint" style="color:var(--accent)">加载失败</div>';
@@ -12083,14 +13042,162 @@ async function delVirtualDevice(entityId) {
   } catch(e) { showToast('请求失败', false); }
 }
 
+// ---------- 虚拟灯光控制面板（亮度 / 色温 / 颜色） ----------
+const VD_STATE_API = VD_API + '/state';
+var _vdLightEntity = null;
+
+function vdRgbToHex(rgb) {
+  if (!Array.isArray(rgb) || rgb.length < 3) return '#ffd6aa';
+  return '#' + rgb.slice(0, 3).map(function (x) {
+    var n = Math.max(0, Math.min(255, parseInt(x, 10) || 0));
+    return ('0' + n.toString(16)).slice(-2);
+  }).join('');
+}
+
+function vdHexToRgb(hex) {
+  var m = /^#?([0-9a-fA-F]{6})$/.exec(String(hex || ''));
+  if (!m) return [255, 214, 170];
+  var v = parseInt(m[1], 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+
+async function vdLightPanel(entityId, name) {
+  var box = document.getElementById('vdLightPanel');
+  if (!box) return;
+  _vdLightEntity = entityId;
+  var dev = { state: 'off', attributes: {} };
+  try {
+    var json = await (await fetch(VD_API)).json();
+    (json.data || []).forEach(function (d) { if (d.entity_id === entityId) dev = d; });
+  } catch (e) { /* 取不到就用默认值 */ }
+  var a = dev.attributes || {};
+  var bright = a.brightness != null ? parseInt(a.brightness, 10) : 255;
+  var minK = parseInt(a.min_color_temp_kelvin, 10) || 2000;
+  var maxK = parseInt(a.max_color_temp_kelvin, 10) || 6500;
+  var kelvin = parseInt(a.color_temp_kelvin, 10) || 4000;
+  var hex = vdRgbToHex(a.rgb_color);
+  var isOn = dev.state === 'on';
+  // 只有灯真正声明的能力才渲染对应控件（onoff / brightness 只能单独出现）
+  var sup = Array.isArray(a.supported_color_modes)
+    ? a.supported_color_modes.map(String) : ['color_temp', 'hs'];
+  var canBright = sup.indexOf('onoff') < 0;
+  var canTemp = sup.indexOf('color_temp') >= 0;
+  var canColor = sup.indexOf('hs') >= 0 || sup.indexOf('rgb') >= 0
+    || sup.indexOf('rgbw') >= 0 || sup.indexOf('rgbww') >= 0 || sup.indexOf('xy') >= 0;
+
+  var blocks = '';
+  if (canBright) {
+    blocks += '<div class="full"><label>亮度：<span id="vdLBrightVal">' + Math.round(bright / 255 * 100) + '%</span></label>' +
+      '<input type="range" id="vdLBright" min="1" max="255" step="1" value="' + bright + '" style="width:100%"' +
+      ' oninput="document.getElementById(\'vdLBrightVal\').textContent=Math.round(this.value/255*100)+\'%\'"></div>';
+  }
+  if (canTemp) {
+    blocks += '<div class="full"><label>色温：<span id="vdLKelvinVal">' + kelvin + ' K</span>（' + minK + '~' + maxK + 'K）</label>' +
+      '<input type="range" id="vdLKelvin" min="' + minK + '" max="' + maxK + '" step="50" value="' + kelvin + '" style="width:100%"' +
+      ' oninput="document.getElementById(\'vdLKelvinVal\').textContent=this.value+\' K\'"></div>';
+  }
+  if (canColor) {
+    blocks += '<div><label>颜色</label><input type="color" id="vdLColor" value="' + hex
+      + '" style="width:100%;height:34px;padding:2px"></div>';
+  }
+  var modeOpts = '';
+  if (canColor) modeOpts += '<option value="color">颜色 + 亮度</option>';
+  if (canTemp) modeOpts += '<option value="kelvin">色温 + 亮度</option>';
+  if (canBright) modeOpts += '<option value="brightness">仅亮度</option>';
+  if (!modeOpts) modeOpts = '<option value="none">仅开 / 关</option>';
+
+  box.style.display = 'block';
+  box.innerHTML =
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+      '<b>🎛 虚拟灯光控制</b><code>' + escHtml(entityId) + '</code>' +
+      (name ? '<span class="hint">' + escHtml(name) + '</span>' : '') +
+      '<span class="hint">当前：' + escHtml(dev.state == null ? '-' : dev.state)
+        + ' · 能力：' + escHtml(sup.join(' / ')) + '</span>' +
+      '<span style="margin-left:auto">' +
+        '<button class="btn" onclick="vdLightToggle()">' + (isOn ? '关闭' : '开启') + '</button> ' +
+        '<button class="btn" onclick="document.getElementById(\'vdLightPanel\').style.display=\'none\'">收起</button>' +
+      '</span>' +
+    '</div>' +
+    '<div class="form-grid" style="margin-top:8px">' +
+      blocks +
+      '<div><label>本次发送</label><select id="vdLMode" style="width:100%">' + modeOpts + '</select></div>' +
+      '<div class="full"><button class="btn-accent" onclick="vdLightApply()">应用</button> ' +
+        '<span class="hint">颜色与色温互斥，按「本次发送」选一个；走 light.turn_on，状态/属性/自动化都联动。</span></div>' +
+    '</div>';
+}
+
+function vdLightPanelValue(id, fallback) {
+  var el = document.getElementById(id);
+  if (!el) return fallback;
+  var num = parseInt(el.value, 10);
+  return isNaN(num) ? fallback : num;
+}
+
+async function vdLightToggle() {
+  if (!_vdLightEntity) return;
+  var entityId = _vdLightEntity;
+  await vdPostState({ entity_id: entityId, action: 'toggle' });
+  await vdLightPanel(entityId, '');
+}
+
+async function vdLightApply() {
+  if (!_vdLightEntity) return;
+  var entityId = _vdLightEntity;
+  var bright = vdLightPanelValue('vdLBright', 255);
+  var kelvin = vdLightPanelValue('vdLKelvin', 4000);
+  var modeEl = document.getElementById('vdLMode');
+  var mode = modeEl ? modeEl.value : 'color';
+  var colorEl = document.getElementById('vdLColor');
+  var body = { entity_id: entityId, action: 'on', brightness: bright };
+  if (mode === 'kelvin') {
+    body.color_temp_kelvin = kelvin;
+  } else if (mode === 'color') {
+    body.rgb_color = vdHexToRgb(colorEl ? colorEl.value : '');
+  }
+  var json = await vdPostState(body);
+  if (json && json.success) {
+    await vdLightPanel(entityId, '');
+  }
+}
+
+async function vdPostState(body) {
+  try {
+    var resp = await fetch(VD_STATE_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var json = await resp.json();
+    if (json.success) {
+      var st = json.data || {};
+      showToast('已应用：' + body.entity_id + ' → ' + (st.state || '-'), true);
+    } else {
+      showToast('应用失败: ' + (json.error || '未知错误'), false);
+    }
+    return json;
+  } catch (e) {
+    showToast('请求失败', false);
+    return null;
+  }
+}
+
 async function createVirtualDevice() {
   var devType = document.getElementById('vdType').value;
-  var entityId = document.getElementById('vdEntityId').value.trim();
+  var prefixEl = document.getElementById('vdEntityPrefix');
+  var domain = String((prefixEl ? prefixEl.textContent : vdDomainOf(devType) + '.') || '')
+    .trim().replace(/\.$/, '') || vdDomainOf(devType);
+  var rawObj = document.getElementById('vdEntityId').value.trim();
+  // 容错：粘贴了带前缀的整串（light.xxx）→ 只取后半段
+  var objId = rawObj.indexOf('.') >= 0 ? rawObj.split('.').slice(1).join('.') : rawObj;
+  var entityId = objId ? (domain + '.' + objId) : '';
   var devName = document.getElementById('vdDeviceName').value.trim();
   var entName = document.getElementById('vdEntityName').value.trim();
 
-  if (!devType || !entityId) { showToast('请选择类型并输入实体 ID', false); return; }
-  if (!entityId.includes('.')) { showToast('实体 ID 需包含 .（如 light.test）', false); return; }
+  if (!devType || !objId) { showToast('请选择类型并输入实体 ID 后半段', false); return; }
+  if (!/^[a-z0-9_]+$/.test(objId)) {
+    showToast('实体 ID 后半段只能用小写字母 / 数字 / 下划线', false);
+    return;
+  }
 
   var body = { device_type: devType, entity_id: entityId };
   if (devName) body.device_name = devName;
@@ -12113,6 +13220,19 @@ async function createVirtualDevice() {
   }
   if (devType === 'select') {
     body.options = document.getElementById('vdOptions').value;
+  }
+  if (devType === 'light') {
+    // 调光参数（后端在 VirtualDeviceView 白名单 + _save_to_db 白名单里各存一份）
+    var cm = document.getElementById('vdColorModes');
+    var mk = document.getElementById('vdMinKelvin');
+    var xk = document.getElementById('vdMaxKelvin');
+    var bv = document.getElementById('vdBrightness');
+    var cv = document.getElementById('vdKelvin');
+    if (cm && cm.value) body.supported_color_modes = cm.value.split(',');
+    if (mk && mk.value) body.min_color_temp_kelvin = parseInt(mk.value, 10);
+    if (xk && xk.value) body.max_color_temp_kelvin = parseInt(xk.value, 10);
+    if (bv && bv.value) body.default_brightness = parseInt(bv.value, 10);
+    if (cv && cv.value) body.default_color_temp_kelvin = parseInt(cv.value, 10);
   }
 
   try {
@@ -13617,7 +14737,7 @@ function apiHideAllParamRows() {
     ['apiHealthNameRow', 0], ['apiHealthTypeRow', 0], ['apiMediaUserRow', 0],
     ['apiMediaIdRow', 0], ['apiMediaNameRow', 0], ['apiDeviceUserNameRow', 0],
     ['apiDeviceUserDirRow', 0], ['apiCommRow', 0], ['apiOtdRow', 0],
-    ['apiBillRow', 0],
+    ['apiBillRow', 0], ['apiEgRow', 0],
   ];
   rows.forEach(function (item) {
     const el = document.getElementById(item[0]);
@@ -13645,6 +14765,9 @@ function onApiTypeChange() {
   const isCommApi = qt.startsWith('comm:');
   const elCommRow = document.getElementById('apiCommRow');
   if (elCommRow) elCommRow.style.display = 'none';
+  // 默认隐藏实体编组参数区；仅 eg:* 分支会重新显示
+  const elEgRowDefault = document.getElementById('apiEgRow');
+  if (elEgRowDefault) elEgRowDefault.style.display = 'none';
   // 默认隐藏自定义参数区；仅自定义路由分支会重新显示
   document.getElementById('apiCustomParamsRow').style.display = 'none';
   // 默认隐藏实体→网络的调用方式区；仅 push 分支会重新显示
@@ -13821,6 +14944,15 @@ function onApiTypeChange() {
   if (isPush) {
     apiHideAllParamRows();
     generateApiUrl();
+    return;
+  }
+
+  // 实体编组（eg:*）：独立路径 /entity_groups，参数区按接口动态渲染
+  if (qt.startsWith('eg:')) {
+    apiHideAllParamRows();
+    const egRow = document.getElementById('apiEgRow');
+    if (egRow) egRow.style.display = 'block';
+    renderEgParams(qt);
     return;
   }
 
@@ -14822,6 +15954,23 @@ function generateApiUrl() {
       : '';
     document.getElementById('apiUrlOutput').value = url;
     renderPushApiHint(kind, target, url);
+    return;
+  }
+
+  // 实体编组：独立路径 /api/ha_data_store/entity_groups[…]
+  // 读接口用 query 传参；写接口路径带编组 id，body 示例见提示区
+  if (qt.startsWith('eg:')) {
+    const egValues = _egValues();
+    let egUrl = BASE_PATH + '/api/ha_data_store/entity_groups' + _egPath(qt, egValues);
+    const qp = [];
+    if (selectedApiKey) qp.push('key=' + encodeURIComponent(selectedApiKey));
+    const egExtra = _egQueryParams(qt, egValues);
+    Object.keys(egExtra).forEach(function (k) {
+      qp.push(encodeURIComponent(k) + '=' + encodeURIComponent(egExtra[k]));
+    });
+    if (qp.length) egUrl += '?' + qp.join('&');
+    document.getElementById('apiUrlOutput').value = egUrl;
+    renderEgApiHint(qt, egUrl, egValues);
     return;
   }
 

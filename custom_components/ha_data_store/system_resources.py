@@ -58,6 +58,15 @@ def _disk_total_usage(mount: str | None = None) -> dict | None:
     return None
 
 
+def _fmt_mb(mb) -> str | None:
+    """把 MB 数值格式化成可读文本（≥1024 MB 显示 GB），None 原样返回。"""
+    if not isinstance(mb, (int, float)):
+        return None
+    if mb >= 1024:
+        return f"{mb / 1024:.1f} GB"
+    return f"{mb:.0f} MB"
+
+
 def _cpu_model() -> str | None:
     """读取 CPU 型号（Linux /proc/cpuinfo，其余用 platform.processor()）。"""
     try:
@@ -345,7 +354,11 @@ class CpuUsageSensor(_SystemUsageSensor):
 
     def _extract(self, usage):
         self._attr_native_value = usage.get("cpu_percent")
-        self._attr_extra_state_attributes = {"type": "cpu", "percent": usage.get("cpu_percent")}
+        self._attr_extra_state_attributes = {
+            "type": "cpu",
+            "percent": usage.get("cpu_percent"),
+            "note": "主值即使用率百分比；每 30 秒刷新一次",
+        }
 
 
 class MemoryUsageSensor(_SystemUsageSensor):
@@ -359,12 +372,17 @@ class MemoryUsageSensor(_SystemUsageSensor):
         return "memory"
 
     def _extract(self, usage):
+        used = usage.get("mem_used_mb")
+        total = usage.get("mem_total_mb")
         self._attr_native_value = usage.get("mem_percent")
         self._attr_extra_state_attributes = {
             "type": "memory",
             "percent": usage.get("mem_percent"),
-            "used_mb": usage.get("mem_used_mb"),
-            "total_mb": usage.get("mem_total_mb"),
+            "used_mb": used,
+            "total_mb": total,
+            "used_text": _fmt_mb(used),
+            "total_text": _fmt_mb(total),
+            "note": "used_mb / total_mb 单位是 MB；主值是使用率百分比，每 30 秒刷新",
         }
 
 
@@ -379,10 +397,16 @@ class DiskUsageSensor(_SystemUsageSensor):
         return "disk"
 
     def _extract(self, usage):
+        used = usage.get("disk_used_mb")
+        total = usage.get("disk_total_mb")
         self._attr_native_value = usage.get("disk_percent")
         self._attr_extra_state_attributes = {
             "type": "disk",
             "percent": usage.get("disk_percent"),
-            "used_mb": usage.get("disk_used_mb"),
-            "total_mb": usage.get("disk_total_mb"),
+            "used_mb": used,
+            "total_mb": total,
+            "used_text": _fmt_mb(used),
+            "total_text": _fmt_mb(total),
+            "note": "统计的是 HA 运行盘（config 目录所在分区），"
+                    "used_mb / total_mb 单位是 MB；每 30 秒刷新",
         }

@@ -7,6 +7,14 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     hass.data.setdefault(DOMAIN, {})["async_add_light"] = async_add_entities
+
+    # 实体编组：灯光编组（成员全是 light / kind=lights）投影成 light 实体
+    try:
+        from .entity_group_entities import async_setup_entity_group_lights
+        await async_setup_entity_group_lights(hass, async_add_entities)
+    except Exception as e:  # noqa: BLE001
+        _LOGGER.exception("[entity_group] 编组 light 初始化失败: %s", e)
+
     bdi = get_bridge_device_info(entry.entry_id)
     try: be = get_bridge_entities_for_platform(hass, "light", bdi)
     except Exception as e: _LOGGER.error("[bridge] light: %s", e); return

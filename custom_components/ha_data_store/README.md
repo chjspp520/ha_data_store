@@ -44,9 +44,11 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
   - [21. 通讯数据（采集 + 查询）](#21-通讯数据采集--查询)
   - [22. 数据导入 / 导出（CSV · JSON）](#22-数据导入--导出csv--json)
   - [23. 个人账单（查询 / 分析 / 备注）](#23-个人账单查询--分析--备注)
+  - [24. 实体编组（含前端调用说明）](#24-实体编组含前端调用说明)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
+  - [实体编组接口](#实体编组接口)
   - [管理接口（仅局域网）](#管理接口仅局域网)
   - [高级接口](#高级接口)
 - [内置数据库浏览器](#内置数据库浏览器)
@@ -70,7 +72,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 | 🧹 **扫地机器人** | 监听扫地机器人坐标变化，记录轨迹数据 |
 | 🩺 **健康数据** | 存储血压、体温、身高、体重等健康记录，支持按人员查询 |
 | 🔗 **设备桥接** | 通过 WebSocket 连接远程 HA，将远程实体的状态和控制在本地无缝映射（开关/灯光/气候/窗帘/风扇/门锁/数值/选择/传感器/二进制传感器） |
-| 🖥️ **虚拟设备** | 动态创建自定义实体，支持多种设备类型和自定义属性；支持导出/导入（配置+状态）跨机迁移 |
+| 🖥️ **虚拟设备** | 动态创建自定义实体，支持多种设备类型和自定义属性；**虚拟灯光支持开关/亮度/色温/颜色（HS·RGB）全功能**（色温范围可配、状态可恢复，db_viewer 有「🎛 调光」面板 + `POST /virtual_device/state` 控制接口）；支持导出/导入（配置+状态）跨机迁移 |
 | 🧩 **辅助元素** | 扫描原生 HA 辅助元素（input_* / counter / binary_sensor）导出，B 机导入转为本集成自管实体（switch/number/select/button/text/binary_sensor），支持前台新建、全选批量删除；汇总实体 `sensor.ha_data_store_helper` |
 | ⚡ **用电计量** | 登记功率实体，10 秒采样积分自动生成日/月/年用电量实体并按天入库；汇总实体 `sensor.ha_data_store_all_power`；API 工具含查询分组 |
 | 🧹 **设备清理** | 一键扫描并清理本集成下无实体的空设备（安全，不误删主设备） |
@@ -99,6 +101,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 | 📞 **通讯数据** | 属性提取新增 `comm` 采集模式：按数组展开写入 **18 个固定字段**（我方/对方号码、归属地、姓名、通讯时间、地点、消息类型、数据来源、呼叫类型、时长、金额、流量、流量类型、内容、图片路径、我的坐标、对方运营商、对方坐标），列名与类型由系统固定，目标列可选源字段或**直接填固定值**；`2026/9/1 17:24` 自动规范化为 `2026-09-01 17:24:00`，`3分53秒` 等中文时长自动换算为秒，`1.5GB` / `512MB` 等流量自动换算为 MB；`comm.py` 提供明细/日期/排行/趋势/汇总/联系人/地点/时段 8 类查询，API 工具含专属分组 |
 | 📥 **数据导入 / 导出** | 数据浏览页把 CSV / JSON 导入任意表：字段映射 + 固定值、**追加 / Upsert**（多列唯一键）、自动建表与补列、🧪 试运行、分批进度与错误明细；基础值转换（`¥1,234.5`→`1234.5`、`2026/9/1`→`2026-09-01`）；导出表数据或空模板为 CSV（UTF-8 BOM，Excel 友好） |
 | 🧾 **个人账单** | 独立模块 `personal_bill.py` + 新表 `personal_bills`（支付宝 / 微信账单落库）：**42 类查询/分析**（明细、按单号/账号/多名称、多值分类汇总、数据可用性多档、分组/趋势/排行、交叉汇总、资金流向、净现金流、同比、异常、定期订阅、固定开销、金额分位数等）+ **写接口**（增 / 批 / 改 / 删）；支持**多名称**与**逗号多值**过滤、`fields` 返回字段**手动点选**、可编辑备注 `note`（`POST /bill/remark` 单独提交、`GET /bill/notes` 取候选供点击） |
+| 🔗 **实体编组** | 独立模块 `entity_group_store.py` / `entity_group_views.py` / `entity_group_entities.py` / `entity_group_actions.py` + 三张新表（`entity_groups` / `entity_group_members` / `entity_groups_meta`）：把一组实体当一个设备控制，**每个启用编组自动生成一个对应域的实体**——**灯光组 `light.hds_eg_*`、窗帘组 `cover.hds_eg_*`、媒体组 `media_player.hds_eg_*`、空调组 `climate.hds_eg_*`**、其余（socket / 混编 / 设备）为聚合开关 `switch.hds_eg_*`（**实体域只由「类型」决定，与成员域无关**，域平台不可用则降级为开关；成员是 switch 的灯/窗帘也能用 `turn_on/off` 兜底控制；亮度/色温/颜色、位置、音量、温度/模式/风速/摆风都直接广播给成员；state 由成员实时汇总，含 `on_count` / `partial` / `missing` / `on_entities`；单监听 + 反向索引只刷受影响实体；编组 id 可自定义、改名即换实体 id、域变化自动重建）；编组动作与 `automations.actions` 同构并支持 `$group` / `$group:light` 占位符；REST 全套 `/api/ha_data_store/entity_groups`（列表/新建/详情/全量·局部更新/删除/成员增删改排序/批量/排序/按实体反查/自检 `_diag`），db_viewer「🔗 实体编组」可视化编辑；所有编组实体挂在独立**「编组设备」**下，含两个传感器：`sensor.ha_data_store_entity_groups`（目录全量快照）、`sensor.ha_data_store_group_entities`（所有编组实体，精简投影 `entity_id`/`name`/`icon`，供前端与语音助手直接遍历） |
 
 ---
 
@@ -517,6 +520,24 @@ POST /api/ha_data_store/virtual_device
 ```
 
 虚拟设备会持久化到 `virtual_devices` 表，HA 重启后自动恢复。
+
+**虚拟灯光（`device_type: light`）**：支持开关 / 亮度 / 色温 / 颜色（HS·RGB）全功能。
+
+- 建灯时可配 `supported_color_modes`（默认 `["color_temp","hs"]`；也可 `["color_temp"]` /
+  `["hs"]` / `["brightness"]` / `["onoff"]`——HA 规定 onoff / brightness 不能与其它模式共存）、
+  `min_color_temp_kelvin`（默认 2000）、`max_color_temp_kelvin`（默认 6500）、
+  `default_brightness`（1-255，默认 255）、`default_color_temp_kelvin`（默认 4000）；
+- 这些参数会存进 `virtual_devices.extra_config`，重启后仍生效；
+- `supported_color_modes` 只声明灯真正支持的模式（`color_temp` + `hs` 或单独一档），
+  `light.turn_on` 支持 `brightness` / `color_temp_kelvin`（兼容旧式 `color_temp` mireds）/
+  `rgb_color` / `hs_color`，RGB↔HS 自动互转，超出范围自动夹取；
+- 状态通过 `RestoreEntity` 持久化：重启后亮度 / 色温 / 颜色 / color_mode 全部恢复，
+  导出/导入（`/virtual_device/export|import`）也带这些属性；
+- db_viewer「虚拟设备」列表新增「🎛 调光」面板（亮度滑块 + 色温滑块 + 颜色选择器 + 开关），
+  以及列表里的「状态」列（亮度百分比 / 色温 K / 颜色色块）；
+- 控制走新接口 `POST /api/ha_data_store/virtual_device/state`
+  （body `{entity_id, action: on|off|toggle, brightness?, color_temp_kelvin?, rgb_color?, hs_color?}`），
+  内部调用标准服务，所以属性、自动化、历史记录都与真实灯一致。
 
 ---
 
@@ -1714,6 +1735,250 @@ GET /api/ha_data_store/bill/notes?note_keyword=对账&limit=50
 
 ---
 
+### 24. 实体编组（含前端调用说明）
+
+把一组实体当成一个设备控制：编组状态按成员实时汇总，控制指令按成员所在域分派
+（映射见 `const.py` 的 `ENTITY_GROUP_DOMAIN_SERVICE_MAP`）。每个启用编组投影成
+**一个** HA 实体，实体域由「类型（kind）」决定，**与成员域无关**。
+
+前端有四种用法，优先用 ①②（纯前端，不经过 HTTP）；只有需要读写编组配置时才用 ③④。
+
+#### 24.1 实体域与 ID 规则
+
+| 类型 kind | 实体域 | 实体 id 示例 |
+|---|---|---|
+| `lights` / `light` | light | `light.hds_eg_ke_ting` |
+| `curtain` | cover | `cover.hds_eg_ke_ting` |
+| `media` | media_player | `media_player.hds_eg_ke_ting` |
+| `ac` | climate | `climate.hds_eg_ke_ting` |
+| `socket` | switch | `switch.hds_eg_ke_ting` |
+| `mixed`（混编）/ `device` / 未识别 | switch | `switch.hds_eg_ke_ting` |
+
+- 编组 id 形如 `eg_ke_ting`；实体 object_id 固定为 `hds_eg_<去掉 eg_ 的后半段>`。
+- **改名称 / 图标不换 entity_id；改 id 或改 kind 会删旧实体、按新域重建**。
+- 该域平台不可用（软导入失败）时自动降级 `switch`。
+- db_viewer 里「编组 ID」输入框只填**后半段**（`eg_` 固定显示），但 **REST 请求体里的 `id`
+  必须带完整 `eg_` 前缀**。
+
+#### 24.2 用法 ①：直接当普通实体调用（推荐）
+
+编组实体就是标准 HA 实体，前端卡片 / 自动化 / 脚本 / 语音都按普通实体处理：
+
+```js
+// 开关类（socket / mixed / device）
+await hass.callService('switch', 'turn_on', { entity_id: 'switch.hds_eg_ke_ting' });
+
+// 灯光组：亮度 / 色温 / 颜色都会广播给成员
+await hass.callService('light', 'turn_on', {
+  entity_id: 'light.hds_eg_ke_ting',
+  brightness_pct: 60,
+  color_temp_kelvin: 4000,
+});
+await hass.callService('light', 'turn_off', { entity_id: 'light.hds_eg_ke_ting' });
+
+// 窗帘组
+await hass.callService('cover', 'set_cover_position', {
+  entity_id: 'cover.hds_eg_ke_ting', position: 30,
+});
+await hass.callService('cover', 'open_cover', { entity_id: 'cover.hds_eg_ke_ting' });
+
+// 空调组
+await hass.callService('climate', 'set_temperature', {
+  entity_id: 'climate.hds_eg_ke_ting', temperature: 24,
+});
+await hass.callService('climate', 'set_hvac_mode', {
+  entity_id: 'climate.hds_eg_ke_ting', hvac_mode: 'cool',
+});
+
+// 媒体组
+await hass.callService('media_player', 'volume_set', {
+  entity_id: 'media_player.hds_eg_ke_ting', volume_level: 0.4,
+});
+```
+
+实体属性（`hass.states['light.hds_eg_ke_ting']`）：
+
+| 属性 | 说明 |
+|---|---|
+| `group_id` / `kind` / `rev` | 编组标识、类型、修订号 |
+| `member_count` / `on_count` / `partial` | 成员数 / 开启数 / 是否部分开启 |
+| `missing` | 成员里取不到状态的实体数 |
+| `on_entities` | 当前处于开启状态的成员 entity_id 列表 |
+| `domains` | 成员涉及的域（如 `["light"]`） |
+| `actions` | 编组预设动作 id 列表 |
+| `last_status` | 最近一次控制结果 `success` / `failed` |
+| 各域专有 | light：`brightness` / `color_temp_kelvin` / `hs_color` / `color_mode` / `effect`；cover：`current_cover_position`；climate：`current_temperature` / `temperature` / `hvac_mode` / `fan_mode`；media_player：`volume_level` / `media_title` |
+
+聚合口径：**任一成员 on → 编组 on**，`partial: true` 表示只有部分成员开着。
+
+#### 24.3 用法 ②：读编组清单（不用请求 API）
+
+两个传感器已经把清单放在状态属性里，前端直接读即可：
+
+```js
+// 完整目录（含 members / kind / rev / actions / options）
+const s = hass.states['sensor.ha_data_store_entity_groups'];
+const groups  = s.attributes.groups;    // 每个启用编组一条
+const version = s.attributes.version;   // 脏检查：变了才重建 UI
+const kinds   = s.attributes.kinds;     // {lights: 2, curtain: 1, ...}
+const counts  = s.attributes.counts;    // {groups: 3, members: 12}
+
+// 精简版（只留 entity_id / name / icon，适合卡片遍历与语音）
+const slim = hass.states['sensor.ha_data_store_group_entities'];
+const list = slim.attributes.groups;    // [{name, entity_id, icon, entities: [...]}]
+```
+
+`sensor.ha_data_store_entity_groups` 的 `groups[]` 结构：
+
+```jsonc
+{
+  "id": "eg_ke_ting", "name": "客厅灯", "kind": "lights",
+  "icon": null, "enabled": true, "rev": 3, "sort": 10,
+  "options": {}, "actions": [],
+  "members": [
+    { "entity_id": "light.ke_ting_zhu_deng", "name": "主灯", "icon": null, "sort": 0, "extra": {} }
+  ]
+}
+```
+
+> 注意：API / 传感器返回的 group 里**没有 `entity_id` 字段**，编组实体的 id 要按 24.1
+> 的规则用 kind 推导（`sensor.ha_data_store_group_entities` 那个精简版里才有现成的
+> `entity_id`）。这两个属性都在 `_unrecorded_attributes` 里，不进 recorder 历史
+> （避免 16 KB 上限），但 `hass.states` 里随时可读。
+
+#### 24.4 用法 ③：REST API（读写编组配置）
+
+基础路径 `/api/ha_data_store/entity_groups`。**完整接口清单、列表参数、请求体/返回结构、
+curl 示例、错误码、成员 `extra` 可用键都在
+[实体编组接口](#实体编组接口) 一节**；这里只给前端 `fetch` 写法。
+
+鉴权简版：带 `?key=<API Key>`（或 `Authorization` 头）→ 走 Key 校验，需开「API 访问」；
+不带 → 只校验总开关，HA 同源前端（已登录）可直接调；写操作另需「数据库修改」开关。
+
+列表 + 推导实体 id：
+
+```js
+const API = '/api/ha_data_store/entity_groups';
+
+async function listGroups() {
+  const r = await fetch(`${API}?enabled=all&include_members=1`);
+  const j = await r.json();
+  if (!j.success) throw new Error(j.error + (j.detail ? '：' + j.detail : ''));
+  return j;                        // {success, groups, total, version}
+}
+
+// kind → 域（与后端 group_entity_domain 完全一致：mixed / device → switch）
+const KIND_DOMAIN = {
+  ac: 'climate', climate: 'climate',
+  lights: 'light', light: 'light',
+  socket: 'switch', switch: 'switch',
+  curtain: 'cover', cover: 'cover',
+  media: 'media_player', media_player: 'media_player',
+};
+
+function groupEntityId(g) {
+  const dom = KIND_DOMAIN[g.kind] || 'switch';
+  return `${dom}.hds_eg_${String(g.id).replace(/^eg_/, '')}`;
+}
+```
+
+新建 / 更新 / 删除：
+
+```js
+// 新建：id 可省略（后端自动生成 eg_xxxxxxxx）
+const created = await fetch(API, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    id: 'eg_ke_ting',                 // 必须带 eg_ 前缀（和 db_viewer 输入框不同！）
+    name: '客厅灯',
+    kind: 'lights',                   // 决定实体域
+    enabled: true,
+    members: [
+      { entity_id: 'light.ke_ting_zhu_deng', name: '主灯' },
+      { entity_id: 'light.ke_ting_deng_dai', extra: { brightness_pct: 80 } },
+    ],
+  }),
+}).then(r => r.json());               // {success, group, version, warnings}
+
+// 局部更新（只改名字，不动成员）：带 ?rev= 做乐观锁，不匹配回 409
+await fetch(`${API}/eg_ke_ting?rev=3`, {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: '客厅主灯组' }),
+});
+
+// 全量更新（members 会整组替换）
+await fetch(`${API}/eg_ke_ting`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: '客厅灯', kind: 'lights',
+    members: [{ entity_id: 'light.a' }, { entity_id: 'light.b' }],
+  }),
+});
+
+// 删除
+await fetch(`${API}/eg_ke_ting`, { method: 'DELETE' });
+// → {success, removed_members, version}
+```
+
+成员级操作：
+
+```js
+// 批量新增（幂等：已存在则更新 name/icon/extra）
+await fetch(`${API}/eg_ke_ting/members`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify([{ entity_id: 'light.c' }, { entity_id: 'light.d', name: '灯带' }]),
+});
+
+// 单个成员的 name/icon/extra（PATCH 对 extra 做浅合并）
+await fetch(`${API}/eg_ke_ting/members?entity=light.c`, {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ extra: { brightness_pct: 40 } }),
+});
+
+// 移除
+await fetch(`${API}/eg_ke_ting/members?entity=light.c`, { method: 'DELETE' });
+```
+
+返回与错误：成功统一 `{"success": true, ...}`；失败 `{"success": false, "error", "detail"}`，
+`error` 可能是 `invalid_param`(400) / `not_found`(404) / `conflict`(409) / `internal_error`(500，
+带 `traceback` 最后几行，浏览器 Network 面板可直接看根因)。
+
+#### 24.5 用法 ④：服务调用
+
+```yaml
+# 立即同步编组实体（正常 30 秒自动同步一次；排查「新建了编组但没生成实体」用）
+service: ha_data_store.sync_entity_groups
+
+# 执行编组预设动作，或按 command 执行内置开/关
+service: ha_data_store.run_entity_group_action
+data:
+  group_id: eg_ke_ting
+  action_id: night          # 可选：编组 actions[].id，填了则忽略 command
+  command: "off"            # 可选：on / off，默认 on
+```
+
+#### 24.6 前端注意事项
+
+1. **写接口会自动触发实体同步**（视图写完调 `notify()` → 重读快照 → 增量增删实体），
+   不必手动刷新；万一没生成，调一次 `ha_data_store.sync_entity_groups`，日志会打印
+   「快照 N 个编组 / 已建实体 M 个 / 回调就绪=布尔」。
+2. **改 kind / 改 id 会换 entity_id**：旧实体删除、新实体重建，卡片与自动化里写死的
+   `entity_id` 要同步改；只改名称和图标不受影响。
+3. **`rev` 是乐观锁**：`PUT` / `PATCH` 可带 `?rev=`（或 body 里的 `rev`），不匹配 → 409，
+   多个前端同时编辑时用它避免互相覆盖。
+4. **`enabled=all`** 才会返回已停用的编组，默认只返回启用中的。
+5. **`include_members=0`** 只取壳（更快），需要成员时再拉 `/members`。
+6. **不要把 `groups` 属性塞进模板传感器**：属性体积大，recorder 单状态上限 16 KB
+   （编组类属性已 `_unrecorded_attributes` 排除历史，但仍占内存）。
+7. 编组实体统一挂在独立设备「**编组设备**」下，不是主集成设备。
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -1909,6 +2174,242 @@ POST   /api/ha_data_store/printer/configs/recollect?name=xxx   → 主动重采�
   "enabled": true
 }
 ```
+
+### 实体编组接口
+
+基础路径：`/api/ha_data_store/entity_groups`
+
+把一组实体当成一个设备控制。**建一个启用编组 = 生成一个对应域的实体**（域由 `kind` 决定，
+映射与 ID 规则见 [24. 实体编组](#24-实体编组含前端调用说明)）。
+
+**鉴权**
+
+- 带 `?key=<API Key>` 或 `Authorization` 头 → 走 API Key 校验，需开启「API 访问」开关；
+- 不带 → 只校验总开关，HA 同源前端（已登录）可直接调用；
+- **写操作**（POST / PUT / PATCH / DELETE）另需开启「数据库修改」开关。
+
+**接口一览**
+
+```
+GET    /api/ha_data_store/entity_groups                     → 列表（参数见下）
+GET    /api/ha_data_store/entity_groups/version             → 只取全局版本号（脏检查）
+GET    /api/ha_data_store/entity_groups/{gid}               → 单个编组详情
+POST   /api/ha_data_store/entity_groups                     → 新建（成功 201）
+PUT    /api/ha_data_store/entity_groups/{gid}               → 全量更新（body 带新 id = 改名）
+PATCH  /api/ha_data_store/entity_groups/{gid}               → 局部更新（不传 members 则成员不动）
+DELETE /api/ha_data_store/entity_groups/{gid}               → 删除（成员级联）
+
+GET    /api/ha_data_store/entity_groups/{gid}/members       → 成员列表（?entity= / ?domain=）
+POST   /api/ha_data_store/entity_groups/{gid}/members       → 批量新增成员（幂等 upsert）
+PUT    /api/ha_data_store/entity_groups/{gid}/members?entity=   → 整体替换单个成员
+PATCH  /api/ha_data_store/entity_groups/{gid}/members?entity=   → 局部更新（extra 浅合并）
+DELETE /api/ha_data_store/entity_groups/{gid}/members?entity=   → 移除单个成员
+POST   /api/ha_data_store/entity_groups/{gid}/members/remove    → 批量移除 {"entities":[...]}
+POST   /api/ha_data_store/entity_groups/{gid}/members/order     → 成员排序 {"order":[...]}
+
+POST   /api/ha_data_store/entity_groups/batch               → 批量保存 / 整库导入
+POST   /api/ha_data_store/entity_groups/order               → 编组排序
+GET    /api/ha_data_store/entity_groups/by-entity/{eid}     → 反查实体属于哪些编组
+GET    /api/ha_data_store/entity_groups/_diag               → 自检（逐个探测存储层方法）
+```
+
+**列表参数（GET `/entity_groups`）**
+
+| 参数 | 说明 |
+|---|---|
+| `id` / `ids` | 逗号分隔的编组 id（如 `eg_a,eg_b`） |
+| `kind` / `kinds` | 逗号分隔的类型（`lights,curtain`） |
+| `entity` | 只看包含该成员的编组（`light.x`） |
+| `q` / `keyword` | 按名称/id 模糊搜索 |
+| `enabled` | `1`（默认，只返回启用）/ `0`（只返回停用）/ `all`（全部） |
+| `include_members` | 默认 `1`；传 `0` 只取壳（更快） |
+| `sort` | 排序方式，可选 `sort`（默认，按 sort 升序）/ `name`（按名称）/ `updated_at`（最近更新优先）；其它值按默认处理 |
+| `limit` / `offset` | 分页；`limit` 不传则不限制 |
+
+**编组对象结构**
+
+```json
+{
+  "id": "eg_ke_ting",
+  "name": "客厅灯",
+  "kind": "lights",
+  "icon": "mdi:lightbulb-group",
+  "icon_on": null,
+  "icon_off": null,
+  "color_on": null,
+  "color_off": null,
+  "options": {},
+  "actions": [],
+  "default_on_action": null,
+  "default_off_action": null,
+  "sort": 10,
+  "enabled": true,
+  "rev": 1,
+  "created_at": 1760800000000,
+  "updated_at": 1760800500000,
+  "members": [
+    {
+      "entity_id": "light.ke_ting_zhu_deng",
+      "name": "主灯",
+      "icon": null,
+      "sort": 0,
+      "extra": { "brightness_pct": 80 }
+    }
+  ]
+}
+```
+
+> 返回里**没有 `entity_id` 字段**：编组实体的 id 按 `kind` 推导
+> （`<域>.hds_eg_<id 去 eg_>`，`mixed` / `device` → `switch`）；也可直接读
+> `sensor.ha_data_store_group_entities` 的 `groups[].entity_id`。
+
+**新建**
+
+```bash
+curl -X POST "http://homeassistant:8123/api/ha_data_store/entity_groups?key=$KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "eg_ke_ting",
+    "name": "客厅灯",
+    "kind": "lights",
+    "enabled": true,
+    "members": [
+      { "entity_id": "light.ke_ting_zhu_deng", "name": "主灯" },
+      { "entity_id": "light.ke_ting_deng_dai", "extra": { "brightness_pct": 80 } }
+    ]
+  }'
+```
+
+- `id` 可省略 → 后端自动生成 `eg_xxxxxxxx`（8 位随机）；自定义时**必须带 `eg_` 前缀**，
+  格式 `eg_` + 2~32 位小写字母/数字/下划线且不能以 `_` 开头。
+- 成功返回 **201**：`{"success": true, "group": {...}, "version": 13, "warnings": []}`；
+  `warnings` 会提示「成员实体当前不存在」这类非致命问题。
+
+**更新**
+
+```bash
+# 局部更新（只改名称，成员不动）
+curl -X PATCH "http://homeassistant:8123/api/ha_data_store/entity_groups/eg_ke_ting?key=$KEY&rev=3" \
+  -H "Content-Type: application/json" -d '{"name":"客厅主灯组","icon":"mdi:ceiling-light"}'
+
+# 全量更新：members 会整组替换（顺序即 sort = index*10）
+curl -X PUT "http://homeassistant:8123/api/ha_data_store/entity_groups/eg_ke_ting?key=$KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"客厅灯","kind":"lights","members":[{"entity_id":"light.a"},{"entity_id":"light.b"}]}'
+
+# 改名（body 里带新 id）：旧实体删除，按新 id 重建
+curl -X PUT "http://homeassistant:8123/api/ha_data_store/entity_groups/eg_ke_ting?key=$KEY" \
+  -H "Content-Type: application/json" -d '{"id":"eg_ke_ting_deng"}'
+```
+
+- `rev` 做乐观锁：`?rev=`（或 body 里的 `rev`）与库里不一致 → **409 conflict**；
+  不传则不校验。
+- 改 `kind`（域变化）或改 `id` 都会**删旧实体、按新 id/域重建**。
+
+**删除**
+
+```bash
+curl -X DELETE "http://homeassistant:8123/api/ha_data_store/entity_groups/eg_ke_ting?key=$KEY"
+# → {"success": true, "removed_members": 3, "version": 14}
+```
+
+（成员行级联删除，被编组的设备本身不受影响。）
+
+**成员接口**
+
+```bash
+# 列表（可按实体筛 / 按域筛）
+curl "http://homeassistant:8123/api/ha_data_store/entity_groups/eg_ke_ting/members?key=$KEY&domain=light"
+
+# 批量新增（幂等 upsert：已存在的按传入字段更新）
+curl -X POST "http://homeassistant:8123/api/ha_data_store/entity_groups/eg_ke_ting/members?key=$KEY" \
+  -H "Content-Type: application/json" \
+  -d '[{"entity_id":"light.c"},{"entity_id":"light.d","name":"灯带"}]'
+# → {"success": true, "added": ["light.c","light.d"], "updated": [], "skipped": [],
+#    "members": [...], "version": 15}
+
+# 单个成员局部更新（extra 浅合并）
+curl -X PATCH ".../entity_groups/eg_ke_ting/members?entity=light.c&key=$KEY" \
+  -H "Content-Type: application/json" -d '{"extra":{"brightness_pct":40}}'
+# → {"success": true, "member": {...}, "version": 16}
+
+# 移除单个 / 批量移除
+curl -X DELETE ".../entity_groups/eg_ke_ting/members?entity=light.c&key=$KEY"
+# → {"success": true, "removed": true, "member_count": 2, "version": 17}
+curl -X POST ".../entity_groups/eg_ke_ting/members/remove?key=$KEY" \
+  -H "Content-Type: application/json" -d '{"entities":["light.c","light.d"]}'
+# → {"success": true, "removed": ["light.c","light.d"], "member_count": 0, "version": 18}
+
+# 排序
+curl -X POST ".../entity_groups/eg_ke_ting/members/order?key=$KEY" \
+  -H "Content-Type: application/json" -d '{"order":["light.b","light.a"]}'
+```
+
+**成员 `extra` 可用键**（写进该成员的控制参数，优先级：设备当前值 < 编组 `options` < 成员 `extra`）
+
+```text
+brightness_pct, color_temp_kelvin, rgb_color, hs_color,
+hvac_mode, temperature, fan_mode, fan_level,
+position, volume_level
+```
+
+另外 `extra` 里可放 `on_service` / `on_data` / `off_service` / `off_data`
+（形如 `"light.turn_on"`）**完全接管**该成员的内置开/关。
+
+**批量保存 / 整库导入**
+
+```bash
+curl -X POST "http://homeassistant:8123/api/ha_data_store/entity_groups/batch?key=$KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "upsert",
+    "groups": [ { "id": "eg_a", "name": "灯组", "kind": "lights", "members": [...] } ],
+    "deleted": ["eg_old"]
+  }'
+```
+
+- `mode: "upsert"`（默认）按 id 有则更新、无则新建；`mode: "replace"` 先清空整表再写入。
+- 返回：`{"success": true, "groups": [...], "total": n, "version": v,
+  "applied": {"created": 1, "updated": 0, "deleted": 1}, "warnings": []}`。
+
+**排序 / 反查 / 版本**
+
+```bash
+# 编组排序（sort = index*10）
+curl -X POST ".../entity_groups/order?key=$KEY" \
+  -H "Content-Type: application/json" -d '{"order":["eg_a","eg_b"]}'
+
+# 反查某实体属于哪些编组
+curl ".../entity_groups/by-entity/light.ke_ting_zhu_deng?key=$KEY"
+# → {"success": true, "groups": [{...}], "total": 1}
+
+# 脏检查：只取版本号（几十字节）
+curl ".../entity_groups/version?key=$KEY"
+# → {"success": true, "version": 18, "count": 3, "updated_at": 1760800500000}
+```
+
+**返回与错误**
+
+- 成功：`{"success": true, ...}`；列表额外带 `total`、`version`。
+- 失败：`{"success": false, "error": "...", "detail": "..."}`
+
+| error | HTTP | 场景 |
+|---|---|---|
+| `invalid_param` | 400 | JSON 不合法、kind 不在白名单、id/entity_id 格式错、`order`/`entities` 非数组 |
+| `not_found` | 404 | 编组不存在；成员接口里 `member_not_found` |
+| `conflict` | 409 | 新建时 id 已存在；改名目标 id 被占用；`rev` 不匹配 |
+| `internal_error` | 500 | 未捕获异常，body 带 `operation` 与 `traceback`（最后几行，浏览器 Network 面板可直接看） |
+
+**行为语义**
+
+1. 任何写操作都会自动触发实体同步（重读快照 → 增量创建/删除编组实体），无需重启；
+   若怀疑没生效：`GET .../entity_groups/_diag` 自检，或调服务
+   `ha_data_store.sync_entity_groups`（日志会打印快照数/已建实体数/平台回调是否就绪）。
+2. 编组实体域只由 `kind` 决定（`mixed` / `device` → `switch`），详见 24.1。
+3. `enabled: false` 的编组保留配置但不投影实体。
+4. 编组 id 与实体 object_id 是绑定关系：**只改 name/icon 不换 entity_id；改 id 或改 kind 会重建**。
+5. 上限：单编组最多 **200** 个成员、**12** 个预设动作（单个动作最多 20 条行为），
+   编组 `name` ≤ 50 字符；`id` 一旦被外部自动化引用，建议不要再改。
 
 ### 管理接口（仅局域网）
 
@@ -2221,6 +2722,498 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v6.0.0 实体编组：实体域只由「类型」决定 + ID 前缀固定 + 前端调用说明（2026-10-26）
+
+> 相对 v5.4.1 的完整更新。**前端怎么调（实体 / 传感器 / REST / 服务）见
+> [24. 实体编组（含前端调用说明）](#24-实体编组含前端调用说明)。**
+
+**一、修「选了窗帘，实体前缀还是 switch」**
+
+现象：类型选 `curtain`，实体仍生成 `switch.hds_eg_*`。
+
+根因：`group_entity_domain()` 是「成员全同域时以成员域为准，kind 才兜底」。
+成员是 `switch.*`（灯/窗帘接开关很常见）时，无论类型选 lights / curtain 都回落成
+`switch.hds_eg_*`，与界面预览、用户预期都不一致。
+
+修复：**实体域只看 `kind`** ——
+
+| 类型（kind） | 实体域 | 实体 id 示例 |
+|---|---|---|
+| `lights` / `light` | light | `light.hds_eg_ke_ting` |
+| `curtain` | cover | `cover.hds_eg_ke_ting` |
+| `media` | media_player | `media_player.hds_eg_ke_ting` |
+| `ac` | climate | `climate.hds_eg_ke_ting` |
+| `socket` | switch | `switch.hds_eg_ke_ting` |
+| `mixed`（混编）/ `device` / 未识别 | switch | `switch.hds_eg_ke_ting` |
+
+改类型后旧实体自动删除、按新域重建；对应域平台不可用（软导入失败）时仍降级 `switch`。
+
+**二、跨域成员兜底**（避免选对类型后实体变空壳）
+
+新增 `_target_ids()` + `_call_members()`：
+
+- 灯光组 / 窗帘组若本域成员为空，回退到 `switch` 成员，`turn_on/turn_off`、
+  `open_cover/close_cover` 自动转成 `switch.turn_on/turn_off`；
+- 全是 switch 成员的灯光组只声明 `onoff`（不再给无效的亮度/色温滑条）；
+- 开关式窗帘的位置按开/关折算 `100 / 0`，`is_closed` 认 `off`。
+
+**三、修「保存失败：conflict：编组已存在: eg_ceshi」**
+
+原因是在「新建」状态下填了一个已存在的 ID，后端 `create_group` 只能回 409。
+现在 db_viewer：
+
+- 输入框填了已存在 ID → **红字提前告警**（新建 / 改名两种文案）；
+- 保存时若 ID 已存在 → 弹窗询问「改为更新该编组」，确定即改走 PUT；
+- 后端仍回 409（本地列表过旧）→ 再问一次并转更新；
+- 点「编辑」而本地列表未加载 → 提示先点「🔄 刷新」。
+
+**四、ID 输入框前缀固定**
+
+- 编组：`eg_` 改为输入框左侧只读标签，输入框只填后半段（如 `ke_ting`），
+  粘贴整串 `eg_xxx` 会自动剥前缀；
+- 虚拟设备：`switch.` / `light.` / `cover.` / `media_player.` … 随「设备类型」切换，
+  只填后半段；媒体与音响两个类型都映射 `media_player`；后半段限 `[a-z0-9_]`。
+
+**五、升级注意**
+
+已建好的编组会按当前类型重新投影。例如 `kind=mixed` 但成员全是 light 的旧编组，
+实体会从 `light.hds_eg_*` 变成 `switch.hds_eg_*` —— 想保留 light 实体就把类型改成
+「灯光组」。改类型 / 改 ID 都会让旧实体删除、新实体重建（自动化里引用旧 entity_id 的要同步改）。
+
+**验证**：`_test_entity_group_entities.py` **116 断言全过**（[12] 改为「kind=socket → switch、
+kind=ac → climate」；新增 [14c] 十条：switch 成员的灯光组→light 且只声明 onoff、
+turn_on/off 转成 switch.turn_on/off、switch 成员的窗帘组→cover、位置折算 100、
+open/close 转成 switch 开关）；存储 82 / 动作 41 / 视图 27 无回归；db_viewer 内联脚本 0 错误。
+
+### v5.4.1 灯光编组/虚拟灯光：修 supported_color_modes 非法导致实体加不进来（2026-10-26）
+
+现象（日志）：
+
+```
+Error adding entity light.hds_eg_ceshi for domain light with platform ha_data_store
+Error adding entity light.ceshi for domain light with platform ha_data_store
+HomeAssistantError: light.hds_eg_ceshi (...) sets invalid color modes
+  {ColorMode.BRIGHTNESS, ColorMode.ONOFF, ColorMode.HS, ColorMode.COLOR_TEMP}
+```
+
+根因：HA 的 `valid_supported_color_modes()` 有硬规则 —— **`onoff` 与 `brightness`
+都不能与其它模式共存**，只有 `color_temp` + `hs` 可以并列。v5.4.0 里两处都声明了四种模式，
+于是实体在 `capability_attributes` 阶段被直接拒绝：
+- 灯光编组 `EntityGroupLight.supported_color_modes`（原样并集成员能力 + 四模式兜底）；
+- 虚拟灯光 `VirtualLight.support_color_modes`（写死四模式）。
+
+修复：
+
+1. 新增归一化函数（`entity_group_entities.normalize_light_color_modes()` /
+   `virtual_devices._normalize_color_modes()`）：
+   `rgb/rgbw/rgbww/xy` → 收敛成 `hs`；只要出现 `onoff` 就只留 `{onoff}`；
+   只剩 `brightness` 就只留 `{brightness}`；`color_temp` 与 `hs` 可共存；
+2. **`color_mode` 必须落回 `supported_color_modes`**：
+   - 灯光编组：成员报 `rgb/xy` 等别名时映射成 `hs`，成员报 `onoff/brightness` 时
+     按 supported 里的合法项兜底（不再直接返回成员原值）；
+   - 虚拟灯光：`color_mode` 初值由 supported 决定（色温优先），
+     `turn_on` 只在声明支持时才改模式，恢复快照时也校验 `mode in supported`；
+3. 虚拟灯光建灯新增 `supported_color_modes` 参数（默认 `["color_temp","hs"]`，
+   也可选 `["color_temp"]` / `["hs"]` / `["brightness"]` / `["onoff"]`），
+   与 `min/max_color_temp_kelvin` 一起进 `http_api` + `_save_to_db` 双白名单；
+   `_apply_snapshot_fields()` 同样只在支持时才应用颜色/模式；
+4. db_viewer：新建灯光表单加「支持模式」下拉（标注 onoff / brightness 只能单独用），
+   「🎛 调光」面板按 `supported_color_modes` **动态隐藏**亮度 / 色温 / 颜色控件，
+   「本次发送」选项也只列可用组合。
+
+**验证**：`_test_entity_group_entities.py` **106 断言全过**（新增 8 条：onoff 组 → `{onoff}`、
+brightness 组 → `{brightness}`、`rgb+color_temp` 成员 → `{color_temp, hs}`、
+以及「`color_mode` 一定落在 supported 内」的校验）；`_test_virtual_light.py`
+**39 断言全过**（新增 8 条支持模式归一化 + onoff 灯忽略 brightness + 只调亮度不改模式）；
+视图 27 / 存储 82 / 动作 41 无回归；db_viewer 内联脚本语法 0 错误。
+
+### v5.4.0 编组按域投影（灯光/窗帘/媒体）+ 虚拟灯光支持亮度·色温·颜色（2026-10-26）
+
+**一、编组不再一律是开关**：`group_entity_domain()` 泛化为「成员域优先、kind 兜底、
+不可用降级 switch」，新增三个编组实体类与平台回调：
+
+| 编组 | 实体 | 关键能力 |
+|---|---|---|
+| 灯光组 | `light.hds_eg_<后缀>` | 亮度（开启成员均值）、色温（均值 + 成员 min/max K）、HS·RGB 自动互转、effect_list 并集；`turn_on` 的 brightness / color_temp_kelvin / hs_color / rgb_color 广播 |
+| 窗帘组 | `cover.hds_eg_<后缀>` | 位置均值、`is_closed` / `is_opening` / `is_closing`、`supported_features` 动态含 SET_POSITION；open / close / stop / set_position 广播 |
+| 媒体组 | `media_player.hds_eg_<后缀>` | 状态（任一 playing → playing，其次 paused，全 off → off）、音量均值、静音任一即静音、标题/app/source_list；play / pause / stop / volume / mute / next·prev 广播 |
+
+- `light.py` / `cover.py` / `media_player.py` 三个平台各自新增 `async_setup_entity_group_lights
+  / _covers / _media_players`（薄封装到新的通用入口
+  `async_setup_entity_group_platform(hass, domain, adder)`）；
+- manager 的 `_add_switch` / `_add_climate` 改为通用 `_adders` 字典，
+  自愈循环遍历 `GROUP_ENTITY_DOMAINS`（switch / light / cover / media_player / climate）；
+  `debug` 新增 `lights` / `covers` / `media_players` 与各自 `*_adder_ready`；
+- 三个新平台同样是**软导入**（`LIGHT_SUPPORT` / `COVER_SUPPORT` / `MEDIA_SUPPORT`），
+  任一平台不可用只让该域编组降级为聚合开关，不会拖挂其它平台；
+- db_viewer：`egKind` 下拉标注目标域、实体 id 预览/列表/监控显示正确前缀。
+
+**二、虚拟灯光（`light.*`）补全亮度 / 色温 / 颜色**（原来只有 ONOFF + 亮度）：
+
+- `VirtualLight` 重写：`supported_color_modes = {onoff, brightness, color_temp, hs}`，
+  支持 `brightness` / `color_temp_kelvin`（兼容旧式 `color_temp` mireds）/ `rgb_color` /
+  `hs_color`，RGB↔HS 用 `colorsys` 互转，超范围自动夹取；
+- 建灯参数：`min_color_temp_kelvin`（默认 2000）、`max_color_temp_kelvin`（默认 6500）、
+  `default_brightness`、`default_color_temp_kelvin`；`http_api` 与 `_save_to_db` 双白名单落库，
+  重启仍生效；
+- `RestoreEntity` 恢复亮度 / 色温 / 颜色 / `color_mode`；`_apply_snapshot_fields()`
+  同步支持（导出/导入跨机迁移也带这些属性）；
+- 新接口 `POST /api/ha_data_store/virtual_device/state`
+  （`VirtualDeviceStateView`，body `{entity_id, action: on|off|toggle, brightness?,
+  color_temp_kelvin?, rgb_color?, hs_color?}`）走标准 `light.turn_on/turn_off`，
+  属性 / 自动化 / 历史与真实灯一致；
+- `GET /virtual_device` 增加 `state` 与精简 `attributes`（brightness / color_mode /
+  color_temp_kelvin / min·max K / rgb_color / hs_color / supported_color_modes）；
+- db_viewer「虚拟设备」：列表新增「状态」列（亮度百分比 / 色温 K / 颜色色块）与「🎛 调光」面板
+  （开关 + 亮度滑块 + 色温滑块 + 颜色选择器 + 「本次发送」颜色/色温/仅亮度），
+  新建灯光表单新增色温范围与初始亮度/色温。
+
+**验证**：编组实体层 `_test_entity_group_entities.py` **98 断言全过**（新增 25 条覆盖 light /
+cover / media 三域的实体 id、亮度/色温/HS·RGB 取值、位置与开关状态、四类服务广播、
+`debug` 分类计数）；视图 27 / 存储 82 / 动作 41 无回归；新增
+`_test_virtual_light.py` **31 断言全过**（默认值、建灯配置、亮度/色温/RGB/HS 夹取与互转、
+mireds 换算、非法输入不抛错、写回次数、RestoreEntity 恢复）；db_viewer 内联脚本语法 0 错误。
+
+### v5.3.1 编组：修 climate 常量导入失败导致 switch/sensor/climate 三平台全挂（2026-10-26）
+
+现象（日志）：
+
+```
+ImportError: cannot import name 'ATTR_TEMPERATURE' from 'homeassistant.components.climate.const'
+custom_components.ha_data_store.climate: [entity_group] 编组 climate 初始化失败: ...
+custom_components.ha_data_store.switch : [entity_group] 编组 switch 初始化失败: ...
+homeassistant.components.sensor       : Error while setting up ha_data_store platform for sensor
+```
+
+根因：v5.3.0 把 `ATTR_TEMPERATURE` / `ATTR_TARGET_TEMP_HIGH` / `ATTR_TARGET_TEMP_LOW` 等
+从 `homeassistant.components.climate.const` 导入，但新版 HA 已把 `ATTR_TEMPERATURE`
+搬到 `homeassistant.const`；`entity_group_entities.py` 是在模块顶层 import 的，
+一旦失败 **switch / sensor / climate 三个平台全部 setup 失败**（编组传感器、所有编组实体全消失）。
+
+修复（`entity_group_entities.py`）：
+
+1. **不再导入这些 ATTR_\* 常量**，直接用字面量（`"temperature"` / `"target_temp_high"` /
+   `"target_temp_low"` / `"hvac_mode"` / `"fan_mode"` / `"swing_mode"`）——它们就是服务数据键，
+   跨版本不变，`homeassistant.const` 与 `climate.const` 谁放都无所谓；
+2. `UnitOfMeasurement` 改为使用更老更稳的 `homeassistant.const.UnitOfTemperature.CELSIUS`；
+3. **climate 整条导入链软降级**：`ClimateEntity` / `ClimateEntityFeature` / `HVACMode`
+   改到 `try/except` 里，失败时置 `CLIMATE_SUPPORT = False` 并提供占位类；
+   此时 `group_entity_domain()` 一律返回 `switch`，即**空调编组自动退化成聚合开关**，
+   而不会抛出 ImportError 把其它平台拖挂。
+
+**验证**：`Y:\tmp\_test_entity_group_entities.py` **73 断言全过**，新增 3 条软降级回归
+（把 `homeassistant.components.climate` 打断后 `importlib.reload`：不抛异常、
+`CLIMATE_SUPPORT=False`、ac 编组退化为 switch）；视图 27 / 存储 82 / 动作 41 断言无回归。
+
+### v5.3.0 编组：空调编组改为 climate 实体（不再是开关）（2026-10-26）
+
+现象：把两个空调（`climate.*`）编成一个 `kind=ac` 的编组后，生成的是
+`switch.hds_eg_ac`（聚合开关）。开关只能 on/off，**温度 / 模式 / 风速 / 摆风全都控制不了**，
+前端空调卡片、语音助手也识别不了。
+
+根因：`EntityGroupManager._sync_switches()` 不看 `kind`，所有编组一律
+`EntityGroupSwitch`；实体 id 也写死 `switch.` 前缀。
+
+修复（`entity_group_entities.py` / `climate.py` / `db_viewer.html`）：
+
+**一、新增 `EntityGroupClimate`（climate 平台）**
+
+- 域判定 `group_entity_domain(group)`：`kind` 为 `ac` / `climate`，**或成员全是 `climate.*`**
+  → `climate`，否则 `switch`（所以"空调组"即使 kind 写成 lights 也不会退化成开关）；
+- 实体 id `climate.hds_eg_<编组 id 去 eg_ 后缀>`，仍挂在「编组设备」下；
+- `hvac_mode`：任一成员开 → 第一个非 `off` 成员的模式，否则 `off`；
+- `current_temperature` / `target_temperature` = 成员平均值（目标温度 0.5 取整）；
+  `min_temp` / `max_temp` / `target_temperature_step` 取成员值；`fan_modes` / `swing_modes` 取并集；
+- `supported_features` 动态（温度 + 开关必备，成员有风速/摆风才加 `FAN_MODE` / `SWING_MODE`）；
+- 控制广播给全部 climate 成员：`set_temperature` / `set_hvac_mode`（`off` 走 `turn_off`）/
+  `set_fan_mode` / `set_swing_mode` / `turn_on` / `turn_off`，`last_status` 记 success / failed；
+- 属性 = 编组汇总（`group_id` / `kind` / `rev` / `member_count` / `on_count` / `partial` /
+  `missing` / `on_entities` / `domains` / `actions` / `last_status`）+ `entities`；
+- 公共逻辑抽到 `_EntityGroupBase`（装配 / 壳更新 / 成员状态 / 属性投影），开关与空调共用。
+
+**二、按域分派 + 域变化自动重建**
+
+- `manager` 同时持有 switch / climate 两个平台的回调（`attach_switch_adder` /
+  `attach_climate_adder`），`hass.data[DOMAIN]["async_add_climate"]` 参与自愈；
+- `_sync_switches()` 改为按 `group_entity_domain()` 分派创建，**域变了**（成员从空调换成灯，
+  或从灯换成空调）会先 `async_remove(force_remove=True)` 旧实体再在新域重建；
+- `debug` 新增 `climates` 与 `climate_adder_ready`（`switches` 只数 switch 实体）。
+
+**三、db_viewer / 文档**
+
+- `egEntityIdOf(id, kind)` 按 kind 算域，编辑器实体 id 预览（改类型实时更新）、
+  编组列表、监控表都显示正确的 `climate.` / `switch.` 前缀；
+- 「类型」下拉提示改为 `ac → climate.hds_eg_*`，编组说明与 API 文档同步。
+
+**验证**：`Y:\tmp\_test_entity_group_entities.py` **70 断言全过**（新增 23 条：climate 实体
+id / 设备归属 / 域判定、模式取第一个非 off、温度平均值、风速并集、min/max、
+`supported_features`、属性、5 类广播服务、`last_status`、"成员全 climate 即使 kind=lights
+仍是 climate"、"成员换成灯 → climate 移除 + switch 重建"）；视图 27 / 存储 82 / 动作 41
+断言无回归；db_viewer 内联脚本语法校验 0 错误。
+
+### v5.2.1 编组：修「改编组 ID 保存失败」，所有编组实体补 entity_id（2026-10-26）
+
+**一、修 `PUT /entity_groups/{id}` 返回 500 的 bug**：
+
+现象：管理页里修改「编组 ID（可自定义，决定 switch 实体 id）」后保存，
+提示 `保存失败：internal_error：TypeError: EntityGroupItemView.put() got an unexpected
+keyword argument 'group_id'`。
+
+根因：`EntityGroupItemView.put / patch / delete`、成员视图等只在 `request.match_info`
+里取路径变量，但部分 HA/aiohttp 组合会把 URL 路径变量**同时作为关键字参数**传给处理函数；
+`_guarded()` 的兜底包装器原样 `**kwargs` 透传，于是 `put()` 直接 `TypeError` 变 500。
+
+修复：`entity_group_views._guarded()` 不再把 kwargs 透传给处理函数，只传 `request`
+（路径变量统一从 `request.match_info` 取），import 时即对所有编组视图一次性生效。
+
+**二、「所有编组实体」sensor 每层都带 `entity_id`**：
+
+- 编组项：`entity_id` = 该编组的聚合实体（`eg_ke_ting` → `switch.hds_eg_ke_ting`；
+  v5.3.0 起空调编组为 `climate.hds_eg_ke_ting`）；
+- 成员项：`entity_id` = 成员实体 id 原样带出；
+- 其余仍为精简字段（`name` / `icon`），不带 `kind` / `rev` / `actions` / `extra`。
+
+  ```yaml
+  groups:
+    - name: 客厅灯
+      entity_id: switch.hds_eg_ke_ting
+      icon: mdi:lightbulb-group
+      entities:
+        - {name: 客厅主灯, entity_id: light.ke_ting, icon: mdi:ceiling-light}
+  ```
+
+**验证**：`Y:\tmp\_test_entity_group_views.py` **27 断言全过**（新增 5 条 kwargs 回归：
+`put(request, group_id=...)` / `get` / 成员列表都不再 500 且真的写库成功）；
+`Y:\tmp\_test_entity_group_entities.py` **47 断言全过**（字段白名单更新为
+`name/entity_id/icon/entities`、成员 `entity_id` 原样带出、编组 `entity_id` = 聚合 switch）。
+
+### v5.2.0 编组：新增「所有编组实体」传感器 + 编组自检接口（2026-10-26）
+
+**一、新实体 `sensor.ha_data_store_group_entities`（名称「所有编组实体」）**，
+挂在「编组设备」下，类 `EntityGroupEntitiesSensor`（`entity_group_entities.py`）：
+
+- `state` = 全部启用编组的成员实体总数（单位「个」）；
+- 属性 `groups` 是**极简投影**，只保留 `icon` / `name`（编组一层 + 成员一层，
+  v5.2.1 起每层再加 `entity_id`，见上一条），
+  去掉 `kind` / `rev` / `actions` / `extra` 等全部冗余字段，
+  方便前端与语音助手直接遍历：
+
+  ```yaml
+  groups:
+    - name: 客厅灯
+      icon: mdi:lightbulb-group
+      entities:
+        - {name: 客厅主灯, icon: mdi:ceiling-light}
+        - {name: 客厅射灯, icon: mdi:radiobox-blank}
+  ```
+
+- 名称/图标回退顺序：成员配置的 `name` → 实体状态 `friendly_name` → `entity_id`；
+  成员配置的 `icon` → 实体状态 `attributes.icon` → 实体注册表 `icon` →
+  默认 `mdi:radiobox-blank`；编组无图标时用 `mdi:group`；
+- `groups` 已进 `_unrecorded_attributes`（不写 recorder 历史，避免撑爆 16KB 上限）；
+- 随 manager 的 `async_reload()` 一起刷新（目录 sensor 每 30 秒兜底 + 写接口成功后即时），
+  无需重启即可看到编组增删改；
+- `async_setup_entity_group_sensor()` 改为返回 `(目录 sensor, 所有编组实体 sensor)` 二元组，
+  `sensor.py` 同步两个实体一起 `async_add_entities`。
+
+**二、新增自检接口 `GET /api/ha_data_store/entity_groups/_diag`**（`EntityGroupDiagView`，
+已注册进 `VIEWS`）：逐个探测存储层方法（`get_version` / `list_groups` / `get_group` /
+`list_members` / `find_groups_by_entity`），连同 `db_path`、`db_exists`、`match_info`、
+`api_enabled` / `db_edit_enabled` 一起回传，用来定位"编组接口 500 到底卡在哪一层"。
+单个方法抛异常只记在该键下（`类型: 消息`），不会让整个探测失败。
+
+**验证**：`Y:\tmp\_test_entity_group_entities.py` 扩充到 **45 断言全过**（v5.2.1 再扩到 47），
+新增覆盖：新 sensor 的实体 id / unique_id / 设备归属、`state` 计数、编组项与成员项的字段白名单、
+名称与图标三级回退、编组增删后跟随快照。
+
+### v5.1.2 编组接口：不再只报「HTTP 500」，并修 id 正则不一致（2026-10-26）
+
+**一、所有编组接口统一异常兜底**（`entity_group_views._BaseGroupView._call()`）：
+
+- `EntityGroupError` → 按自带 `error / status` 返回（`400 invalid_param`、`404 not_found`/`member_not_found`、`409 conflict`）；
+- 其它任何异常 → `500` + `{"success": false, "error": "internal_error", "detail": "异常类: 消息",
+  "operation": "update_group", "traceback": ["最后 8 行"]}`，同时用 `_LOGGER.exception()` 打完整堆栈。
+  以前这类异常被 aiohttp 吞成光秃秃的 500，前端只能显示「HTTP 500」，无法定位。
+- 管理页保存失败时 toast 直接显示 `error：detail`，并把 `traceback` 打到浏览器 console。
+
+**二、修复 id 正则不一致（真 bug）**：`entity_group_views.py` 里残留了一份旧的
+`^eg_[a-z0-9]{4,24}$`，与 `entity_group_store.py` 的新规则不一致。后果：自定义 id 带下划线
+（如 `eg_ce_shi`）可以被 `POST` / 改名成功，但之后的 `GET` / `PUT` / `DELETE` 会被视图层
+判为「id 格式非法」返回 400（看起来像"保存不了"）。现在视图直接复用
+`entity_group_store.GROUP_ID_RE`，路由正则同步放宽为 `{group_id:eg_[a-z0-9_]+}`。
+
+**三、新增离线接口测试** `Y:\tmp\_test_entity_group_views.py`（假 `homeassistant` 模块 +
+**真实 aiohttp 路由** + 真实 sqlite，22 断言）：PUT/PATCH/DELETE 单个编组、带 id 改名、
+`rev` 冲突 409、非法请求体 400、真实路由注册（含带下划线的正则）、`/version` 与
+`/by-entity/...` 不被 item 路由抢占、响应可 JSON 序列化。
+
+### v5.1.1 实体编组：独立设备「编组设备」+ 实体创建自愈（2026-10-26）
+
+**一、编组实体独立成设备**：新建 `DeviceInfo(identifiers={(DOMAIN, "ha_data_store_entity_groups")},
+name="编组设备", model="实体编组")`，编组相关的**所有**实体（目录 sensor + 每个编组的 switch，
+以后新增的编组类实体同样）都挂在这个设备下，不再混进主设备「HA数据统一存储系统」。
+设备标识固定，改名/重启都不会重复建。
+
+**二、修「建了编组却没有新实体」**：
+
+- switch 平台回调改为**显式传入** `async_add_entities`，拿不到时回退
+  `hass.data[DOMAIN]["async_add_switch"]`；
+- 每次同步（`async_reload`）都重新尝试取一次回调 → 自愈，不依赖平台初始化顺序；
+- 目录 sensor 每 30 秒兜底同步一次，所以最坏情况重启后 30 秒内实体也会出现；
+- 写接口后若管理器尚未创建，会补建并 `async_init()`，不再静默丢弃通知；
+- 回调确实拿不到时打 `WARNING`（含待建编组数），不再无声返回。
+
+**三、新增服务 `ha_data_store.sync_entity_groups`**：立即重读快照并增量创建/移除实体，
+日志输出「快照 N 个编组 / 已建 switch M 个 / 回调就绪=布尔」，用于现场排查。
+
+**四、目录 sensor 新增 `debug` 属性**（已加入 `_unrecorded_attributes`，不写历史库）：
+`{groups_in_snapshot, switches, adder_ready}`。三者对照即可判断是"库里没有启用编组"、
+"实体没建成"还是"平台回调没就绪"。
+
+**五、编组 ID 可自定义（等价于自定义 switch 实体 id）**：
+
+- **新建时**：`POST /entity_groups` 可带 `id`，例如 `{"id":"eg_ke_ting","name":"客厅"}`；
+  不传则自动生成 `eg_` + 8 位随机。规则：`eg_` + 2~32 位**小写字母/数字/下划线**，
+  首字符不能是 `_`，即 `^eg_[a-z0-9][a-z0-9_]{1,31}$`（保证拼出的 entity_id 合法）。
+- **改名（改 id）**：`PATCH` / `PUT` 传新的 `id` 即可。实现为「复制父行 → 迁移成员 → 删旧行」
+  （避免直接 UPDATE 主键撞外键约束），`rev` +1、全局 `version` 只 +1；
+  旧 `switch.hds_eg_*` 实体自动移除、按新 id 重建，无需重启。
+- 错误：id 被占用 → `409 conflict`；格式非法 → `400 invalid_param`。
+- **实体 id 规则**：`group_id` 去掉 `eg_` 前缀 → `switch.hds_eg_<后缀>`。
+  例如 `eg_ke_ting` → `switch.hds_eg_ke_ting`，`eg_2uu7uhjf` → `switch.hds_eg_2uu7uhjf`。
+- **管理页**：编辑器新增「编组 ID」输入框（可留空），下方实时预览 `entity_id`；
+  编辑既有编组时改 id 会提示「会删除旧 switch 并按新 id 重建」，列表里同时显示 id 与 entity_id。
+
+**验证**：`Y:\tmp\_test_entity_group_entities.py`（假 `homeassistant` 模块 + 真实 sqlite，
+28 断言）覆盖：sensor/switch 设备归属、实体 id 规则、首次创建、重复同步幂等、新增编组增量创建、
+停用编组移除实体、状态汇总、回调丢失自愈。
+
+### v5.1.0 新增「🔗 实体编组」独立模块（2026-10-26）
+
+**小版本**（`5.0.0` → `5.1.0`）。新增独立模块 `entity_group_store.py`（存储）、
+`entity_group_views.py`（接口）、`entity_group_entities.py`（实体）、
+`entity_group_actions.py`（动作适配），把「一组实体当一个设备控制」做进后端。
+
+**一、三张新表**（启动时 `EntityGroupStore.ensure_schema()` 幂等建表）：
+
+| 表 | 用途 | 关键列 |
+|---|---|---|
+| `entity_groups` | 编组壳 | `id`（`eg_` + 8 位）、`name`、`kind`、`icon*`、`color*`、`options`、`actions`、`default_on/off_action`、`sort`、`enabled`、`rev` |
+| `entity_group_members` | 成员 | `(group_id, entity_id)` 主键、`name`、`icon`、`sort`、`extra` |
+| `entity_groups_meta` | 元信息 | `version`（全局单调递增，供前端增量同步） |
+
+`rev` 是单编组乐观锁（不匹配 → `409 conflict`）；`version` 是全局版本（任何写 +1）。
+`PRAGMA foreign_keys = ON` 在每个连接上开启，删除编组自动级联清成员。
+
+**二、接口**（前缀 `/api/ha_data_store`；带 `?key=` 走 API Key 校验，
+不带则按管理页惯例只校验总开关；写操作额外校验「数据库修改」开关）：
+
+```
+GET    /entity_groups                        列表（id/kind/entity/q/enabled/include_members/sort/limit/offset）
+POST   /entity_groups                        新建（成员整组写入）
+GET    /entity_groups/version                版本号（脏检查）
+POST   /entity_groups/batch                  批量 upsert / 整库导入（mode=upsert|replace）
+POST   /entity_groups/order                  编组排序（sort = index*10）
+GET    /entity_groups/by-entity/{entity_id}  反查实体属于哪些编组
+GET    /entity_groups/{gid}                  详情
+PUT    /entity_groups/{gid}                  更新（members 传了才整组替换）
+PATCH  /entity_groups/{gid}                  局部更新（members 缺省不动、null 清空）
+DELETE /entity_groups/{gid}                  删除（级联成员）
+GET    /entity_groups/{gid}/members          成员列表（?entity= 单个 / ?domain= 过滤）
+POST   /entity_groups/{gid}/members          批量新增（幂等：added/updated/skipped）
+PUT    /entity_groups/{gid}/members?entity=  整体替换单个成员（extra 覆盖）
+PATCH  /entity_groups/{gid}/members?entity=  局部更新（extra 浅合并）
+DELETE /entity_groups/{gid}/members?entity=  移除单个成员
+POST   /entity_groups/{gid}/members/remove   批量移除
+POST   /entity_groups/{gid}/members/order    成员排序
+```
+
+**三、实体**（挂独立设备「编组设备」下）：
+
+- `sensor.ha_data_store_entity_groups`：state = 编组数量；属性含 `groups`（全量快照，
+  与 `GET /entity_groups` 结构一致）、`version`、`kinds`、`counts`、`service_map`。
+  `groups` / `kinds` / `counts` / `service_map` 已加入 `_unrecorded_attributes`，不写历史库。
+- `sensor.ha_data_store_group_entities`（「所有编组实体」，v5.2.0 新增）：state = 成员实体总数；
+  属性 `groups` 只保留 `entity_id` / `icon` / `name`（编组一层 + 成员一层，成员列表键名 `entities`），
+  其中编组的 `entity_id` 就是它的聚合 switch，供前端/语音助手直接遍历。
+- `switch.hds_eg_<group_id 后缀>`：每个启用编组一个聚合开关。state 由成员状态实时汇总
+  （`on` / `off`），属性含 `group_id`、`kind`、`member_count`、`on_count`、`partial`、
+  `missing`、`on_entities`、`domains`、`actions`。`entity_id` 只依赖不可变的编组 id，
+  改名不换 id。成员状态变化通过一个 `EVENT_STATE_CHANGED` 监听 + 反向索引定位，
+  只刷新受影响的编组实体（不会为每个编组各注册一个监听）。
+- `climate.hds_eg_<group_id 后缀>`（v5.3.0 新增）：**空调编组**（`kind=ac` / `climate`，
+  或成员全是 `climate.*`）投影成 climate 实体而不是开关，见下节。
+
+**三点五、编组按域投影（v5.3.0 climate / v5.4.0 light·cover·media_player）**：
+
+`group_entity_domain()` 判定顺序（优先级从上到下）：
+
+1. **成员全是同一个域**且该域能承载编组 → 用该域（把 3 个 `light.*` 编成一组，无论 kind
+   写什么都给 `light` 实体）；
+2. 否则按 `kind` 映射：`lights`/`light` → light、`curtain`/`cover` → cover、
+   `media`/`media_player` → media_player、`ac`/`climate` → climate、`socket`/其它 → switch；
+3. 该域平台未就绪（软导入失败）→ **switch 兜底**（功能降级但不崩）。
+
+| 编组 | 生成实体 | 类 | 能力 |
+|---|---|---|---|
+| 灯光组 | `light.hds_eg_<后缀>` | `EntityGroupLight` | 开关 / 亮度（开启成员均值）/ 色温（均值，带成员 min-max K）/ HS·RGB / effect_list 并集，`turn_on` 参数广播 |
+| 窗帘组 | `cover.hds_eg_<后缀>` | `EntityGroupCover` | 位置（均值）/ `is_closed` / `is_opening`·`is_closing`；open·close·stop·set_position 广播 |
+| 媒体组 | `media_player.hds_eg_<后缀>` | `EntityGroupMediaPlayer` | 状态（任一 playing → playing）/ 音量均值 / 静音任一即静音 / 标题·app·source_list；play·pause·stop·volume·mute·next/prev 广播 |
+| 空调组 | `climate.hds_eg_<后缀>` | `EntityGroupClimate` | 模式（第一个非 off 成员）/ 温度均值 / 风速摆风并集；set_* 广播 |
+| 其它 | `switch.hds_eg_<后缀>` | `EntityGroupSwitch` | on / off（含 `actions` 预设动作、`$group` 占位符） |
+
+空调组细节：
+
+- 状态：任一成员开着 → 返回第一个非 `off` 成员的模式（`cool` / `heat` / …），否则 `off`；
+- 当前温度 / 目标温度 = 成员平均值（目标温度按 0.5 取整）；`min_temp` / `max_temp` /
+  `target_temperature_step` 取自成员；`fan_modes` / `swing_modes` 为成员并集；
+- `supported_features` 动态：温度 + 开关必备，成员有风速/摆风才加 `FAN_MODE` / `SWING_MODE`；
+- 控制全部广播给所有 `climate` 成员：`set_temperature` / `set_hvac_mode`（`off` 走
+  `climate.turn_off`）/ `set_fan_mode` / `set_swing_mode` / `turn_on` / `turn_off`，
+  `last_status` 记录 success / failed；
+- 属性沿用编组汇总（`group_id` / `kind` / `rev` / `member_count` / `on_count` / `partial` /
+  `missing` / `on_entities` / `domains` / `actions` / `last_status`）+ `entities`（成员 id 列表）；
+- **实体域变化会自动重建**：把成员从 climate 换成灯（或反向），manager 检测到
+  `entity_domain` 变化 → 移除旧实体（`async_remove(force_remove=True)`）并在新域重建；
+- 注册链：`climate.py` 平台 `async_setup_entry` → `async_setup_entity_group_climates()`
+  → `manager.attach_climate_adder()`，回调同时写进 `hass.data[DOMAIN]["async_add_climate"]`
+  供自愈使用；`debug` 里新增 `climates` 与 `climate_adder_ready`。
+- db_viewer：`egEntityIdOf(id, kind)` 按 kind 算实体域，编辑器实体 id 预览、列表、
+  监控表都显示正确的 `climate.` / `switch.` 前缀。
+
+**四、动作**：编组 `actions` 与 `automations.actions` 结构完全同构，额外支持
+`$group` / `$group:light` 占位符（执行前展开，成员增减不会让动作过期）。
+执行复用现有 `AutomationManager._execute_actions()`（串行 `blocking=True`、逐条结果、
+`stop_on_error`），执行记录写现有 `automation_logs`（`automation_id=0`、`trigger_type=group`）。
+新增 service `ha_data_store.run_entity_group_action`（`group_id` + 可选 `action_id` /
+`command=on|off`）；内置开关直接 `switch.turn_on/off` 编组实体，不需要该 service。
+
+**五、域映射集中在 `const.py`**：`ENTITY_GROUP_DOMAIN_SERVICE_MAP` 覆盖
+light / switch / fan / input_boolean / humidifier / climate / cover / media_player / vacuum，
+每项 `{on, off, on_state{in|not_in}, data_keys}`；未列出的域视为只读（可进编组展示，
+不参与 on/off）。不提供 `toggle`（混编组取反语义不成立）。
+参数优先级：设备当前值 < 编组 `options` < 成员 `extra`；成员 `extra.on_service/off_service`
+可完全接管该成员的开关方式。`kind` 只是前端布局提示，不参与执行判定。
+
+**六、校验**：`id ^eg_[a-z0-9]{4,24}$`、成员 `entity_id ^[a-z_]+\.[a-z0-9_]+$`、
+单组 ≤200 成员、≤12 预设动作、单动作 ≤20 条、`name` ≤50 字；`options` / `extra` 走白名单，
+未知键丢弃并在响应 `warnings` 里说明；`brightness_pct`/`position` 夹到 0~100、
+`fan_level` 0~7、`volume_level` 0~1；禁止嵌套编组（`eg_*` 不能当成员）；关键词 LIKE 已转义。
+
+**七、管理页（`db_viewer.html`）**：
+
+- **系统监控**新增「🧩 实体编组」区块（默认折叠，随 30s 自动刷新一起更新）：显示编组数 /
+  启用数 / 成员总数 / 版本，以及每个编组的类型、成员数、启用状态、成员前 4 个、更新时间；
+  右上「⚙ 前往配置」直接跳到配置页子选项卡。
+- **系统配置**新增「🧩 实体编组」子选项卡：编组列表 + 新建/编辑（名称、kind、图标、启用、
+  成员逐行 `entity_id` 或 `entity_id, 显示名`）+ 上移/下移（提交 `POST /order`，
+  服务端 `sort = index*10`）+ 删除（带成员级联提示）。保存走 `POST` / `PUT`，
+  改完即时生效，无需重启 HA。
+
+**验证**：`Y:\tmp\_test_entity_group_store.py`（存储层 62 断言）、
+`Y:\tmp\_test_entity_group_actions.py`（动作层 41 断言），均为临时 sqlite / 纯函数，
+不依赖 HA 运行环境。
 
 ### v5.0.0 新增「🧾 个人账单」独立模块（2026-10-10）
 

@@ -80,6 +80,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
         identifiers={(DOMAIN, entry.entry_id)},
         name="HA数据统一存储系统", manufacturer="HA数据统一存储系统",
     )
+
+    # 实体编组：类型为 socket / mixed（混编）/ device 的编组投影成聚合 switch
+    # （switch.hds_eg_<group_id 后缀>），实体统一挂在独立设备「编组设备」下。
+    try:
+        from .entity_group_entities import async_setup_entity_group_switches
+        await async_setup_entity_group_switches(hass, async_add_entities)
+    except Exception as e:  # noqa: BLE001
+        _LOGGER.exception("[entity_group] 编组 switch 初始化失败: %s", e)
+
     entities = [
         HaDataStoreApiSwitch(hass, device_info),
         HaDataStoreDbViewerSwitch(hass, device_info),

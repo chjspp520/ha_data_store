@@ -197,5 +197,107 @@ PUSH_CONTROL_SWITCH_KEY = "push_control_enabled"
 # 每个控制 token 默认每分钟最大控制次数（0=不限）
 PUSH_CONTROL_DEFAULT_RATE_LIMIT = 60
 
+# ── 实体编组（entity groups，见 entity_group_store.py）──
+# 三张表：编组壳 / 成员 / 元信息（元信息目前只存全局 version）
+TABLE_ENTITY_GROUPS = "entity_groups"
+TABLE_ENTITY_GROUP_MEMBERS = "entity_group_members"
+TABLE_ENTITY_GROUPS_META = "entity_groups_meta"
+
+# kind 白名单：仅作为前端默认布局提示，不参与执行判定（执行永远看成员 entity_id + extra）
+ENTITY_GROUP_KINDS = (
+    "lights",
+    "light",
+    "socket",
+    "ac",
+    "curtain",
+    "media",
+    "device",
+    "mixed",
+)
+
+# 成员 extra 的参数键：会按 domain 映射拼进服务调用 data
+ENTITY_GROUP_MEMBER_PARAM_KEYS = (
+    "brightness_pct",
+    "color_temp_kelvin",
+    "rgb_color",
+    "hs_color",
+    "hvac_mode",
+    "temperature",
+    "fan_mode",
+    "fan_level",
+    "position",
+    "volume_level",
+)
+
+# 成员 extra 的覆盖键：完全接管该成员的内置 on/off（on_service/off_service 形如 domain.service）
+ENTITY_GROUP_MEMBER_OVERRIDE_KEYS = (
+    "on_service",
+    "on_data",
+    "off_service",
+    "off_data",
+)
+
+# domain → 内置 on/off 服务映射。
+#   data_keys：该域允许从 options / 成员 extra 透传的参数键
+#   on_state：判定"该成员处于开启状态"的口径，二选一（in / not_in）
+# 未列出的域视为只读：允许进编组（展示/条件），执行 on/off 时跳过。
+# 不提供 toggle：混编组"取反"语义不成立（灯要关、空调要开），只给明确 on/off。
+ENTITY_GROUP_DOMAIN_SERVICE_MAP = {
+    "light": {
+        "on": "light.turn_on",
+        "off": "light.turn_off",
+        "on_state": {"in": ["on"]},
+        "data_keys": ("brightness_pct", "color_temp_kelvin", "rgb_color", "hs_color"),
+    },
+    "switch": {
+        "on": "switch.turn_on",
+        "off": "switch.turn_off",
+        "on_state": {"in": ["on"]},
+        "data_keys": (),
+    },
+    "fan": {
+        "on": "fan.turn_on",
+        "off": "fan.turn_off",
+        "on_state": {"in": ["on"]},
+        "data_keys": (),
+    },
+    "input_boolean": {
+        "on": "input_boolean.turn_on",
+        "off": "input_boolean.turn_off",
+        "on_state": {"in": ["on"]},
+        "data_keys": (),
+    },
+    "humidifier": {
+        "on": "humidifier.turn_on",
+        "off": "humidifier.turn_off",
+        "on_state": {"in": ["on"]},
+        "data_keys": (),
+    },
+    "climate": {
+        "on": "climate.turn_on",
+        "off": "climate.turn_off",
+        "on_state": {"not_in": ["off", "unavailable", "unknown"]},
+        "data_keys": ("hvac_mode", "temperature", "fan_mode", "fan_level"),
+    },
+    "cover": {
+        "on": "cover.open_cover",
+        "off": "cover.close_cover",
+        "on_state": {"in": ["open", "opening"]},
+        "data_keys": ("position",),
+    },
+    "media_player": {
+        "on": "media_player.turn_on",
+        "off": "media_player.turn_off",
+        "on_state": {"not_in": ["off", "standby", "unavailable", "unknown"]},
+        "data_keys": ("volume_level",),
+    },
+    "vacuum": {
+        "on": "vacuum.start",
+        "off": "vacuum.return_to_base",
+        "on_state": {"not_in": ["off", "idle", "docked", "unavailable", "unknown"]},
+        "data_keys": (),
+    },
+}
+
 # 系统版本号（与 manifest.json 同步）
-VERSION = "5.0.0"
+VERSION = "6.0.0"

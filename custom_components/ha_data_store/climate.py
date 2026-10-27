@@ -7,6 +7,15 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     hass.data.setdefault(DOMAIN, {})["async_add_climate"] = async_add_entities
+
+    # 实体编组：类型选「ac」的编组投影成 climate.hds_eg_<id 后缀>（域只看 kind），
+    # 其余类型按各自域投影。
+    try:
+        from .entity_group_entities import async_setup_entity_group_climates
+        await async_setup_entity_group_climates(hass, async_add_entities)
+    except Exception as e:  # noqa: BLE001
+        _LOGGER.exception("[entity_group] 编组 climate 初始化失败: %s", e)
+
     bdi = get_bridge_device_info(entry.entry_id)
     try: be = get_bridge_entities_for_platform(hass, "climate", bdi)
     except Exception as e: _LOGGER.error("[bridge] climate: %s", e); return

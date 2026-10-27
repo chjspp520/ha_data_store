@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import colorsys
 import logging
 import os
 import random
@@ -181,37 +182,170 @@ class VirtualSwitch(SwitchEntity, RestoreEntity):
 # =========================================================================== #
 #  虚拟灯光（完整功能：ON/OFF、亮度、色温、RGB）                                      #
 # =========================================================================== #
+def _light_int(value: Any, default: Any, low: int, high: int) -> int:
+    """把亮度/色温之类的输入安全夹到 [low, high] 的整数区间。"""
+    try:
+        num = int(round(float(value)))
+    except (TypeError, ValueError):
+        try:
+            num = int(default)
+        except (TypeError, ValueError):
+            num = low
+    return max(int(low), min(int(high), num))
+
+
+# 「颜色」类模式别名：统一收敛成 ColorMode.HS
+_COLOR_MODE_ALIASES = frozenset({"hs", "rgb", "rgbw", "rgbww", "xy"})
+
+
+def _normalize_color_modes(raw: Any, default=("color_temp", "hs")) -> set[str]:
+    """把建灯时给的 color modes 收敛成 HA 合法集合。
+
+    HA 硬规则：``onoff`` / ``brightness`` 只能单独出现，``color_temp`` 可与 ``hs``
+    共存；违反会被 ``valid_supported_color_modes()`` 拒绝，实体直接加不进来。
+    """
+    if isinstance(raw, str):
+        raw = [x.strip() for x in raw.split(",") if x.strip()]
+    if isinstance(raw, (list, tuple, set)) and raw:
+        modes = {str(x).strip().lower() for x in raw}
+    else:
+        modes = {str(x) for x in default}
+    if ColorMode.ONOFF in modes:
+        return {ColorMode.ONOFF}
+    has_color = bool(modes & _COLOR_MODE_ALIASES)
+    has_temp = ColorMode.COLOR_TEMP in modes
+    if not has_color and not has_temp:
+        return {ColorMode.BRIGHTNESS}
+    out: set[str] = set()
+    if has_temp:
+        out.add(ColorMode.COLOR_TEMP)
+    if has_color:
+        out.add(ColorMode.HS)
+    return out
+
+
 class VirtualLight(LightEntity, RestoreEntity):
+    """虚拟灯光：开关 / 亮度 / 色温 / 颜色（HS·RGB）全支持。
+
+    色温范围可在建灯时用 ``min_color_temp_kelvin`` / ``max_color_temp_kelvin`` 配置
+    （默认 2000~6500K），``default_brightness`` 可设初始亮度。
+    状态通过 RestoreEntity 持久化，重启后亮度/色温/颜色都会恢复。
+    """
+
     _attr_has_entity_name = True
     _attr_should_poll = False
-    _attr_supported_color_modes = {ColorMode.ONOFF}
 
-    def __init__(self, entity_id: str, name: str, device_info: DeviceInfo) -> None:
-        self._attr_color_mode = ColorMode.ONOFF
+    def __init__(self, entity_id: str, name: str, device_info: DeviceInfo,
+                 config: dict | None = None) -> None:
+        config = config or {}
         LightEntity.__init__(self)
+        # 能力：默认「色温 + 颜色」（两者可共存）；也支持只做开关/只调亮度（HA 不允许混用）
+        self._attr_supported_color_modes = _normalize_color_modes(
+            config.get("supported_color_modes"))
+        self._supports_color = ColorMode.HS in self._attr_supported_color_modes
+        self._supports_temp = ColorMode.COLOR_TEMP in self._attr_supported_color_modes
+        self._supports_brightness = ColorMode.ONOFF not in self._attr_supported_color_modes
+        if self._supports_temp:
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+        elif self._supports_color:
+            self._attr_color_mode = ColorMode.HS
+        elif ColorMode.BRIGHTNESS in self._attr_supported_color_modes:
+            self._attr_color_mode = ColorMode.BRIGHTNESS
+        else:
+            self._attr_color_mode = ColorMode.ONOFF
         self._attr_unique_id = f"{DOMAIN}_virtual_{entity_id}"
         self._attr_name = name
         self._attr_device_info = device_info
         self._attr_is_on = False
-        self._attr_brightness = 255
+        self._attr_brightness = _light_int(config.get("default_brightness"), 255, 1, 255)
+        # 色温范围（建灯时可配）
+        self._attr_min_color_temp_kelvin = _light_int(
+            config.get("min_color_temp_kelvin"), 2000, 1000, 10000)
+        self._attr_max_color_temp_kelvin = _light_int(
+            config.get("max_color_temp_kelvin"), 6500, 1001, 12000)
+        if self._attr_max_color_temp_kelvin <= self._attr_min_color_temp_kelvin:
+            self._attr_max_color_temp_kelvin = self._attr_min_color_temp_kelvin + 500
+        self._attr_color_temp_kelvin = _light_int(
+            config.get("default_color_temp_kelvin"), 4000,
+            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin)
+        self._attr_hs_color = None
+        self._attr_rgb_color = None
         self.entity_id = entity_id
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last and last.state is not None:
+        if last is None:
+            return
+        if last.state is not None:
             self._attr_is_on = last.state == "on"
-        if last and last.attributes:
-            if "brightness" in last.attributes:
-                self._attr_brightness = last.attributes["brightness"]
+        attrs = last.attributes or {}
+        if attrs.get("brightness") is not None:
+            self._attr_brightness = _light_int(attrs["brightness"], self._attr_brightness, 1, 255)
+        if attrs.get("color_temp_kelvin") is not None:
+            self._attr_color_temp_kelvin = _light_int(
+                attrs["color_temp_kelvin"], self._attr_color_temp_kelvin,
+                self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin)
+        hs = attrs.get("hs_color")
+        if self._supports_color and isinstance(hs, (list, tuple)) and len(hs) == 2:
+            self._attr_hs_color = (float(hs[0]), float(hs[1]))
+        rgb = attrs.get("rgb_color")
+        if self._supports_color and isinstance(rgb, (list, tuple)) and len(rgb) == 3:
+            self._attr_rgb_color = tuple(int(x) for x in rgb)
+        mode = attrs.get("color_mode")
+        if mode in self._attr_supported_color_modes:  # 只能是自己支持的模式
+            self._attr_color_mode = mode
+
+    def _apply_rgb(self, rgb) -> bool:
+        try:
+            r, g, b = (int(x) for x in list(rgb)[:3])
+        except (TypeError, ValueError):
+            return False
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
+        hue, sat, _val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        self._attr_rgb_color = (r, g, b)
+        self._attr_hs_color = (round(hue * 360, 3), round(sat * 100, 3))
+        self._attr_color_mode = ColorMode.HS
+        return True
+
+    def _apply_hs(self, hs) -> bool:
+        try:
+            hue = float(list(hs)[0]) % 360
+            sat = max(0.0, min(100.0, float(list(hs)[1])))
+        except (TypeError, ValueError, IndexError):
+            return False
+        self._attr_hs_color = (hue, sat)
+        r, g, b = colorsys.hsv_to_rgb(hue / 360, sat / 100, 1.0)
+        self._attr_rgb_color = (int(r * 255), int(g * 255), int(b * 255))
+        self._attr_color_mode = ColorMode.HS
+        return True
 
     async def async_turn_on(self, **kwargs) -> None:
+        """支持 brightness / color_temp_kelvin（或老式 color_temp）/ hs_color / rgb_color。
+
+        只处理这盏灯真正声明支持的能力，避免 color_mode 落到 supported 之外
+        （HA 会直接拒绝该实体）。
+        """
         self._attr_is_on = True
-        if "brightness" in kwargs:
-            self._attr_brightness = kwargs["brightness"]
-            self._attr_color_mode = ColorMode.BRIGHTNESS
-        else:
-            self._attr_color_mode = ColorMode.ONOFF
+        color_temp = kwargs.get("color_temp_kelvin")
+        if color_temp is None and kwargs.get("color_temp") is not None:
+            try:  # 老式 mireds → 开尔文
+                color_temp = int(1_000_000 / float(kwargs["color_temp"]))
+            except (TypeError, ValueError, ZeroDivisionError):
+                color_temp = None
+        if self._supports_color and kwargs.get("rgb_color") is not None:
+            self._apply_rgb(kwargs["rgb_color"])
+        elif self._supports_color and kwargs.get("hs_color") is not None:
+            self._apply_hs(kwargs["hs_color"])
+        elif self._supports_temp and color_temp is not None:
+            self._attr_color_temp_kelvin = _light_int(
+                color_temp, self._attr_color_temp_kelvin,
+                self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin)
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+        if self._supports_brightness and kwargs.get("brightness") is not None:
+            self._attr_brightness = _light_int(kwargs["brightness"], self._attr_brightness, 1, 255)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
@@ -1430,7 +1564,11 @@ class VirtualDeviceManager:
         import sqlite3, json
         now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         extra = {}
-        for k in ("init_value", "unit", "min", "max", "step", "options"):
+        for k in ("init_value", "unit", "min", "max", "step", "options",
+                  # 灯光调光参数
+                  "supported_color_modes", "min_color_temp_kelvin",
+                  "max_color_temp_kelvin", "default_brightness",
+                  "default_color_temp_kelvin"):
             if k in config and config[k] is not None:
                 extra[k] = config[k]
         conn = sqlite3.connect(self._db_path)
@@ -1537,6 +1675,10 @@ class VirtualDeviceManager:
             number = VirtualNumber(entity_id, entity_name, device_info,
                                    min_val, max_val, step, unit, init_val)
             entities = [number]
+        elif device_type == "light":
+            # 灯：带调光参数（色温范围 / 初始亮度）
+            light = VirtualLight(entity_id, entity_name, device_info, config)
+            entities = [light]
         elif device_type == "select":
             options = config.get("options", [])
             if isinstance(options, str):
@@ -1675,18 +1817,24 @@ def _apply_snapshot_fields(entity: Any, snapshot: dict) -> None:
     if isinstance(entity, VirtualSwitch):
         entity._attr_is_on = state == "on"
 
-    # 虚拟灯光（ON/OFF + 亮度）
+    # 虚拟灯光（ON/OFF + 亮度 + 色温 + 颜色）
     elif isinstance(entity, VirtualLight):
         entity._attr_is_on = state == "on"
-        brightness = attrs.get("brightness")
-        if brightness is not None:
-            try:
-                entity._attr_brightness = int(brightness)
-            except (TypeError, ValueError):
-                pass
-            entity._attr_color_mode = ColorMode.BRIGHTNESS if entity._attr_is_on else ColorMode.ONOFF
-        else:
-            entity._attr_color_mode = ColorMode.ONOFF
+        if attrs.get("brightness") is not None:
+            entity._attr_brightness = _light_int(
+                attrs["brightness"], entity._attr_brightness, 1, 255)
+        if attrs.get("color_temp_kelvin") is not None:
+            entity._attr_color_temp_kelvin = _light_int(
+                attrs["color_temp_kelvin"], entity._attr_color_temp_kelvin,
+                entity._attr_min_color_temp_kelvin, entity._attr_max_color_temp_kelvin)
+        if getattr(entity, "_supports_color", False):
+            if attrs.get("rgb_color") is not None:
+                entity._apply_rgb(attrs["rgb_color"])
+            elif attrs.get("hs_color") is not None:
+                entity._apply_hs(attrs["hs_color"])
+        mode = attrs.get("color_mode")
+        if mode in getattr(entity, "_attr_supported_color_modes", ()):  # 只能落回支持的模式
+            entity._attr_color_mode = mode
 
     # 虚拟空调
     elif isinstance(entity, VirtualClimate):

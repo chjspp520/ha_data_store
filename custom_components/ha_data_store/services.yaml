@@ -8,3 +8,39 @@ generate_daily_summary:
       example: "2026-08-21"
       selector:
         text:
+
+sync_entity_groups:
+  name: 同步实体编组
+  description: >-
+    立即重读编组快照并增量创建/移除 switch 实体（正常每 30 秒自动同步一次，
+    这个服务用于排查「新建编组后没生成实体」）。执行后日志会打印
+    「快照 N 个编组 / 已建 switch M 个 / 回调就绪=布尔」。
+
+run_entity_group_action:
+  name: 执行实体编组动作
+  description: >-
+    执行实体编组的预设动作；不填 action_id 时按 command 执行内置开/关
+    （成员分派见 const.py 的 ENTITY_GROUP_DOMAIN_SERVICE_MAP）。
+  fields:
+    group_id:
+      name: 编组 ID
+      description: 形如 eg_a1b2c3d4，可在 sensor.ha_data_store_entity_groups 的 groups 属性里查到。
+      example: "eg_a1b2c3d4"
+      required: true
+      selector:
+        text:
+    action_id:
+      name: 预设动作 ID
+      description: 编组 actions[].id；填了则忽略 command。
+      example: "night"
+      selector:
+        text:
+    command:
+      name: 内置命令
+      description: on / off；action_id 为空时生效，默认 on。
+      example: "off"
+      selector:
+        select:
+          options:
+            - "on"
+            - "off"
