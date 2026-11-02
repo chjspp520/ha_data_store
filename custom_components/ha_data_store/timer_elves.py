@@ -156,6 +156,8 @@ class TimerElvesCoordinator:
 
         # 频率限制
         self._last_save_timestamp: Optional[datetime] = None
+        # 上次成功写入时「任务集合 + status」的签名（见 save_tasks：状态变更必须立即落库）
+        self._last_save_sig: Optional[str] = None
         self._delayed_update_unsub: Optional[Callable] = None
 
         # 卸载时统一回收的句柄：bus 监听 + 兜底调度 tick
@@ -308,9 +310,23 @@ class TimerElvesCoordinator:
         """保存所有任务到 SQLite。
 
         force=True 绕过节流（卸载/显式写入时必须用），默认 5 秒节流用于高频路径。
+
+        ==================================================================
+        【状态变更必须立即落库】节流只该拦"内容没变的重复写入"。
+
+        判断依据从单纯的时间间隔改成「任务集合 + 每个任务的 status」签名：
+        取消/创建任务只改内存时，若这次写入被 5 秒节流吞掉，DB 里仍是旧状态，
+        HA 关机重启后 restore_tasks 会把**已取消的任务读回成 active**，继续
+        倒计时（实测：取消客厅大灯后重启，任务又活过来）。
+
+        反过来，周期任务每轮执行只改 last_executed/execution_result 而不改 status，
+        这类高频写入仍按 5 秒节流，不会放大写库次数。
+        ==================================================================
         """
+        sig = ";".join(sorted(f"{tid}:{td.get('status', '')}" for tid, td in self.tasks.items()))
+        status_changed = sig != self._last_save_sig
         now = self.get_local_now()
-        if not force and self._last_save_timestamp is not None:
+        if not force and not status_changed and self._last_save_timestamp is not None:
             diff = (now - self._last_save_timestamp).total_seconds()
             if diff < 5:
                 _LOGGER.debug(f"[timer_elves] Save skipped ({diff:.1f}s)")
@@ -345,6 +361,7 @@ class TimerElvesCoordinator:
                     conn.close()
             await self.hass.async_add_executor_job(_save)
             self._last_save_timestamp = now
+            self._last_save_sig = sig
             _LOGGER.debug(f"[timer_elves] Saved {len(rows)} tasks")
         except Exception as e:
             _LOGGER.error(f"[timer_elves] save_tasks failed: {e}")
@@ -1588,6 +1605,9 @@ class TimerElvesCoordinator:
                 return self.generate_climate_action(entity_id, "turn_off")
             return self._climate_set_mode(entity_id, mode, ca)
 
+        if at == "apply":
+            return self._climate_apply(entity_id, action_data, ca)
+
         if at in ("set_fan_mode", "set_swing_mode", "set_preset_mode"):
             key = {"set_fan_mode": "fan_mode",
                    "set_swing_mode": "swing_mode",
@@ -1638,6 +1658,76 @@ class TimerElvesCoordinator:
         return {"type": "service_call", "service": "climate.set_hvac_mode",
                 "data": {"entity_id": entity_id, "hvac_mode": mode},
                 "description": f"Set mode to {mode}"}
+
+    # 空调参数的中文名（仅为任务条/日志里的动作描述服务，不影响下发什么）
+    _CLIMATE_MODE_CN = {
+        "off": "关闭", "cool": "制冷", "heat": "制热", "dry": "除湿",
+        "fan_only": "送风", "heat_cool": "冷暖", "auto": "自动",
+    }
+
+    def _climate_apply(self, entity_id: str, action_data: dict, ca: dict) -> dict:
+        """组合动作：按 action_data 里给出的参数一次性下发多项设置。
+
+        【为什么要单独一个动作】HA 的 climate.set_temperature 只接受温度 + hvac_mode，
+        风速/摆风/预设必须走各自的 service；而 set_mode 只切模式。
+        空调面板的"定时"经常需要「切到除湿 + 高风 + 摆风上下」一起生效，
+        因此在服务端拼成 pre_calls / extra_calls 一次任务下发，而不是让前端拆成多个任务
+        （同一实体同时只允许一个一次性定时器，拆任务会被后者顶掉）。
+
+        下发顺序：hvac_mode（顺带开机）→ temperature → fan_mode → swing_mode → preset_mode。
+        一个参数都没给时退化为 turn_off（与其它动作"缺参数"的口径保持一致）。
+        """
+        mode = action_data.get("hvac_mode") or action_data.get("mode")
+        temp = action_data.get("temperature")
+        fan = action_data.get("fan_mode")
+        swing = action_data.get("swing_mode")
+        preset = action_data.get("preset_mode")
+
+        calls = []
+        if mode == "off":
+            calls.append({"service": "climate.turn_off",
+                          "data": {"entity_id": entity_id}})
+        elif mode:
+            calls.append({"service": "climate.set_hvac_mode",
+                          "data": {"entity_id": entity_id, "hvac_mode": mode}})
+        if temp is not None:
+            calls.append({"service": "climate.set_temperature",
+                          "data": {"entity_id": entity_id, "temperature": temp}})
+        if fan:
+            calls.append({"service": "climate.set_fan_mode",
+                          "data": {"entity_id": entity_id, "fan_mode": fan}})
+        if swing:
+            calls.append({"service": "climate.set_swing_mode",
+                          "data": {"entity_id": entity_id, "swing_mode": swing}})
+        if preset:
+            calls.append({"service": "climate.set_preset_mode",
+                          "data": {"entity_id": entity_id, "preset_mode": preset}})
+
+        if not calls:
+            _LOGGER.warning("[timer_elves] apply 未提供任何参数，退化为关机")
+            return self.generate_climate_action(entity_id, "turn_off")
+
+        parts = []
+        if mode:
+            parts.append(self._CLIMATE_MODE_CN.get(mode, mode))
+        if temp is not None:
+            parts.append(f"{temp}°C")
+        if fan:
+            parts.append(f"风速 {fan}")
+        if swing:
+            parts.append(f"摆风 {swing}")
+        if preset:
+            parts.append(f"预设 {preset}")
+
+        action = {
+            "type": "service_call",
+            "service": calls[0]["service"],
+            "data": calls[0]["data"],
+            "description": " · ".join(parts),
+        }
+        if len(calls) > 1:
+            action["extra_calls"] = calls[1:]
+        return action
 
     def _climate_set_temperature(self, entity_id: str, temp, mode: str, action_data: dict, ca: dict) -> dict:
         """设置温度，可同时设模式；风速/摆风/预设走 extra_calls。
@@ -2414,9 +2504,27 @@ class TimerElvesCoordinator:
     # ================================================================== #
 
     async def _update_sensor(self) -> None:
+        # ==================================================================
+        # 【必须】先刷新统计，再取 all_task_list
+        #
+        # 创建任务的四条路径（create_timer / create_climate_timer /
+        # create_cover_timer / create_recurring_timer）都只调用了本方法，
+        # **没有调用 update_stats()**：
+        #   · payload["active_tasks"] 按 self.tasks 实时算 → 新任务算得进去
+        #   · payload["all_task_list"] 取自 self.stats 的旧快照 → 新任务不在里面
+        # 于是前端看到「活跃 2 个」却一个 status=active 的任务都拿不到，
+        # 定时任务进度条/角标因此永远不显示（实测就是这个现象）。
+        #
+        # 放在这里兜底而不是逐处补：update_stats() 幂等、开销只是遍历内存任务，
+        # 将来新增调用点也不会再漏。已有 update_stats() 的调用点最多多算一次。
+        # ==================================================================
+        await self.update_stats()
+
         active_timers = sum(1 for t in self.tasks.values() if not t.get("is_recurring") and t.get("status") == "active")
         active_schedules = sum(1 for t in self.tasks.values() if t.get("is_recurring") and t.get("status") == "active")
-        all_task_list = self.stats.get("all_task_list", [])
+        # 直接实时构建，不读 stats 缓存（原因见 build_task_briefs 的注释）：
+        # 上面虽已 await update_stats()，但这里再取一次不依赖调用顺序，语义更明确。
+        all_task_list = self.build_task_briefs()
         payload = {
             "active_tasks": active_timers + active_schedules,
             "active_timers": active_timers,
@@ -2831,6 +2939,44 @@ class TimerElvesCoordinator:
         except Exception as e:
             _LOGGER.error(f"[timer_elves] add_history_record failed: {e}")
 
+    def build_task_briefs(self) -> list:
+        """实时构建任务摘要列表（active 全量在前 + 历史最新 TIMER_BRIEF_LIMIT 条）。
+
+        ==================================================================
+        【为什么必须实时构建，不能读 self.stats 缓存】
+
+        sensor 的 `all_task_list` 属性原先取 `self.stats["all_task_list"]`，
+        而 stats 只在 update_stats() 被调用时刷新。但实际只有「任务执行完成」
+        和「清空历史」等少数路径调用了它 —— **创建任务、取消任务只调
+        _update_sensor()，不调 update_stats()**。
+
+        于是出现两个数据源互相矛盾的现场（用户实测）：
+          · sensor.state / active_tasks（由 _collect 按 self.tasks 实时算）= 1
+          · all_task_list（stats 旧快照）里浴霸还是 cancelled、客厅大灯还是 active
+          · 前端照快照画进度条 → 取消了的任务一直显示、活着的任务反而不显示
+
+        这里把"构建摘要"抽成同步方法，sensor 每次 _collect() 直接调用，
+        属性值从此与内存任务表永远一致；update_stats() 也复用它，行为不变。
+        成本：几十个任务 × 构建一个 dict，纯内存，可安全在事件循环内调用。
+        ==================================================================
+        """
+        active_briefs, history_briefs = [], []
+        for task_id, td in self.tasks.items():
+            try:
+                brief = self._build_task_brief(task_id, td)
+            except Exception as exc:  # 单条坏数据不影响整份列表
+                _LOGGER.warning(f"[timer_elves] build brief failed ({task_id}): {exc}")
+                continue
+            if td.get("status") == "active":
+                active_briefs.append(brief)
+            else:
+                history_briefs.append(brief)
+        history_briefs.sort(
+            key=lambda x: x.get("executed_at") or x.get("created_at") or "", reverse=True
+        )
+        self.stats["brief_truncated"] = max(0, len(history_briefs) - TIMER_BRIEF_LIMIT)
+        return active_briefs + history_briefs[:TIMER_BRIEF_LIMIT]
+
     async def update_stats(self) -> None:
         try:
             now = self.get_local_now()
@@ -2845,18 +2991,7 @@ class TimerElvesCoordinator:
             # 任务摘要（体积敏感）：只保留前端渲染所需字段，历史最多 TIMER_BRIEF_LIMIT 条。
             # 完整任务数据请走 API（/timer/tasks、/timer/history）——
             # 曾因把全量字段塞进状态属性，导致体积超过 HA recorder 的 16384 字节上限。
-            active_briefs, history_briefs = [], []
-            for task_id, td in self.tasks.items():
-                brief = self._build_task_brief(task_id, td)
-                if td.get("status") == "active":
-                    active_briefs.append(brief)
-                else:
-                    history_briefs.append(brief)
-            history_briefs.sort(
-                key=lambda x: x.get("executed_at") or x.get("created_at") or "", reverse=True
-            )
-            self.stats["all_task_list"] = active_briefs + history_briefs[:TIMER_BRIEF_LIMIT]
-            self.stats["brief_truncated"] = max(0, len(history_briefs) - TIMER_BRIEF_LIMIT)
+            self.stats["all_task_list"] = self.build_task_briefs()
         except Exception as e:
             _LOGGER.error(f"[timer_elves] update_stats failed: {e}")
 

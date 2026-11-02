@@ -1237,7 +1237,14 @@ class TimerElvesSensor(SensorEntity):
                 "successful_task": coord.stats.get("successful_task", 0),
                 "failed_task": coord.stats.get("failed_task", 0),
                 "today_task": coord.stats.get("today_task", 0),
-                "all_task_list": coord.stats.get("all_task_list", []),
+                # 【必须实时构建】不能读 stats 缓存：创建/取消任务只调 _update_sensor()、
+                # 不调 update_stats()，缓存里会残留"已取消的任务仍是 active / 新任务不存在"，
+                # 前端据此画的进度条就会与事实相反（实测：浴霸已取消却显示客厅大灯在计时）。
+                "all_task_list": (
+                    coord.build_task_briefs()
+                    if hasattr(coord, "build_task_briefs")
+                    else coord.stats.get("all_task_list", [])
+                ),
                 "time_zone": coord.time_zone,
             }
         except Exception:
