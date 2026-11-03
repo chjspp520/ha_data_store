@@ -1,4 +1,4 @@
-# HA 数据统一存储系统 (ha_data_store) 
+# HA 数据统一存储系统 (ha_data_store)
 
 ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configuration.yaml`**，全部通过配置界面与内置管理页面完成，把「采集 → 存储 → 分析 → 展示 → 远程交互」串成一套家庭数据平台。
 
@@ -2720,3 +2720,6 @@ curl -X POST /api/ha_data_store/apikey/settings \
 > **注意**：本集成是一个综合性数据平台，功能丰富但配置复杂度较高。建议先配置设备类和传感器类采集核心数据，再逐步探索属性提取、桥接等高级功能。
 
 ---
+
+更早版本的完整更新记录见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
+
