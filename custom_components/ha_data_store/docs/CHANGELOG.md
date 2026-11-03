@@ -1,5 +1,54 @@
 # 更新日志
 
+## 2026-11-03 — v6.0.4 空调 / 窗帘定时支持「同时执行」
+
+| 项 | 内容 |
+|---|---|
+| 新增 `_attach_extra_steps()` | 从 `action_steps` 里只挑**目标不是本实体**的步骤（脚本 / 场景 / 自动化 / 按钮），生成 service 挂到 `action.extra_calls`；本实体的步骤跳过（动作已由专用生成器产出，再挂会执行两遍） |
+| 调用点 | `create_climate_timer`、`create_cover_timer`、`_async_execute_schedule` 的 climate / cover 分支 —— 一次性与周期任务都支持 |
+| 执行侧 | 无改动（`_run_extra_calls` 本来就在主调用之后执行 `extra_calls`） |
+
+兼容性：`action_steps` 缺失或只含本实体时行为完全不变；`extra_calls` 失败只记 warning，不影响主任务结果。
+
+---
+
+## 2026-11-03 — v6.0.3 统一动作系统增量：定时动作编排 / 能力发现 / 颜色互斥
+
+> 房间精灵「历史气泡 → 定时器 → 更多动作」需要后端支持；同时**自动化也在用同一套动作系统**，
+> 本次只做增量：执行路径（`build_service_call` / `_action_supported`）保持不变。
+
+### 一、`push_control.py`
+
+| 项 | 内容 |
+|---|---|
+| 新增 `build_control_call()` | 内部（定时/自动化）统一入口：复用 `build_service_call` 的校验，不做 token 授权 |
+| 新增 `filter_action_params()` | 按目录声明裁剪参数 + 类型转换；动作未收录时原样返回 |
+| 新增 `resolve_action_spec()` | 按实体域取动作定义 |
+| 新增 `_dedupe_color_descriptors()` | HA `light` 的 Color descriptors 是互斥组，只保留最后设置的那个（修 `two or more values in the same group of exclusion`） |
+| 能力发现过滤 | `build_capabilities` 改用 `_action_supported_for_caps`：media_player 按 `supported_features`、light 按 `supported_color_modes` 裁参数。**执行路径 `_action_supported` 冻结**，自动化不受影响 |
+| 参数展示口径 | `_int` / `_dyn_range` 支持 `display`：亮度 `percent`、色温 `kelvin`、音量 `percent` |
+| 目录新增 | `media_player.play_media`、`climate.set_preset_mode`、`remote`、`input_datetime`、`datetime`/`date`/`time` |
+
+### 二、`timer_elves.py`
+
+| 项 | 内容 |
+|---|---|
+| 多动作编排 | `build_action_steps()`：首条主调用 + 其余进 `extra_calls`，同「实体+服务」去重；单步可带 `entity_id`（脚本/场景兜底） |
+| 任务字段 | `create_timer` / `create_schedule` 保存 `action_steps`（JSON，无 DB 迁移），`send_all_timers` 回传 |
+| 参数裁剪 | `_merge_action_params()` 走 `filter_action_params`；开关类动作合并 `action_data`（修「灯亮度被吞」） |
+| 动作描述 | `_decorate_description()`：`开灯 · 亮度 153 · 色温 4000`（文案取目录 label） |
+| 能力查询 | 新增事件 `get_entity_actions` → `send_entity_actions()`（复用 `build_capabilities`） |
+| 执行兜底 | `_sanitize_service_data()` 在 `async_call` 前裁互斥颜色（覆盖升级前的老任务 + `extra_calls`） |
+
+### 三、兼容性
+
+- `build_service_call` 签名 / 语义不变；
+- `ACTION_CATALOG` 只增不改（既有 service 名、参数名、动作均未变动）；
+- 新增过滤只作用于 `build_capabilities`（UI 清单），不影响执行；
+- 版本号：`manifest.json` 6.0.2 → **6.0.3**，`const.py` 的 `VERSION` 同步为 6.0.3（原先停在 6.0.0）。
+
+---
+
 ## 2026-10-03 — v4.17.0 新增「数据可用性」接口：有数据的 年 / 年月 / 年月日
 
 > 用户要求：设备类增加一个 API，查询**指定实体/多实体/全部实体**有数据的

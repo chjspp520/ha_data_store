@@ -80,12 +80,17 @@ class TimerElvesCoordinator:
 
     # 动作参数白名单：前端/外部会把参数放在事件顶层（如 climate_mode / temperature），
     # 归一化时统一并入 action_data；命名对齐 push_control.ACTION_CATALOG，便于复用动作目录。
+    # 注意：这里只管"顶层平铺参数"的收纳；某个动作真正接受哪些参数，由
+    # push_control.filter_action_params 按目录声明裁剪，timer 侧不再维护第二份白名单。
     _ACTION_PARAM_KEYS = (
         "temperature", "target_temp_high", "target_temp_low", "hvac_mode", "mode",
         "fan_mode", "swing_mode", "preset_mode", "position", "tilt_position",
-        "brightness", "brightness_pct", "percentage", "color_temp_kelvin",
-        "humidity", "operation_mode", "oscillating", "direction",
-        "media_content_id", "volume_level", "effect",
+        "brightness", "brightness_pct", "percentage", "color_temp_kelvin", "color_temp",
+        "rgb_color", "rgbw_color", "hs_color", "xy_color",
+        "humidity", "operation_mode", "oscillating", "direction", "fan_speed",
+        "media_content_id", "media_content_type", "volume_level", "is_volume_muted",
+        "source", "sound_mode", "effect", "transition",
+        "value", "option", "item", "rename", "status", "code",
     )
 
     # 空调动作别名 → 内部动作名（对齐 push_control 目录命名，并兼容旧前端字段名）
@@ -705,8 +710,34 @@ class TimerElvesCoordinator:
             except Exception as e:
                 _LOGGER.error(f"[timer_elves] get_history event failed: {e}")
                 self._fire_event("error", {"error": str(e), "success": False, "action": "get_history"})
+        elif action == "get_entity_actions":
+            await self.send_entity_actions(data)
         elif action == "clear_all_history":
             await self._clear_all_history()
+
+    async def send_entity_actions(self, data: dict) -> None:
+        """能力发现：返回某实体可用的动作与参数 schema（供前端动作面板渲染）。
+
+        复用 `push_control.build_capabilities` —— 动作名、参数名、options、
+        min/max/step 全部来自统一动作目录，前端不再硬编码"域 → 控件"。
+        走定时精灵自己的响应事件（ha_data_store_timer_response），
+        不新增 HTTP 路由、不依赖 db_viewer / push token 开关。
+        """
+        entity_id = str(data.get("entity_id") or "").strip()
+        request_id = data.get("request_id")
+        payload = {"request_id": request_id, "entity_id": entity_id}
+        if not entity_id:
+            self._fire_event("entity_actions", {
+                **payload, "caps": None, "error": "entity_id required"})
+            return
+        try:
+            from .push_control import build_capabilities
+            caps = build_capabilities(self.hass, entity_id, None)
+            self._fire_event("entity_actions", {**payload, "caps": caps})
+        except Exception as exc:
+            _LOGGER.error(f"[timer_elves] send_entity_actions failed: {exc}")
+            self._fire_event("entity_actions", {
+                **payload, "caps": None, "error": str(exc)})
 
     # ================================================================== #
     #  创建定时器（一次性）                                                   #
@@ -737,6 +768,13 @@ class TimerElvesCoordinator:
 
             action_data = self._normalize_action_data(data)
             action_type = self._resolve_action_type(data, action_data, default="auto")
+            # 多动作编排：一个实体只能有一个一次性任务，所以"同时做几件事"必须落在
+            # 同一个任务里（首条主调用 + 其余 extra_calls）。climate / cover 已在上面分流，
+            # 它们各自有专用生成逻辑，不接受 action_steps。
+            steps = data.get("action_steps")
+            action = self.build_action_steps(entity_id, steps) if steps else None
+            if not action:
+                action = self.generate_action(entity_id, action_type, None, action_data)
             timer_data = {
                 "timer_id": timer_id,
                 "entity_id": entity_id,
@@ -749,9 +787,11 @@ class TimerElvesCoordinator:
                 "domain": entity_id.split(".")[0],
                 "created_by": data.get("user_id", "unknown"),
                 "created_at": self.datetime_to_iso(self.get_local_now()),
-                "action": self.generate_action(entity_id, action_type, None, action_data),
+                "action": action,
                 "action_type": action_type,
                 "action_data": action_data,
+                # 回显用（执行只依赖 action）；纯 JSON 字段，无需 DB 迁移
+                "action_steps": steps if isinstance(steps, list) and steps else None,
                 "repeat_type": "none",
                 "is_recurring": False,
             }
@@ -829,6 +869,9 @@ class TimerElvesCoordinator:
             action = self.generate_climate_action(
                 entity_id, action_type, action_data,
                 previous_state=self.climate_previous_states.get(entity_id))
+            # 「同时执行」：空调的附加动作（脚本 / 场景 / 自动化 / 按钮）
+            action = self._attach_extra_steps(
+                entity_id, action, data.get("action_steps"))
             timer_data = {
                 "timer_id": timer_id, "entity_id": entity_id,
                 "duration": duration_str, "start_time": self.datetime_to_iso(start_time),
@@ -902,6 +945,9 @@ class TimerElvesCoordinator:
             action = self.generate_cover_action(
                 entity_id, action_type, action_data,
                 previous_state=self.cover_previous_states.get(entity_id))
+            # 「同时执行」：窗帘的附加动作（脚本 / 场景 / 自动化 / 按钮）
+            action = self._attach_extra_steps(
+                entity_id, action, data.get("action_steps"))
             timer_data = {
                 "timer_id": timer_id, "entity_id": entity_id,
                 "duration": duration_str, "start_time": self.datetime_to_iso(start_time),
@@ -978,6 +1024,12 @@ class TimerElvesCoordinator:
                 "created_by": data.get("user_id", "unknown"),
                 "created_at": self.datetime_to_iso(self.get_local_now()),
                 "action_type": action_type, "action_data": action_data,
+                # 周期任务同样支持多动作编排（回显用；执行时再编排），JSON 字段无需迁移
+                "action_steps": (
+                    data.get("action_steps")
+                    if isinstance(data.get("action_steps"), list) and data.get("action_steps")
+                    else None
+                ),
                 "is_recurring": True, "last_executed": None, "next_execution": None,
                 "time_zone": self.time_zone,
             }
@@ -1190,6 +1242,9 @@ class TimerElvesCoordinator:
                 action = self.generate_climate_action(
                     entity_id, action_type, action_data,
                     previous_state=sd.get("previous_state"))
+                # 周期任务同样支持附加动作（脚本 / 场景 / 自动化 / 按钮）
+                action = self._attach_extra_steps(
+                    entity_id, action, sd.get("action_steps"))
                 if action["type"] == "service_call":
                     domain, service = action["service"].split(".")
                     sd2 = action.get("data", {}).copy()
@@ -1219,6 +1274,9 @@ class TimerElvesCoordinator:
                 action = self.generate_cover_action(
                     entity_id, action_type, action_data,
                     previous_state=sd.get("previous_state"))
+                # 周期任务同样支持附加动作（脚本 / 场景 / 自动化 / 按钮）
+                action = self._attach_extra_steps(
+                    entity_id, action, sd.get("action_steps"))
                 if action["type"] == "service_call":
                     domain, service = action["service"].split(".")
                     sd2 = action.get("data", {}).copy()
@@ -1233,8 +1291,11 @@ class TimerElvesCoordinator:
                         await self.hass.services.async_call(domain, service, sd2, blocking=True)
                         success = True
             else:
-                action = self.generate_action(
-                    entity_id, action_type, None, self._normalize_action_data(sd))
+                steps = sd.get("action_steps")
+                action = self.build_action_steps(entity_id, steps) if steps else None
+                if not action:
+                    action = self.generate_action(
+                        entity_id, action_type, None, self._normalize_action_data(sd))
                 if action["type"] == "service_call":
                     domain, service = action["service"].split(".")
                     await self._run_extra_calls(action, "pre_calls")
@@ -1457,14 +1518,227 @@ class TimerElvesCoordinator:
         service = str(spec.get("service") or action_type)
         if "." not in service:
             service = f"{domain}.{service}"
-        payload = {k: v for k, v in (action_data or {}).items() if v is not None}
+        params = {k: v for k, v in (action_data or {}).items() if v is not None}
+        payload = dict(params)
         payload["entity_id"] = entity_id
+        base = spec.get("label") or action_type
         return {
             "type": "service_call",
             "service": service,
             "data": payload,
-            "description": spec.get("label") or action_type,
+            "description": self._decorate_description(entity_id, action_type, params, base),
         }
+
+    def _attach_extra_steps(
+        self, entity_id: str, action: dict | None, steps,
+    ) -> dict | None:
+        """把 action_steps 里「指向其它实体」的步骤挂到 `action.extra_calls`。
+
+        空调 / 窗帘的定时走专用生成（`generate_climate_action` / `generate_cover_action`），
+        不接受多动作编排；这里只挑出**目标不是本实体**的步骤（脚本 / 场景 / 自动化 /
+        按钮），追加成 extra_calls —— 到点由 `_run_extra_calls` 在主调用之后依次执行。
+
+        本实体的步骤必须跳过：它的动作已由专用生成器产出，再挂一次会执行两遍。
+        """
+        if not isinstance(steps, list) or not steps or not action:
+            return action
+        extras: list[dict] = []
+        for raw in steps:
+            if not isinstance(raw, dict):
+                continue
+            target = str(raw.get("entity_id") or "").strip()
+            if not target or target == entity_id or "." not in target:
+                continue
+            act = str(raw.get("action") or "").strip()
+            if not act:
+                continue
+            params = raw.get("data")
+            if not isinstance(params, dict):
+                alt = raw.get("action_data")
+                params = alt if isinstance(alt, dict) else {}
+            merged = self._merge_action_params(target, act, params)
+            try:
+                gen = self.generate_action(target, act, None, merged)
+            except Exception as exc:
+                _LOGGER.warning(f"[timer_elves] 附加动作生成失败 {act}@{target}: {exc}")
+                continue
+            if not gen or gen.get("type") != "service_call":
+                continue
+            data = {k: v for k, v in (gen.get("data") or {}).items() if k != "entity_id"}
+            data["entity_id"] = target
+            extras.append({"service": gen.get("service"), "data": data})
+        if not extras:
+            return action
+        merged_action = dict(action)
+        merged_action["extra_calls"] = extras
+        return merged_action
+
+    def _sanitize_service_data(self, domain: str, data: dict | None) -> dict:
+        """下发服务前做一次安全收敛（目前只处理灯的颜色描述互斥）。
+
+        新建任务在 `_merge_action_params` 阶段已经裁过，但**升级前创建的老任务**
+        `action.data` 里可能同时存着色温与颜色 —— 直接下发会让 HA 抛出
+        "two or more values in the same group of exclusion"，任务被判失败。
+        """
+        payload = dict(data or {})
+        if domain != "light" or not payload:
+            return payload
+        try:
+            from .push_control import _dedupe_color_descriptors
+            payload, dropped = _dedupe_color_descriptors(payload)
+            if dropped:
+                _LOGGER.warning(
+                    "[timer_elves] 灯动作忽略互斥颜色参数 %s（实体 %s）",
+                    ",".join(dropped), payload.get("entity_id"))
+        except Exception:
+            return payload
+        return payload
+
+    def _decorate_description(
+        self, entity_id: str, action_type: str, params: dict | None, base: str,
+    ) -> str:
+        """把动作参数拼到描述后面（任务条 / 任务中心 / 历史记录都直接展示这个字符串）。
+
+        参数名优先取统一动作目录里的 `label`（"亮度" / "色温"），不在 timer 侧另写映射。
+        """
+        if not params:
+            return base
+        labels: dict[str, str] = {}
+        try:
+            from .push_control import resolve_action_spec
+            spec = resolve_action_spec(entity_id, action_type) or {}
+            for key, pspec in (spec.get("params") or {}).items():
+                labels[key] = (pspec.get("label") or key) if isinstance(pspec, dict) else key
+        except Exception:
+            labels = {}
+        parts = []
+        for key, value in params.items():
+            if value is None or value == "":
+                continue
+            text = ",".join(str(v) for v in value) if isinstance(value, (list, tuple)) else str(value)
+            parts.append(f"{labels.get(key, key)} {text}")
+        if not parts:
+            return base
+        return f"{base} · " + " · ".join(parts)
+
+    def _catalog_action_label(self, entity_id: str, action_type: str) -> str | None:
+        """动作的中文名（取统一动作目录 `ACTION_CATALOG` 的 label）；未收录返回 None。
+
+        任务条、历史记录、日志都直接展示 `action.description`，文案口径统一取目录，
+        不在 timer 侧另写一份"英文动作名 → 中文"的映射。
+        """
+        try:
+            from .push_control import resolve_action_spec
+            spec = resolve_action_spec(entity_id, action_type)
+            return (spec or {}).get("label") or None
+        except Exception:
+            return None
+
+    def _merge_action_params(
+        self, entity_id: str, action_type: str, action_data: dict | None
+    ) -> dict:
+        """把 action_data 裁剪成该动作在**统一动作目录**里声明的参数。
+
+        定时侧不再维护第二份"域 → 参数"白名单：能接受哪些参数、类型怎么转，
+        全部委托 `push_control.filter_action_params`（与 push 控制同一口径）。
+        动作未被目录收录时原样返回（保持旧行为），非法值丢弃并记 warning。
+        """
+        if not action_data:
+            return {}
+        try:
+            from .push_control import filter_action_params
+            merged, dropped = filter_action_params(
+                self.hass, entity_id, action_type, action_data)
+            if dropped:
+                _LOGGER.warning(
+                    "[timer_elves] 动作 %s 忽略不支持的参数 %s（实体 %s）",
+                    action_type, ",".join(dropped), entity_id)
+            return merged
+        except Exception as exc:
+            _LOGGER.warning(f"[timer_elves] 动作参数裁剪失败，按原样下发: {exc}")
+            return dict(action_data)
+
+    def build_action_steps(self, entity_id: str, steps: list) -> dict | None:
+        """把多个「动作 + 参数」编排成一个任务的 action。
+
+        背景：一个实体同时只允许一个一次性定时器（`entity_timers` 一实体一条），
+        所以"到点同时做几件事"（媒体：音量 40% + 播放；窗帘：位置 + 翻转片）必须塞进
+        同一个任务，拆成多个任务会被后者顶掉。
+
+        规则：
+          · 依次生成每条动作的 service（catalog 优先；climate/cover 走各自专用生成）；
+          · 第一条作为主调用，其余进 `extra_calls`（复用 `_run_extra_calls` 的执行与容错口径）；
+          · 同一个 service 只保留最后一条（避免连发两次同一个服务）；
+          · 单条生成失败只跳过该条；全都失败返回 None（调用方回落单动作）。
+
+        @returns dict | None  `{"type":"service_call", "service", "data", "extra_calls", "description"}`
+        """
+        if not isinstance(steps, list) or not steps:
+            return None
+        calls: list[dict] = []
+        for raw in steps:
+            if not isinstance(raw, dict):
+                continue
+            act = str(raw.get("action") or "").strip()
+            if not act:
+                continue
+            params = raw.get("data")
+            if not isinstance(params, dict):
+                alt = raw.get("action_data")
+                params = alt if isinstance(alt, dict) else {}
+            # 单步可以指向**别的实体**（"执行脚本 / 激活场景"这类兜底入口：
+            #   任务是挂在当前设备上的倒计时，到点执行的却是脚本/场景实体）
+            target = str(raw.get("entity_id") or entity_id).strip()
+            if "." not in target:
+                target = entity_id
+            merged = self._merge_action_params(target, act, params)
+            try:
+                gen = self.generate_action(target, act, None, merged)
+            except Exception as exc:
+                _LOGGER.warning(f"[timer_elves] 编排动作生成失败 {act}@{target}: {exc}")
+                continue
+            if not gen or gen.get("type") != "service_call":
+                continue
+            data = {k: v for k, v in (gen.get("data") or {}).items() if k != "entity_id"}
+            calls.append({
+                "service": gen.get("service"),
+                "data": data,
+                "target": target,
+                "description": gen.get("description") or act,
+            })
+        if not calls:
+            return None
+
+        # 同一「实体 + service」去重（保留最后一条）
+        ordered: list[dict] = []
+        index: dict[str, int] = {}
+        for call in calls:
+            key = f"{call.get('target')}|{call.get('service')}"
+            if key in index:
+                ordered[index[key]] = call
+            else:
+                index[key] = len(ordered)
+                ordered.append(call)
+
+        main = ordered[0]
+        main_data = dict(main["data"])
+        main_data["entity_id"] = main.get("target") or entity_id
+        action = {
+            "type": "service_call",
+            "service": main["service"],
+            "data": main_data,
+            "description": " · ".join(
+                c["description"] for c in ordered if c.get("description")
+            ) or main["description"],
+        }
+        extras = []
+        for call in ordered[1:]:
+            payload = dict(call["data"])
+            payload["entity_id"] = call.get("target") or entity_id
+            extras.append({"service": call["service"], "data": payload})
+        if extras:
+            action["extra_calls"] = extras
+        return action
 
     def generate_action(
         self, entity_id: str, action_type: str = "auto",
@@ -1518,31 +1792,53 @@ class TimerElvesCoordinator:
                     "data": {"entity_id": entity_id}, "description": "Turn off"}
 
         if action_type == "toggle":
+            extra = self._merge_action_params(entity_id, action_type, action_data)
+            # 文案优先取统一动作目录的中文 label（任务条 / 历史记录直接展示它）
+            label = self._catalog_action_label(entity_id, action_type)
             if "toggle" in domain_actions:
                 ac = domain_actions["toggle"]
+                base = label or ac.get("description", "Toggle")
                 return {"type": "service_call", "service": ac["service"],
-                        "data": {**ac.get("data", {}), "entity_id": entity_id},
-                        "description": ac.get("description", "Toggle")}
+                        "data": {**ac.get("data", {}), **extra, "entity_id": entity_id},
+                        "description": self._decorate_description(
+                            entity_id, action_type, extra, base)}
+            base = label or "Toggle"
             return {"type": "service_call", "service": f"{domain}.toggle",
-                    "data": {"entity_id": entity_id}, "description": "Toggle"}
+                    "data": {**extra, "entity_id": entity_id},
+                    "description": self._decorate_description(
+                        entity_id, action_type, extra, base)}
 
         if action_type == "turn_off":
+            extra = self._merge_action_params(entity_id, action_type, action_data)
+            label = self._catalog_action_label(entity_id, action_type)
             if "turn_off" in domain_actions:
                 ac = domain_actions["turn_off"]
+                base = label or ac.get("description", "Turn off")
                 return {"type": "service_call", "service": ac["service"],
-                        "data": {**ac.get("data", {}), "entity_id": entity_id},
-                        "description": ac.get("description", "Turn off")}
+                        "data": {**ac.get("data", {}), **extra, "entity_id": entity_id},
+                        "description": self._decorate_description(
+                            entity_id, action_type, extra, base)}
+            base = label or "Turn off"
             return {"type": "service_call", "service": f"{domain}.turn_off",
-                    "data": {"entity_id": entity_id}, "description": "Turn off"}
+                    "data": {**extra, "entity_id": entity_id},
+                    "description": self._decorate_description(
+                        entity_id, action_type, extra, base)}
 
         if action_type == "turn_on":
+            extra = self._merge_action_params(entity_id, action_type, action_data)
+            label = self._catalog_action_label(entity_id, action_type)
             if "turn_on" in domain_actions:
                 ac = domain_actions["turn_on"]
+                base = label or ac.get("description", "Turn on")
                 return {"type": "service_call", "service": ac["service"],
-                        "data": {**ac.get("data", {}), "entity_id": entity_id},
-                        "description": ac.get("description", "Turn on")}
+                        "data": {**ac.get("data", {}), **extra, "entity_id": entity_id},
+                        "description": self._decorate_description(
+                            entity_id, action_type, extra, base)}
+            base = label or "Turn on"
             return {"type": "service_call", "service": f"{domain}.turn_on",
-                    "data": {"entity_id": entity_id}, "description": "Turn on"}
+                    "data": {**extra, "entity_id": entity_id},
+                    "description": self._decorate_description(
+                        entity_id, action_type, extra, base)}
 
         # 兜底：按 push_control 的动作目录生成（动作名/参数名与目录一致）
         catalog_action = self._generate_action_from_catalog(entity_id, action_type, action_data)
@@ -1875,10 +2171,11 @@ class TimerElvesCoordinator:
             if action["type"] == "service_call":
                 domain, service = action["service"].split(".")
                 await self._run_extra_calls(action, "pre_calls")
+                call_data = self._sanitize_service_data(domain, action.get("data", {}))
                 # blocking=True：让服务调用的错误（参数非法 / 服务不存在）能被捕获，
                 # 否则任务会被误判为 success，而设备实际没动。
                 await self.hass.services.async_call(
-                    domain, service, action.get("data", {}), blocking=True)
+                    domain, service, call_data, blocking=True)
                 await self._run_extra_calls(action)
                 success = True
             if success:
@@ -2396,6 +2693,7 @@ class TimerElvesCoordinator:
                             "action_type": timer.get("action_type", "auto"),
                             # 周期任务同样带上动作参数（卡片显示「模式 + 温度」要用）
                             "action_data": timer.get("action_data", {}),
+                            "action_steps": timer.get("action_steps") or None,
                             "time_zone": timer.get("time_zone", self.time_zone),
                         }
                         if timer["repeat_type"] == "weekly":
@@ -2438,6 +2736,7 @@ class TimerElvesCoordinator:
                         # 与 schedules 分支保持同名字段，前端一套逻辑即可通吃。
                         "action_type": timer.get("action_type", "auto"),
                         "action_data": timer.get("action_data", {}),
+                        "action_steps": timer.get("action_steps") or None,
                         "is_climate": timer.get("is_climate", False),
                         "is_cover": timer.get("is_cover", False),
                         "time_zone": self.time_zone,
@@ -3143,8 +3442,9 @@ class TimerElvesCoordinator:
                 if "." not in ex_service:
                     continue
                 ex_domain, ex_name = ex_service.split(".", 1)
+                ex_data = self._sanitize_service_data(ex_domain, extra.get("data", {}))
                 await self.hass.services.async_call(
-                    ex_domain, ex_name, extra.get("data", {}), blocking=True)
+                    ex_domain, ex_name, ex_data, blocking=True)
             except Exception as exc:
                 _LOGGER.warning(f"[timer_elves] 附加动作执行失败 {extra}: {exc}")
 
@@ -3185,8 +3485,9 @@ class TimerElvesCoordinator:
         列表推送（timers_list / schedules_list）与查询结果（history_result）不记录，避免噪声。
         """
         try:
-            if action in ("timers_list", "schedules_list", "history_result"):
+            if action in ("timers_list", "schedules_list", "history_result", "entity_actions"):
                 return
+
             local = get_logger()
             if local is None:
                 return

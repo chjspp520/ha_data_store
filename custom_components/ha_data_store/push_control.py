@@ -45,7 +45,7 @@ _ENTITY_ID_RE = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z0-9_]+$")
 #  参数 schema 构造辅助                                                          #
 # =========================================================================== #
 def _int(min_v: int | None = None, max_v: int | None = None, label: str = "",
-         required: bool = False) -> dict:
+         required: bool = False, display: str | None = None) -> dict:
     spec: dict[str, Any] = {"type": "int", "label": label}
     if min_v is not None:
         spec["min"] = min_v
@@ -53,6 +53,9 @@ def _int(min_v: int | None = None, max_v: int | None = None, label: str = "",
         spec["max"] = max_v
     if required:
         spec["required"] = True
+    # display：给前端滑杆的展示口径（percent = 按 min~max 换算百分比，kelvin = 加 K 单位）
+    if display:
+        spec["display"] = display
     return spec
 
 
@@ -92,9 +95,15 @@ def _bool(label: str = "", required: bool = False) -> dict:
     return {"type": "bool", "label": label, "required": required}
 
 
-def _dyn_range(kind: str, label: str = "", required: bool = False) -> dict:
+def _dyn_range(kind: str, label: str = "", required: bool = False,
+               display: str | None = None) -> dict:
     """数值参数：范围/步长从实体属性动态读取（见 _resolve_dynamic_range）。"""
-    return {"type": "float", "dynamic_range": kind, "label": label, "required": required}
+    spec: dict[str, Any] = {
+        "type": "float", "dynamic_range": kind, "label": label, "required": required,
+    }
+    if display:
+        spec["display"] = display
+    return spec
 
 
 # =========================================================================== #
@@ -109,9 +118,10 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
     }},
     "light": {"actions": {
         "turn_on": {"service": "turn_on", "label": "开灯", "params": {
-            "brightness": _int(0, 255, "亮度(0-255)"),
-            "color_temp_kelvin": _int(1000, 10000, "色温(K)"),
-            "rgb_color": {"type": "rgb", "label": "RGB 颜色"},
+            # display：前端滑杆展示口径（percent = 0~max 换算百分比；kelvin = 加 K）
+            "brightness": _int(0, 255, "亮度", display="percent"),
+            "color_temp_kelvin": _int(1000, 10000, "色温", display="kelvin"),
+            "rgb_color": {"type": "rgb", "label": "颜色"},
             "effect": _enum("effect_list", "灯效"),
             "transition": _float(0, 300, label="过渡秒数"),
         }},
@@ -134,6 +144,9 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
         }},
         "set_swing_mode": {"service": "set_swing_mode", "label": "设置摆风", "params": {
             "swing_mode": _enum("swing_modes", "摆风", required=True),
+        }},
+        "set_preset_mode": {"service": "set_preset_mode", "label": "设置预设", "params": {
+            "preset_mode": _enum("preset_modes", "预设模式", required=True),
         }},
         "turn_on": {"service": "turn_on", "label": "开机"},
         "turn_off": {"service": "turn_off", "label": "关机"},
@@ -196,7 +209,7 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
         "turn_on": {"service": "turn_on", "label": "开机"},
         "turn_off": {"service": "turn_off", "label": "关机"},
         "volume_set": {"service": "volume_set", "label": "设置音量", "params": {
-            "volume_level": _dyn_range("volume", "音量(0-1)", required=True),
+            "volume_level": _dyn_range("volume", "音量", required=True, display="percent"),
         }},
         "volume_up": {"service": "volume_up", "label": "音量+"},
         "volume_down": {"service": "volume_down", "label": "音量-"},
@@ -213,6 +226,12 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
         }},
         "select_sound_mode": {"service": "select_sound_mode", "label": "切换音效模式", "params": {
             "sound_mode": _enum("sound_mode_list", "音效模式", required=True),
+        }},
+        "play_media": {"service": "play_media", "label": "播放内容", "params": {
+            "media_content_id": _str("媒体 ID / URL", required=True),
+            "media_content_type": _fixed_enum(
+                ["music", "video", "tvshow", "movie", "image", "url"],
+                "媒体类型", required=True),
         }},
     }},
     "vacuum": {"actions": {
@@ -347,6 +366,42 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
             "item": _str("条目内容", required=True),
         }},
     }},
+    "remote": {"actions": {
+        "turn_on": {"service": "turn_on", "label": "开机"},
+        "turn_off": {"service": "turn_off", "label": "关机"},
+        "toggle": {"service": "toggle", "label": "切换"},
+        "send_command": {"service": "send_command", "label": "发送命令", "params": {
+            "device": _str("设备（可选）"),
+            "command": _str("命令（按键名 / 指令）", required=True),
+            "num_repeats": _int(1, 100, "重复次数"),
+            "delay_secs": _float(0, 10, label="间隔秒数"),
+        }},
+    }},
+    # 日期/时间类：input_datetime 用 set_datetime（按实体类型取单个参数），
+    # 2024+ 的 datetime/date/time 域统一是 set_value。
+    "input_datetime": {"actions": {
+        "set_datetime": {"service": "set_datetime", "label": "设置日期时间", "params": {
+            "date": _str("日期 YYYY-MM-DD"),
+            "time": _str("时间 HH:MM:SS"),
+            "datetime": _str("日期时间 YYYY-MM-DD HH:MM:SS"),
+            "timestamp": _float(label="时间戳"),
+        }},
+    }},
+    "datetime": {"actions": {
+        "set_value": {"service": "set_value", "label": "设置日期时间", "params": {
+            "value": _str("日期时间", required=True),
+        }},
+    }},
+    "date": {"actions": {
+        "set_value": {"service": "set_value", "label": "设置日期", "params": {
+            "value": _str("日期", required=True),
+        }},
+    }},
+    "time": {"actions": {
+        "set_value": {"service": "set_value", "label": "设置时间", "params": {
+            "value": _str("时间", required=True),
+        }},
+    }},
 }
 
 # 只读域：明确不支持控制（用于给出更友好的提示）
@@ -384,6 +439,27 @@ _COVER_FEATURE_BITS: dict[str, int] = {
     "stop_cover_tilt": 64,
     "set_cover_tilt_position": 128,
 }
+
+# media_player 动作 → supported_features 位（不支持的动作整个不出现）
+_MEDIA_FEATURE_BITS: dict[str, int] = {
+    "turn_on": 128,
+    "turn_off": 256,
+    "volume_set": 4,
+    "volume_mute": 8,
+    "volume_up": 1024,
+    "volume_down": 512,
+    "media_play": 16384,
+    "media_pause": 1,
+    "media_stop": 4096,
+    "media_next_track": 32,
+    "media_previous_track": 16,
+    "select_source": 2048,
+    "select_sound_mode": 65536,
+}
+
+# light 颜色能力（supported_color_modes）：决定是否给色温 / RGB 滑杆
+_LIGHT_COLOR_TEMP_MODES: frozenset[str] = frozenset({"color_temp"})
+_LIGHT_RGB_MODES: frozenset[str] = frozenset({"hs", "rgb", "rgbw", "rgbww", "xy"})
 
 
 # =========================================================================== #
@@ -450,11 +526,52 @@ def resolve_param_spec(spec: dict, attrs: dict) -> dict | None:
 
 
 def _action_supported(domain: str, action: str, attrs: dict) -> bool:
-    """按实体实际能力过滤动作（目前处理 cover 的 supported_features）。"""
+    """**执行路径**的动作能力判定（`build_service_call` / `execute_control` 使用）。
+
+    ⚠️ 冻结区：自动化与 push 控制都走这条路径，**不要在这里加新的过滤条件** ——
+       新增条件会让既有调用在运行期被拒（表现为"自动化突然不执行了"）。
+       需要更严格的过滤请加到下面的 `_action_supported_for_caps`，
+       那只影响「能力发现」，不影响执行。
+    """
     if domain == "cover" and action in _COVER_FEATURE_BITS:
         sf = attrs.get("supported_features")
         if isinstance(sf, int):
             return bool(sf & _COVER_FEATURE_BITS[action])
+    return True
+
+
+def _action_supported_for_caps(domain: str, action: str, attrs: dict) -> bool:
+    """**能力发现**的动作判定（`build_capabilities` 使用）。
+
+    比执行路径更严格：实体明确声明了 `supported_features` 且没有对应位时，
+    这个动作就不出现在能力清单里（UI 少显示一个按钮）。
+    但它**不影响**执行 —— 既有自动化里配的同一个动作仍能正常下发。
+    """
+    if not _action_supported(domain, action, attrs):
+        return False
+    if domain == "media_player" and action in _MEDIA_FEATURE_BITS:
+        sf = attrs.get("supported_features")
+        if isinstance(sf, int):
+            return bool(sf & _MEDIA_FEATURE_BITS[action])
+    return True
+
+
+def _param_supported(domain: str, name: str, attrs: dict) -> bool:
+    """按实体能力过滤单个参数。
+
+    目前只处理灯的 color_temp / rgb：`supported_color_modes` 里没有对应模式时，
+    这两个参数整行不返回（灯不支持色温却摆一条滑杆，拖了没反应最容易被当成 bug）。
+    """
+    if domain != "light":
+        return True
+    modes = attrs.get("supported_color_modes")
+    if not isinstance(modes, (list, tuple, set)):
+        return True
+    mode_set = {str(m).lower() for m in modes}
+    if name == "color_temp_kelvin":
+        return bool(mode_set & _LIGHT_COLOR_TEMP_MODES)
+    if name == "rgb_color":
+        return bool(mode_set & _LIGHT_RGB_MODES)
     return True
 
 
@@ -492,12 +609,15 @@ def build_capabilities(hass: HomeAssistant, entity_id: str,
     for name, adef in entry["actions"].items():
         if allowed is not None and name not in allowed:
             continue
-        if not _action_supported(domain, name, attrs):
+        if not _action_supported_for_caps(domain, name, attrs):
             continue
         params: dict[str, dict] = {}
         for pname, pspec in (adef.get("params") or {}).items():
             resolved = resolve_param_spec(pspec, attrs)
             if resolved is None:
+                continue
+            # 能力过滤：实体不支持该参数时整行不返回（避免 UI 出现"拖了没反应"的滑杆）
+            if not _param_supported(domain, pname, attrs):
                 continue
             params[pname] = resolved
         actions.append({
@@ -738,6 +858,92 @@ def build_service_call(
 
     data["entity_id"] = entity_id
     return f"{domain}.{adef['service']}", data
+
+
+def resolve_action_spec(entity_id: str, action: str) -> dict | None:
+    """按实体域取动作定义（ACTION_CATALOG）；域或动作未收录返回 None。"""
+    domain = str(entity_id or "").split(".", 1)[0]
+    entry = ACTION_CATALOG.get(domain)
+    if not entry:
+        return None
+    return (entry.get("actions") or {}).get(str(action or ""))
+
+
+# HA light.turn_on 的「Color descriptors」是**互斥组**：同时给两个（如 color_temp_kelvin
+# + rgb_color）会直接抛 "two or more values in the same group of exclusion"。
+# 面板里色温与颜色是两个独立控件，用户很容易都拖一下，必须在统一动作层收口。
+_COLOR_DESCRIPTOR_KEYS: tuple[str, ...] = (
+    "rgb_color", "rgbw_color", "hs_color", "xy_color", "color_temp_kelvin", "color_temp",
+)
+
+
+def _dedupe_color_descriptors(params: dict) -> tuple[dict, list[str]]:
+    """颜色描述参数互斥：只保留 dict 里**最后出现**的那一个。
+
+    dict 保序（Python 3.7+），而前端 params 是按用户操作顺序写入的，
+    所以"最后一个"就是用户最后设置的那个。返回 (裁剪后的参数, 被丢弃的键)。
+    """
+    present = [k for k in params if k in _COLOR_DESCRIPTOR_KEYS]
+    if len(present) <= 1:
+        return params, []
+    keep = present[-1]
+    out = {k: v for k, v in params.items() if k == keep or k not in _COLOR_DESCRIPTOR_KEYS}
+    return out, [k for k in present if k != keep]
+
+
+def filter_action_params(
+    hass: HomeAssistant, entity_id: str, action: str, params: dict | None,
+) -> tuple[dict, list[str]]:
+    """把动作参数裁剪成该实体该动作真正接受的键，并按 schema 转换类型。
+
+    内部调用（定时精灵等）用这个函数，而不是自己维护一份参数白名单：
+      · 动作未收录（自定义域 / 私有动作）→ **原样返回**，保持既有行为；
+      · 目录里声明了 params 的动作 → 只保留声明键，未声明的丢弃（第二项列出丢弃的键）；
+      · 类型 / 范围不合法的值同样丢弃，不抛异常 —— 定时任务不该因为一个坏参数就建不出来。
+    """
+    raw = dict(params or {})
+    if not raw:
+        return {}, []
+    adef = resolve_action_spec(entity_id, action)
+    if adef is None:
+        return raw, []
+    st = hass.states.get(entity_id)
+    attrs: dict = dict(st.attributes) if st else {}
+    specs: dict[str, dict] = {}
+    for pname, pspec in (adef.get("params") or {}).items():
+        resolved = resolve_param_spec(pspec, attrs)
+        if resolved is not None:
+            specs[pname] = resolved
+    out: dict[str, Any] = {}
+    dropped: list[str] = []
+    for key, value in raw.items():
+        spec = specs.get(key)
+        if spec is None:
+            dropped.append(key)
+            continue
+        try:
+            out[key] = _coerce_value(key, value, spec)
+        except Exception:
+            dropped.append(key)
+    # 颜色描述互斥：只留最后设置的那一个（否则 HA 服务会直接抛异常，任务判失败）
+    out, color_dropped = _dedupe_color_descriptors(out)
+    if color_dropped:
+        dropped.extend(color_dropped)
+    return out, dropped
+
+
+def build_control_call(
+    hass: HomeAssistant, entity_id: str, action: str, params: dict | None,
+) -> tuple[str, dict]:
+    """内部（定时精灵 / 自动化）统一动作入口：action + params → (service, data)。
+
+    与 push 控制共用 `build_service_call` 的校验路径，但不做 token 授权
+    （allowed_actions / constraints 传 None），因此参数名、类型、必填、cover
+    supported_features 等规则完全一致，避免出现"两套校验口径"。
+    """
+    st = hass.states.get(entity_id)
+    attrs: dict = dict(st.attributes) if st else {}
+    return build_service_call(entity_id, action, params, None, None, attrs)
 
 
 def build_raw_service_call(
