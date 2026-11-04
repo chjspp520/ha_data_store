@@ -2615,6 +2615,17 @@ class TimerElvesCoordinator:
             td["action"] = self.generate_action(
                 entity_id, td.get("action_type", "auto"), state.state, action_data)
 
+        # 【附加动作】patch 带 action_steps 时更新；无论是否更新，都要把现有的
+        # action_steps 重新挂到刚重生成的 action 上 —— 上面三步 generate_* 产出的
+        # action 是全新的，不带 extra_calls；漏了这一步，用户改一次时长/动作就把
+        # 「同时执行」静默丢掉（界面还显示"已选 N"，到点却不跑）。
+        if "action_steps" in patch:
+            steps = patch.get("action_steps")
+            td["action_steps"] = steps if isinstance(steps, list) and steps else None
+        if td.get("action_steps"):
+            td["action"] = self._attach_extra_steps(
+                entity_id, td.get("action"), td.get("action_steps")) or td.get("action")
+
         if td.get("is_recurring"):
             for key in ("repeat_type", "schedule_time", "weekdays", "month_days"):
                 if patch.get(key) not in (None, ""):
