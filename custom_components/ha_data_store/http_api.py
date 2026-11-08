@@ -60,6 +60,8 @@ from .const import (
     TABLE_AUTOMATION_LOGS,
     TABLE_POWER_METER_CONFIGS,
     TABLE_POWER_ENERGY_DAILY,
+    SOURCE_TYPE_CARD,
+    SOURCE_TYPE_EXTERNAL,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -107,6 +109,16 @@ from .metrics import (
     sync_builtin_metrics_sync,
     test_metric_sync,
     upsert_metric_sync,
+)
+# 电力综合查询（只读）：6 个接口全部由 power_center.py 计算，这里只做参数解析与分发
+from .power_center import (
+    compute_power_breakdown_sync,
+    compute_power_calendar_sync,
+    compute_power_dashboard_sync,
+    compute_power_meta_sync,
+    compute_power_periods_sync,
+    compute_power_query_sync,
+    compute_power_reconcile_sync,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -4356,7 +4368,7 @@ class QueryView(_BaseDBView):
         query_type = request.query.get("type", "").strip().lower()
         if not query_type:
             return self.json(
-                {"success": False, "error": "缺少 type 参数，可选: device_history, device_entities, device_last_used, timeline, room_occupancy, metrics_query, metrics_catalog, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, whole_house_usage, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail, power_energy_joined, power_energy_multi, device_usage_multi, device_usage_detail, device_usage_total, device_usage_history, device_usage_avg"},
+                {"success": False, "error": "缺少 type 参数，可选: device_history, device_entities, device_last_used, timeline, room_occupancy, metrics_query, metrics_catalog, device_summary, device_users_list, device_user_history, device_user_summary, device_on_user_history, device_off_user_history, device_user_by_date, device_user_by_month, device_user_month_dates, env_history, env_latest, attr_history, attr_latest, attr_daily, entities, rooms_daily, rooms_multi_metric, vacuum_history, entity_data_dates, room_data_dates, all_rooms_data_dates, aggregate_daily, aggregate_monthly, aggregate_yearly, aggregate_room_daily, aggregate_room_monthly, aggregate_room_yearly_daily, whole_house_usage, ranking_daily, ranking_monthly, ranking_yearly, electricity_standard, health_history, health_latest, xiaoai_history, printer_years, printer_month_dates, printer_total, printer_monthly_total, printer_daily_range, printer_detail, power_energy_joined, power_energy_multi, device_usage_multi, device_usage_detail, device_usage_total, device_usage_history, device_usage_avg, pwr_meta, pwr_dashboard, pwr_breakdown, pwr_reconcile, pwr_periods, pwr_calendar, pwr_query"},
                 status_code=400,
             )
 
@@ -4504,6 +4516,22 @@ class QueryView(_BaseDBView):
                 result = await self._exec_in_executor(hass, self._query_electricity_standard, db_path, request)
                 # electricity_standard 直接返回，不走 success/data 包装
                 return self.json(result)
+            # 电力综合查询：type 用 pwr_ 前缀 —— 刻意避开既有的 power_*（那批属于
+            # /power_energy 独立路径，db_viewer 里 isPowerApi 会按前缀截走）
+            elif query_type == "pwr_meta":
+                result = await self._exec_in_executor(hass, self._query_power_meta, db_path, request)
+            elif query_type == "pwr_dashboard":
+                result = await self._exec_in_executor(hass, self._query_power_dashboard, db_path, request)
+            elif query_type == "pwr_breakdown":
+                result = await self._exec_in_executor(hass, self._query_power_breakdown, db_path, request)
+            elif query_type == "pwr_reconcile":
+                result = await self._exec_in_executor(hass, self._query_power_reconcile, db_path, request)
+            elif query_type == "pwr_periods":
+                result = await self._exec_in_executor(hass, self._query_power_periods, db_path, request)
+            elif query_type == "pwr_calendar":
+                result = await self._exec_in_executor(hass, self._query_power_calendar, db_path, request)
+            elif query_type == "pwr_query":
+                result = await self._exec_in_executor(hass, self._query_power_query, db_path, request)
             elif query_type == "health_history":
                 result = await self._exec_in_executor(hass, self._query_health_history, db_path, request)
             elif query_type == "health_latest":
@@ -8644,6 +8672,158 @@ class QueryView(_BaseDBView):
             return result
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  电力综合查询（pwr_*）：6 个接口，计算全部在 power_center.py            #
+    #    · 表名/实体/周期解析统一在 compute_*_sync 内部完成                    #
+    #    · 这里只负责把 query 参数取出来，不拼 SQL                            #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _power_common(request: web.Request) -> dict:
+        """电力接口公共参数（表名可配、全屋实体可配）。"""
+        q = request.query
+        return {
+            "day_table": (q.get("day_table", "") or "").strip(),
+            "month_table": (q.get("month_table", "") or "").strip(),
+            "year_table": (q.get("year_table", "") or "").strip(),
+            "env_entity": (q.get("env_entity", "") or "").strip(),
+            "room": (q.get("room", "") or "").strip(),
+            "entity_id": (q.get("entity_id", "") or "").strip(),
+            "year": (q.get("year", "") or "").strip(),
+            "month": (q.get("month", "") or "").strip(),
+            "date": (q.get("date", "") or "").strip(),
+        }
+
+    def _query_power_meta(self, db_path: str, request: web.Request) -> dict:
+        """数据源探测。参数：day_table/month_table/year_table/entity_id/env_entity/room"""
+        p = self._power_common(request)
+        return compute_power_meta_sync(
+            db_path,
+            day_table=p["day_table"],
+            month_table=p["month_table"],
+            year_table=p["year_table"],
+            entity_id=p["entity_id"],
+            env_entity=p["env_entity"],
+            room=p["room"],
+        )
+
+    def _query_power_dashboard(self, db_path: str, request: web.Request) -> dict:
+        """下钻主查询。参数：level/year/month/date/room/entity_id/source/表名/top/parts"""
+        p = self._power_common(request)
+        q = request.query
+        try:
+            top = int((q.get("top", "20") or "20").strip())
+        except ValueError:
+            top = 20
+        return compute_power_dashboard_sync(
+            db_path,
+            level=(q.get("level", "day") or "day").strip(),
+            year=p["year"],
+            month=p["month"],
+            date=p["date"],
+            room=p["room"],
+            entity_id=p["entity_id"],
+            source=(q.get("source", "auto") or "auto").strip(),
+            day_table=p["day_table"],
+            month_table=p["month_table"],
+            year_table=p["year_table"],
+            env_entity=p["env_entity"],
+            top=top,
+            parts=(q.get("parts", "") or "").strip(),
+        )
+
+    def _query_power_breakdown(self, db_path: str, request: web.Request) -> dict:
+        """维度明细。参数：group_by=room|device|room_device + level/周期/start/end/room/entity_id/limit"""
+        p = self._power_common(request)
+        q = request.query
+        try:
+            limit = int((q.get("limit", "0") or "0").strip())
+        except ValueError:
+            limit = 0
+        return compute_power_breakdown_sync(
+            db_path,
+            group_by=(q.get("group_by", "room") or "room").strip(),
+            level=(q.get("level", "month") or "month").strip(),
+            year=p["year"],
+            month=p["month"],
+            date=p["date"],
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            room=p["room"],
+            entity_id=p["entity_id"],
+            limit=limit,
+            day_table=p["day_table"],
+            month_table=p["month_table"],
+            year_table=p["year_table"],
+            env_entity=p["env_entity"],
+        )
+
+    def _query_power_reconcile(self, db_path: str, request: web.Request) -> dict:
+        """三源逐日对账。参数：start/end/days（默认最近 30 天）"""
+        p = self._power_common(request)
+        q = request.query
+        try:
+            days = int((q.get("days", "30") or "30").strip())
+        except ValueError:
+            days = 30
+        return compute_power_reconcile_sync(
+            db_path,
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            day_table=p["day_table"],
+            month_table=p["month_table"],
+            year_table=p["year_table"],
+            env_entity=p["env_entity"],
+            days=days,
+        )
+
+    def _query_power_periods(self, db_path: str, request: web.Request) -> dict:
+        """数据可用性。参数：level=year|month|day + year/month"""
+        p = self._power_common(request)
+        return compute_power_periods_sync(
+            db_path,
+            level=(request.query.get("level", "year") or "year").strip(),
+            year=p["year"],
+            month=p["month"],
+            day_table=p["day_table"],
+            env_entity=p["env_entity"],
+        )
+
+    def _query_power_calendar(self, db_path: str, request: web.Request) -> dict:
+        """日历日值。参数：month(必填)/day_table/env_entity/room/include_device"""
+        p = self._power_common(request)
+        q = request.query
+        include_device = (q.get("include_device", "1") or "1").strip().lower() not in ("0", "false", "no")
+        return compute_power_calendar_sync(
+            db_path,
+            month=p["month"],
+            day_table=p["day_table"],
+            env_entity=p["env_entity"],
+            room=p["room"],
+            include_device=include_device,
+        )
+
+    def _query_power_query(self, db_path: str, request: web.Request) -> dict:
+        """查询页：keyword 模糊 + 日期范围 + 房间/实体；给 entity_id 时附逐日趋势"""
+        p = self._power_common(request)
+        q = request.query
+        try:
+            limit = int((q.get("limit", "50") or "50").strip())
+        except ValueError:
+            limit = 50
+        return compute_power_query_sync(
+            db_path,
+            keyword=(q.get("keyword", "") or "").strip(),
+            start=(q.get("start", "") or "").strip(),
+            end=(q.get("end", "") or "").strip(),
+            room=p["room"],
+            entity_id=p["entity_id"],
+            limit=limit,
+            day_table=p["day_table"],
+            month_table=p["month_table"],
+            year_table=p["year_table"],
+            env_entity=p["env_entity"],
+        )
 
     # ------------------------------------------------------------------
     #  健康查询
@@ -16344,6 +16524,39 @@ def _ts_diff_seconds(a: str, b: str) -> float:
         return float("inf")
 
 
+def _stamp_card_source(conn, record_id, side: str, user: str, action: str, ua_id) -> None:
+    """把「卡片操作」来源写到 device_history（旁路，异常吞掉）。
+
+    只覆盖 **空值 / external** —— automation / timer 由引擎侧在写入时就盖好了，
+    优先级更高，回填不允许把它们改回 card。
+
+    @param side 'on' | 'off'
+    """
+    try:
+        if not record_id:
+            return
+        st = f"{side}_source_type"
+        sid = f"{side}_source_id"
+        sn = f"{side}_source_name"
+        sname = " · ".join(
+            [x for x in ((user or "").strip(), (action or "").strip()) if x]
+        ) or "卡片操作"
+        conn.execute(
+            f"UPDATE {TABLE_DEVICE_HISTORY} "
+            f"SET {st} = ?, {sid} = ?, {sn} = ? "
+            f"WHERE id = ? AND ({st} = '' OR {st} = ?)",
+            (
+                SOURCE_TYPE_CARD,
+                "" if ua_id is None else str(ua_id),
+                sname,
+                record_id,
+                SOURCE_TYPE_EXTERNAL,
+            ),
+        )
+    except Exception:
+        pass
+
+
 def _link_device_history_to_actions(db_path: str, items: list) -> None:
     """把新写入 user_actions 的用户/快照关联回填到 device_history。
 
@@ -16410,6 +16623,11 @@ def _link_device_history_to_actions(db_path: str, items: list) -> None:
                                     f"UPDATE {TABLE_DEVICE_HISTORY} SET {col_snap} = ? WHERE id = ?",
                                     (snap, best[1]),
                                 )
+                            # 控制来源：card（只覆盖 空/external，不动 automation/timer）
+                            _stamp_card_source(
+                                conn, best[1], best[2], user,
+                                it.get("action"), it.get("user_action_id"),
+                            )
                         continue
                 for row in rows:
                     record_id = row[0]
@@ -16425,6 +16643,10 @@ def _link_device_history_to_actions(db_path: str, items: list) -> None:
                                 f"UPDATE {TABLE_DEVICE_HISTORY} SET on_snapshot = ? WHERE id = ?",
                                 (snap, record_id),
                             )
+                        _stamp_card_source(
+                            conn, record_id, "on", user,
+                            it.get("action"), it.get("user_action_id"),
+                        )
                     # 命中 off_time → 关闭用户
                     if row[2] == ts_text:
                         if user:
@@ -16437,6 +16659,10 @@ def _link_device_history_to_actions(db_path: str, items: list) -> None:
                                 f"UPDATE {TABLE_DEVICE_HISTORY} SET off_snapshot = ? WHERE id = ?",
                                 (snap, record_id),
                             )
+                        _stamp_card_source(
+                            conn, record_id, "off", user,
+                            it.get("action"), it.get("user_action_id"),
+                        )
             conn.commit()
         finally:
             conn.close()

@@ -41,6 +41,36 @@ TABLE_POWER_METER_CONFIGS = "power_meter_configs"
 TABLE_POWER_ENERGY_DAILY = "power_energy_daily"
 TABLE_METRICS_CATALOG = "metrics_catalog"
 
+# ── 设备控制来源（device_history.on/off_source_*）────────────────────────────
+# 记录「这次状态变化是被什么控制的」，前端只看 device_history 一张表即可展示来源：
+#   card      卡片内操作  → source_id = user_actions.id
+#   automation 统一存储自动化 → source_id = automations.id
+#   timer     定时精灵（一次性/周期） → source_id = timer_id
+#   external  三类之外的任何控制（HA 面板、语音、物理开关、第三方集成）→ source_id = ''
+#   ''（空串）老数据 / 无记录 → 前端显示「未知」
+SOURCE_TYPE_CARD = "card"
+SOURCE_TYPE_AUTOMATION = "automation"
+SOURCE_TYPE_TIMER = "timer"
+SOURCE_TYPE_EXTERNAL = "external"
+
+# 预留（暂不写入）：voice / scheduler / bridge / script / scene
+SOURCE_TYPES_KNOWN = (
+    SOURCE_TYPE_CARD,
+    SOURCE_TYPE_AUTOMATION,
+    SOURCE_TYPE_TIMER,
+    SOURCE_TYPE_EXTERNAL,
+)
+
+# 来源优先级：数值越大越"硬"，回填时不允许被低优先级覆盖
+#   automation / timer 是引擎侧写死的，卡片回填只能覆盖 external / 空
+SOURCE_PRIORITY = {
+    "": 0,
+    SOURCE_TYPE_EXTERNAL: 1,
+    SOURCE_TYPE_CARD: 2,
+    SOURCE_TYPE_AUTOMATION: 3,
+    SOURCE_TYPE_TIMER: 3,
+}
+
 # 传感器类：每种指标独立建表，表名前缀
 ENV_TABLE_PREFIX = "env_"
 
@@ -300,4 +330,4 @@ ENTITY_GROUP_DOMAIN_SERVICE_MAP = {
 }
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "6.0.4"
+VERSION = "6.0.7"

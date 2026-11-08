@@ -22,7 +22,9 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time, async_track_time_interval
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DOMAIN, SOURCE_TYPE_TIMER
+# 控制来源登记（纯内存旁路；让 device_history 能标出"这次是定时任务干的"）
+from .source_registry import push_many as _push_source_many
 from .logger import get_logger
 from .timer_elves_const import (
     TIMER_EVENT_PREFIX,
@@ -76,6 +78,12 @@ class TimerElvesCoordinator:
         ("next_execution", "TEXT NOT NULL DEFAULT ''"),
         ("executed_at", "TEXT NOT NULL DEFAULT ''"),
         ("execution_result", "TEXT NOT NULL DEFAULT ''"),
+        # 周期任务的明细：以前只存 repeat_type，历史页只能显示「周期 · 每月」；
+        # 提成查询列后 get_history 不必带 with_data 也能显示具体周几 / 几号 / 时刻。
+        # weekdays / month_days 存 JSON 数组字符串（如 '["monday","wednesday"]'）。
+        ("schedule_time", "TEXT NOT NULL DEFAULT ''"),
+        ("weekdays", "TEXT NOT NULL DEFAULT ''"),
+        ("month_days", "TEXT NOT NULL DEFAULT ''"),
     )
 
     # 动作参数白名单：前端/外部会把参数放在事件顶层（如 climate_mode / temperature），
@@ -274,6 +282,38 @@ class TimerElvesCoordinator:
                 for name, ddl in self._DB_COLUMNS:
                     if name not in cols:
                         conn.execute(f"ALTER TABLE {TABLE_TIMER_TASKS} ADD COLUMN {name} {ddl}")
+
+                # 【老库回填】新加的周期明细列对历史行是空值，但 task_data 里一直有；
+                #   这里按 task_data 补一次，旧记录的「每周几 / 每月几号 / 时刻」也能显示。
+                #   只挑「周期任务 + 明细列还空着」的行，正常重启时是 0 行，成本可忽略。
+                try:
+                    stale = conn.execute(
+                        f"SELECT task_id, task_data FROM {TABLE_TIMER_TASKS} "
+                        f"WHERE repeat_type IN ('weekly', 'monthly') AND "
+                        f"(weekdays = '' OR month_days = '' OR schedule_time = '')"
+                    ).fetchall()
+                    for tid, tdata_json in stale:
+                        try:
+                            td = json.loads(tdata_json)
+                        except Exception:
+                            continue
+                        conn.execute(
+                            f"UPDATE {TABLE_TIMER_TASKS} "
+                            f"SET schedule_time = ?, weekdays = ?, month_days = ? "
+                            f"WHERE task_id = ?",
+                            (
+                                td.get("schedule_time", "") or "",
+                                TimerElvesCoordinator._json_list(td.get("weekdays")),
+                                TimerElvesCoordinator._json_list(td.get("month_days")),
+                                tid,
+                            ),
+                        )
+                    if stale:
+                        _LOGGER.info(
+                            "[timer_elves] backfilled %d history rows with schedule detail", len(stale)
+                        )
+                except Exception as e:
+                    _LOGGER.warning("[timer_elves] schedule column backfill failed: %s", e)
                 conn.execute(
                     f"CREATE INDEX IF NOT EXISTS idx_{TABLE_TIMER_TASKS}_entity "
                     f"ON {TABLE_TIMER_TASKS} (entity_id)"
@@ -309,7 +349,21 @@ class TimerElvesCoordinator:
             td.get("next_execution", ""),
             td.get("executed_at", ""),
             td.get("execution_result", ""),
+            # 周期明细（顺序与 _DB_COLUMNS 末尾三项一致）
+            td.get("schedule_time", "") or "",
+            self._json_list(td.get("weekdays")),
+            self._json_list(td.get("month_days")),
         )
+
+    @staticmethod
+    def _json_list(value) -> str:
+        """数组 → JSON 字符串（空值统一成空串，方便 SQL 里判断）。"""
+        if not value:
+            return ""
+        try:
+            return json.dumps(list(value), ensure_ascii=False)
+        except Exception:
+            return ""
 
     async def save_tasks(self, force: bool = False) -> None:
         """保存所有任务到 SQLite。
@@ -1226,6 +1280,8 @@ class TimerElvesCoordinator:
         if sd.get("status") != "active":
             return
         entity_id = sd["entity_id"]
+        # 控制来源：执行前登记（周期任务），写 device_history 时消费
+        self._push_timer_source(sd, entity_id, "周期")
         action_type = sd.get("action_type", "auto")
         before_entity_state = sd.get("before_entity_state", "unknown")
         if before_entity_state == "unknown":
@@ -2150,6 +2206,23 @@ class TimerElvesCoordinator:
     #  执行定时器（一次性）                                                   #
     # ================================================================== #
 
+    def _push_timer_source(self, task: dict, entity_id: str, kind_label: str) -> None:
+        """把「定时任务即将执行」登记到 source_registry（纯内存旁路，失败静默）。
+
+        写 device_history 时会按 entity_id + ±2 秒消费这条，把来源标成
+        `timer` + timer_id + 「倒计时 关灯」/「周期 开灯」。
+        """
+        try:
+            if not entity_id:
+                return
+            td = task or {}
+            label = td.get("task_action") or td.get("target_action") or ""
+            name = ((kind_label + " " + str(label)).strip() if label else kind_label)
+            tid = td.get("id") or td.get("timer_id") or td.get("schedule_id") or ""
+            _push_source_many([entity_id], SOURCE_TYPE_TIMER, tid, name)
+        except Exception:
+            pass
+
     def execute_timer(self, now, timer_id: str, *args, **kwargs) -> None:
         if timer_id in self.tasks:
             self.hass.add_job(self._async_execute_timer, timer_id)
@@ -2161,6 +2234,8 @@ class TimerElvesCoordinator:
         entity_id = timer["entity_id"]
         if timer.get("status") == "cancelled":
             return
+        # 控制来源：执行前登记（一次性定时器）
+        self._push_timer_source(timer, entity_id, "倒计时")
         before_entity_state = timer.get("before_entity_state", "unknown")
         if before_entity_state == "unknown":
             bs = self.hass.states.get(entity_id)
@@ -2928,7 +3003,8 @@ class TimerElvesCoordinator:
                 extra = ", task_data" if with_data else ""
                 rows = conn.execute(
                     f"SELECT task_id, entity_id, entity_name, task_type, status, action_desc, "
-                    f"duration, repeat_type, created_at, end_time, executed_at, "
+                    f"duration, repeat_type, schedule_time, weekdays, month_days, "
+                    f"created_at, end_time, executed_at, "
                     f"execution_result, updated_at{extra} "
                     f"FROM {TABLE_TIMER_TASKS} WHERE {where_sql} "
                     f"ORDER BY COALESCE(NULLIF(executed_at, ''), created_at) DESC "
@@ -2948,6 +3024,21 @@ class TimerElvesCoordinator:
                         item["data"] = json.loads(raw)
                     except Exception:
                         item["data"] = None
+        # 周期明细：weekdays / month_days 存的是 JSON 字符串，这里还原成数组
+        # （老记录可能没有这两列的值 → 统一给空数组，前端会退回「周期 · 每月」）
+        for item in items:
+            for key in ("weekdays", "month_days"):
+                raw = item.get(key) or ""
+                if not raw:
+                    item[key] = []
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                    item[key] = list(parsed) if isinstance(parsed, (list, tuple)) else []
+                except Exception:
+                    item[key] = [x for x in str(raw).split(",") if x]
+            if item.get("schedule_time") is None:
+                item["schedule_time"] = ""
         return {
             "total": total,
             "count": len(items),

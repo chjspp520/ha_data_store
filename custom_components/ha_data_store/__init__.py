@@ -26,6 +26,9 @@ from homeassistant.helpers.event import async_track_time_interval, async_track_t
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
+# 控制来源登记队列（纯内存旁路；记录"这次变化是自动化/定时器干的"）
+from . import source_registry as _source_registry
+
 from .const import (
     DOMAIN,
     DATABASE_FILENAME,
@@ -61,6 +64,7 @@ from .const import (
     TABLE_POWER_METER_CONFIGS,
     TABLE_POWER_ENERGY_DAILY,
     TABLE_METRICS_CATALOG,
+    SOURCE_TYPE_EXTERNAL,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
     CATEGORY_ATTRIBUTE,
@@ -446,7 +450,17 @@ def _init_database(db_path: str) -> None:
                 off_user        TEXT NOT NULL DEFAULT '',
                 on_snapshot     TEXT NOT NULL DEFAULT '',
                 off_snapshot    TEXT NOT NULL DEFAULT '',
-                icon            TEXT NOT NULL DEFAULT ''
+                icon            TEXT NOT NULL DEFAULT '',
+                -- 控制来源（谁/什么渠道让设备状态变化）：
+                --   type = card / automation / timer / external；空串 = 老数据（未知）
+                --   id   = 对应表主键（user_actions.id / automations.id / timer_id）
+                --   name = 写入时的展示名快照（引用行被删也能显示）
+                on_source_type  TEXT NOT NULL DEFAULT '',
+                on_source_id    TEXT NOT NULL DEFAULT '',
+                on_source_name  TEXT NOT NULL DEFAULT '',
+                off_source_type TEXT NOT NULL DEFAULT '',
+                off_source_id   TEXT NOT NULL DEFAULT '',
+                off_source_name TEXT NOT NULL DEFAULT ''
             );
             """
         )
@@ -482,6 +496,17 @@ def _init_database(db_path: str) -> None:
                 "请点击按钮 button.ha_data_store_fill_device_icon（不再随启动自动回填）",
                 TABLE_DEVICE_HISTORY,
             )
+        # 控制来源 6 列：纯增量（SQLite 加列只改元数据，16.8 万行毫秒级）
+        #   老数据保持空串 → 前端显示「未知」；不回填，避免"猜错归属"
+        for _src_col in (
+            "on_source_type", "on_source_id", "on_source_name",
+            "off_source_type", "off_source_id", "off_source_name",
+        ):
+            if _src_col not in existing_cols:
+                conn.execute(
+                    f"ALTER TABLE {TABLE_DEVICE_HISTORY} "
+                    f"ADD COLUMN {_src_col} TEXT NOT NULL DEFAULT ''"
+                )
 
         # 3) 传感器数据表：每种指标独立建表（统一结构 id, entity_id, name, datetime, value）
         #    sensor 类型 value 为 TEXT（支持非数值），其余为 REAL
@@ -1581,6 +1606,47 @@ def _get_all_env_entities(db_path: str) -> list[dict]:
 
 
 # =========================================================================== #
+#  设备类：控制来源（on/off_source_*）盖章                                        #
+# =========================================================================== #
+def _stamp_device_source(
+    conn, record_id: int | None, side: str, entity_id: str, when: str,
+) -> None:
+    """给 device_history 的一行盖上控制来源（旁路，任何异常都吞掉）。
+
+    来源判定（优先级：automation = timer > card > external > 空）：
+      · 队列里有匹配（自动化/定时器在动作执行前登记过）→ 写 automation / timer
+      · 队列里没有 → 写 external 占位（表示"确实发生了三类之外的控制"）
+        —— 卡片操作走 user_actions 异步回填，稍后会把 external 覆盖成 card，
+           所以这里先记 external 不会让卡片操作"变成外部控制"
+      · 老数据没有这一步 → 保持空串，前端显示「未知」
+
+    @param side 'on' | 'off'
+    @param when on_time / off_time（本地时间字符串，用于和登记条目做 ±2 秒匹配）
+    """
+    if record_id is None:
+        return
+    try:
+        prefix = "on" if side == "on" else "off"
+        hit = _source_registry.consume(entity_id, when)
+        if hit and hit.get("type"):
+            stype = hit.get("type")
+            sid = hit.get("id") or ""
+            sname = hit.get("name") or ""
+        else:
+            stype = SOURCE_TYPE_EXTERNAL
+            sid = ""
+            sname = ""
+        conn.execute(
+            f"UPDATE {TABLE_DEVICE_HISTORY} "
+            f"SET {prefix}_source_type = ?, {prefix}_source_id = ?, {prefix}_source_name = ? "
+            f"WHERE id = ?",
+            (stype, sid, sname, record_id),
+        )
+    except Exception:
+        pass
+
+
+# =========================================================================== #
 #  设备类：开机 → 插入新记录                                                     #
 # =========================================================================== #
 def _insert_device_on_record(
@@ -1603,6 +1669,9 @@ def _insert_device_on_record(
             (entity_id, name, on_time, on_power, room),
         )
         record_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # 控制来源：自动化/定时器执行前登记过 → 命中；否则记 external 占位
+        _stamp_device_source(conn, record_id, "on", entity_id, on_time)
 
         # 开机时写入初始 state_attr（兼容旧版设备无此字段则静默失败）
         if state_attr:
@@ -1715,6 +1784,8 @@ def _update_device_off_record(
             f"WHERE id = ?",
             (off_time, off_power, energy_consumed, duration, record_id),
         )
+        # 控制来源（关闭侧）：命中队列 → automation/timer；否则 external（可被卡片回填覆盖）
+        _stamp_device_source(conn, record_id, "off", entity_id, off_time)
         conn.commit()
         local_logger = get_logger()
         if local_logger:
@@ -2506,6 +2577,24 @@ def _do_midnight_splits(db_path: str, items: list[dict], off_time_str: str,
                 (entity_id, name, on_time_str, current_power, room, init_sa),
             )
             new_record_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            # 跨天续接：来源继承自被拆分的那条 —— 设备并没有真的重新开启，
+            #   不能按"新的一次控制"盖成 external（否则跨天设备每行都显示外部控制）。
+            try:
+                prev = conn.execute(
+                    f"SELECT on_source_type, on_source_id, on_source_name "
+                    f"FROM {TABLE_DEVICE_HISTORY} WHERE id = ?",
+                    (record_id,),
+                ).fetchone()
+                if prev and (prev[0] or prev[1] or prev[2]):
+                    conn.execute(
+                        f"UPDATE {TABLE_DEVICE_HISTORY} "
+                        f"SET on_source_type = ?, on_source_id = ?, on_source_name = ? "
+                        f"WHERE id = ?",
+                        (prev[0] or "", prev[1] or "", prev[2] or "", new_record_id),
+                    )
+            except Exception:
+                pass
 
             # 拆分出的新记录同样同步 icon（从 report_entities 取该实体上报的 icon）
             icon = _lookup_report_entity_icon(conn, entity_id)

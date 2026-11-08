@@ -166,12 +166,27 @@ def _ev_device(conn, window, opts) -> list[dict]:
     if opts["keyword"]:
         conds.append("name LIKE ?")
         params.append(f"%{opts['keyword']}%")
-    rows = conn.execute(
-        f"SELECT entity_id, name, room, icon, on_time, off_time, duration, "
-        f"energy_consumed, on_user, off_user FROM {TABLE_DEVICE_HISTORY} "
-        f"WHERE {' AND '.join(conds)} ORDER BY on_time DESC",
-        params,
-    ).fetchall()
+    # 控制来源 6 列是后加的：老库（迁移前）可能还没有，缺列时降级成空串，不影响时间线
+    _src_cols = ("on_source_type, on_source_id, on_source_name, "
+                 "off_source_type, off_source_id, off_source_name")
+    _src_empty = ("'' AS on_source_type, '' AS on_source_id, '' AS on_source_name, "
+                  "'' AS off_source_type, '' AS off_source_id, '' AS off_source_name")
+    _base = ("entity_id, name, room, icon, on_time, off_time, duration, "
+             "energy_consumed, on_user, off_user")
+    rows = None
+    for _cols in (f"{_base}, {_src_cols}", f"{_base}, {_src_empty}"):
+        try:
+            rows = conn.execute(
+                f"SELECT {_cols} FROM {TABLE_DEVICE_HISTORY} "
+                f"WHERE {' AND '.join(conds)} ORDER BY on_time DESC",
+                params,
+            ).fetchall()
+            break
+        except sqlite3.OperationalError:
+            rows = None
+            continue
+    if rows is None:
+        return []
 
     now_dt = _local_now()
     out: list[dict] = []
@@ -204,6 +219,12 @@ def _ev_device(conn, window, opts) -> list[dict]:
                 "title": f"{name} 开启", "entity_id": r["entity_id"], "name": name,
                 "room": r["room"] or "", "icon": r["icon"] or "",
                 "user": r["on_user"] or "", "detail": detail,
+                # 控制来源（前端按它区分头像/图标：card/automation/timer/external/空）
+                "control_source": {
+                    "type": r["on_source_type"] or "",
+                    "id": r["on_source_id"] or "",
+                    "name": r["on_source_name"] or "",
+                },
                 "extra": {"duration": round(dur, 0), "duration_hour": round(dur / 3600, 2),
                           "energy": round(eng_v, 3) if eng_v is not None else None,
                           "running": running},
@@ -217,6 +238,11 @@ def _ev_device(conn, window, opts) -> list[dict]:
                 "title": f"{name} 关闭", "entity_id": r["entity_id"], "name": name,
                 "room": r["room"] or "", "icon": r["icon"] or "",
                 "user": r["off_user"] or "", "detail": " · ".join(bits),
+                "control_source": {
+                    "type": r["off_source_type"] or "",
+                    "id": r["off_source_id"] or "",
+                    "name": r["off_source_name"] or "",
+                },
                 "extra": {"duration": round(dur, 0), "duration_hour": round(dur / 3600, 2),
                           "energy": round(eng_v, 3) if eng_v is not None else None,
                           "running": False},

@@ -22,10 +22,14 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 
+# 控制来源登记（纯内存旁路；让 device_history 能标出"这次是自动化干的"）
+from .source_registry import push_many as _push_source_many
+
 from .const import (
     AUTOMATION_LOG_CLEANUP_EVERY,
     AUTOMATION_LOG_RETENTION_DAYS,
     AUTOMATION_TICK_SECONDS,
+    SOURCE_TYPE_AUTOMATION,
     DEFAULT_TIMEZONE,
     DOMAIN,
     TABLE_AUTOMATION_LOGS,
@@ -191,7 +195,7 @@ class AutomationManager:
             actions_result: list[dict] = []
             if cond_ok:
                 actions_result = await self._execute_actions(
-                    actions, bool(auto.get("stop_on_error", 0))
+                    actions, bool(auto.get("stop_on_error", 0)), auto
                 )
                 ok_list = [r.get("ok") for r in actions_result]
                 if all(ok_list):
@@ -310,8 +314,33 @@ class AutomationManager:
         return False
 
     # ─────────── 动作执行 ───────────
-    async def _execute_actions(self, actions: list, stop_on_error: bool) -> list[dict]:
-        """顺序执行服务调用动作，逐条记录结果；stop_on_error 时失败即停。"""
+    def _target_entities(self, entity_id: str, data: dict) -> list[str]:
+        """从动作的 entity_id / data.entity_id 里收集目标实体（支持逗号串与数组）。"""
+        out: list[str] = []
+
+        def _add(value) -> None:
+            if isinstance(value, str):
+                for part in value.split(","):
+                    item = part.strip()
+                    if item:
+                        out.append(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    _add(item)
+
+        _add(entity_id)
+        if isinstance(data, dict):
+            _add(data.get("entity_id"))
+        return out
+
+    async def _execute_actions(
+        self, actions: list, stop_on_error: bool, auto: dict | None = None,
+    ) -> list[dict]:
+        """顺序执行服务调用动作，逐条记录结果；stop_on_error 时失败即停。
+
+        auto 传入时，会在每次服务调用前把目标实体登记到 source_registry，
+        供 device_history 标记「这次状态变化是自动化造成的」（纯内存旁路）。
+        """
         results: list[dict] = []
         for idx, act in enumerate(actions):
             service = str(act.get("service") or "").strip()
@@ -330,6 +359,18 @@ class AutomationManager:
                 continue
             domain, srv = service.split(".", 1)
             target = {"entity_id": entity_id} if entity_id else None
+            # 控制来源：先登记再执行 —— 状态变化监听写 device_history 时会按
+            #   entity_id + ±2 秒消费这条，从而标成 automation / 自动化名
+            if auto is not None:
+                try:
+                    _push_source_many(
+                        self._target_entities(entity_id, data),
+                        SOURCE_TYPE_AUTOMATION,
+                        auto.get("id"),
+                        auto.get("name") or "",
+                    )
+                except Exception:
+                    pass
             try:
                 await self.hass.services.async_call(
                     domain, srv, data, target=target, blocking=True,

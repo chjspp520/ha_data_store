@@ -363,6 +363,9 @@ class ActionLogInbox:
                         "ts_text": ts_text,
                         "user_name": user_name,
                         "action_snapshot": snap,
+                        # 控制来源要用：user_actions.id + 动作描述（供 device_history 盖章）
+                        "user_action_id": cur.lastrowid,
+                        "action": action,
                     }
                 )
             conn.commit()

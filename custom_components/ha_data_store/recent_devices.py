@@ -130,24 +130,43 @@ def _range_conds(entities, start, end, date, month, year, window_days):
     return conds, params, label
 
 
+# 控制来源列（与 device_history.on/off_source_* 对应）
+_SRC_COLS = (
+    "on_source_type, on_source_id, on_source_name, "
+    "off_source_type, off_source_id, off_source_name"
+)
+_SRC_LITERALS = (
+    "'' AS on_source_type, '' AS on_source_id, '' AS on_source_name, "
+    "'' AS off_source_type, '' AS off_source_id, '' AS off_source_name"
+)
+
+
 def _fetch_rows(conn, where: str, params: list):
-    """取记录（兼容旧库无 icon 列）。"""
-    cols = ("id, entity_id, name, room, icon, on_time, off_time, duration, "
+    """取记录（兼容旧库：可能缺 icon 列，也可能还没补来源列）。
+
+    按「全量 → 缺 icon → 缺来源 → 两者都缺」逐级降级，避免老库在迁移前查询报错。
+    """
+    base = ("id, entity_id, name, room, icon, on_time, off_time, duration, "
             "energy_consumed, now_kwh, on_power")
-    try:
-        return conn.execute(
-            f"SELECT {cols} FROM {TABLE_DEVICE_HISTORY} {where} "
-            f"ORDER BY on_time ASC, id ASC",
-            params,
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # 旧库可能尚未补 icon 列
-        cols = cols.replace("room, icon,", "room, '' AS icon,")
-        return conn.execute(
-            f"SELECT {cols} FROM {TABLE_DEVICE_HISTORY} {where} "
-            f"ORDER BY on_time ASC, id ASC",
-            params,
-        ).fetchall()
+    base_no_icon = base.replace("room, icon,", "room, '' AS icon,")
+    variants = (
+        f"{base}, {_SRC_COLS}",
+        f"{base_no_icon}, {_SRC_COLS}",
+        f"{base}, {_SRC_LITERALS}",
+        f"{base_no_icon}, {_SRC_LITERALS}",
+    )
+    last_exc: Exception | None = None
+    for cols in variants:
+        try:
+            return conn.execute(
+                f"SELECT {cols} FROM {TABLE_DEVICE_HISTORY} {where} "
+                f"ORDER BY on_time ASC, id ASC",
+                params,
+            ).fetchall()
+        except sqlite3.OperationalError as exc:  # 缺列
+            last_exc = exc
+            continue
+    raise last_exc if last_exc else sqlite3.OperationalError("device_history query failed")
 
 
 def compute_device_last_used_sync(
@@ -221,6 +240,9 @@ def compute_device_last_used_sync(
                 "entity_id": eid, "name": r["name"] or eid, "room": r["room"] or "",
                 "icon": r["icon"] or "", "count": 0, "duration": 0.0, "energy": 0.0,
                 "last_id": -1, "last_on_time": "", "last_off_time": "",
+                # 控制来源（最新一条记录的开/关来源）
+                "src_on_type": "", "src_on_id": "", "src_on_name": "",
+                "src_off_type": "", "src_off_id": "", "src_off_name": "",
             }
             groups[eid] = g
         g["count"] += 1
@@ -248,6 +270,13 @@ def compute_device_last_used_sync(
             g["last_id"] = int(r["id"] or 0)
             g["last_on_time"] = str(r["on_time"] or "")
             g["last_off_time"] = str(r["off_time"] or "")
+            # 来源跟着最新一条走（卡片回填是异步的，下一次刷新就会带上来）
+            g["src_on_type"] = r["on_source_type"] or ""
+            g["src_on_id"] = r["on_source_id"] or ""
+            g["src_on_name"] = r["on_source_name"] or ""
+            g["src_off_type"] = r["off_source_type"] or ""
+            g["src_off_id"] = r["off_source_id"] or ""
+            g["src_off_name"] = r["off_source_name"] or ""
             if r["name"]:
                 g["name"] = r["name"]
             if r["room"]:
@@ -273,6 +302,13 @@ def compute_device_last_used_sync(
             "duration": round(g["duration"], 0),
             "duration_hour": round(g["duration"] / 3600.0, 2),
             "energy": round(g["energy"], 3),
+            # 控制来源（前端据此显示「卡片操作 / 自动化 / 定时 / 外部控制 / 未知」）
+            "on_source_type": g["src_on_type"],
+            "on_source_id": g["src_on_id"],
+            "on_source_name": g["src_on_name"],
+            "off_source_type": g["src_off_type"],
+            "off_source_id": g["src_off_id"],
+            "off_source_name": g["src_off_name"],
         })
 
     if running_only:

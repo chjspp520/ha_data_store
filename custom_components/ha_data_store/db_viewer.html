@@ -2457,6 +2457,17 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="power_energy_joined">🔗 用电量=电表配置关联（含 id_slug）</option>
           <option value="power_energy_multi">📊 多实体×多维度聚合（年/月/日，按实体或按时间）</option>
         </optgroup>
+        <!-- 电力综合查询：三源（电网结算 / 全屋实时 / 设备明细）统一口径。
+             type 用 pwr_ 前缀，刻意避开上面的 power_*（那批走 /power_energy 独立路径） -->
+        <optgroup label="⚡ 电力综合查询">
+          <option value="pwr_meta">🔌 数据源与可用范围（表/实体/年月清单/最新结算日）</option>
+          <option value="pwr_dashboard">📈 下钻主查询（totals + 趋势 + 房间/设备分解）</option>
+          <option value="pwr_breakdown">🧩 维度明细（房间 / 设备 / 房间→设备 / 单设备趋势）</option>
+          <option value="pwr_reconcile">⚖️ 三源逐日对账（电网 / 实时 / 设备 + 差异）</option>
+          <option value="pwr_periods">📅 数据可用性（哪些年 / 年月 / 日期有数据）</option>
+          <option value="pwr_calendar">🗓 日历日值（指定年月 · 电网优先 · 实时兜底标记）</option>
+          <option value="pwr_query">🔍 查询（实体 id/名称模糊 + 日期范围 + 设备趋势）</option>
+        </optgroup>
         <optgroup label="🤖 自动化">
           <option value="auto_list">自动化列表</option>
           <option value="auto_lookup">🔍 按名称查详情（日期/条数）</option>
@@ -3054,6 +3065,98 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
         <option value="name">
       </datalist>
     </div>
+    <!-- 电力综合查询（pwr_*）：子控件用 data-pw 标注适用接口，onApiTypeChange 统一显隐 -->
+    <div id="apiPowerRow" class="full" style="display:none">
+      <label>电力查询参数</label>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;width:100%">
+        <div style="flex:0 0 150px" data-pw="level">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">粒度 level</div>
+          <select id="apiPowerLevel" onchange="generateApiUrl()" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="year">年</option>
+            <option value="month">月</option>
+            <option value="day" selected>日</option>
+          </select>
+        </div>
+        <div style="flex:0 0 110px" data-pw="year">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">年份</div>
+          <input id="apiPowerYear" type="number" min="2000" max="2099" placeholder="2026" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 130px" data-pw="month">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">月份</div>
+          <input id="apiPowerMonth" type="month" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" onchange="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 140px" data-pw="date">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">日期</div>
+          <input id="apiPowerDate" type="date" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" onchange="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 120px" data-pw="room">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">房间</div>
+          <input id="apiPowerRoom" type="text" placeholder="全部" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 180px" data-pw="entity">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">实体 entity_id</div>
+          <input id="apiPowerEntity" type="text" placeholder="留空=全部" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 110px" data-pw="source">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">主口径</div>
+          <select id="apiPowerSource" onchange="generateApiUrl()" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="auto">自动</option>
+            <option value="grid">电网</option>
+            <option value="realtime">实时</option>
+            <option value="device">设备</option>
+          </select>
+        </div>
+        <div style="flex:0 0 110px" data-pw="top">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">条数 top</div>
+          <input id="apiPowerTop" type="number" min="0" value="20" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 1 200px" data-pw="query">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">关键词 keyword</div>
+          <input id="apiPowerKeyword" type="text" placeholder="实体 id / 名称模糊" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 140px" data-pw="query">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">开始日期 start</div>
+          <input id="apiPowerStart" type="date" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" onchange="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 140px" data-pw="query">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">结束日期 end</div>
+          <input id="apiPowerEnd" type="date" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" onchange="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 150px" data-pw="group">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">分组 group_by</div>
+          <select id="apiPowerGroupBy" onchange="generateApiUrl()" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="room">按房间</option>
+            <option value="device">按设备</option>
+            <option value="room_device">房间→设备</option>
+          </select>
+        </div>
+        <div style="flex:0 0 160px" data-pw="tables">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">电网日表</div>
+          <input id="apiPowerDayTable" type="text" value="attr_ele_day" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 160px" data-pw="tables">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">电网月表</div>
+          <input id="apiPowerMonthTable" type="text" value="attr_ele_month" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 160px" data-pw="tables">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">电网年表</div>
+          <input id="apiPowerYearTable" type="text" value="attr_ele_year" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 1 240px" data-pw="tables">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">全屋实时实体 env_entity</div>
+          <input id="apiPowerEnvEntity" type="text" placeholder="留空=自动探测" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 auto;display:flex;gap:10px;align-items:center;padding-bottom:4px" data-pw="calendar">
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap">
+            <input type="checkbox" id="apiPowerInclDevice" checked onchange="generateApiUrl()">
+            含设备合计
+          </label>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-top:4px">
+        口径：年/月优先电网表 → 日表汇总 → 全屋实时；日优先电网 → 实时当天最后一条；小时只有实时/设备；房间/设备只来自 device_history。
+      </div>
+    </div>
     <div id="apiHealthNameRow" style="display:none">
       <label>姓名</label>
       <select id="apiHealthName" onchange="generateApiUrl()">
@@ -3366,6 +3469,68 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div><code style="color:var(--green)">month_limit=12</code> <span style="color:var(--text2)">— 月数据条数限制（可选，0=不限）</span></div>
       <div><code style="color:var(--green)">year_limit=5</code> <span style="color:var(--text2)">— 年数据条数限制（可选，0=不限）</span></div>
       <div style="color:var(--text2);margin-top:4px">返回标准电费数据结构，包含 state（translated/raw/last_changed/last_updated）和 attributes（日均消费/剩余天数/预付费/date/daylist/monthlist/yearlist/计费标准/数据源/最后同步日期/unit_of_measurement/icon/friendly_name）</div>
+
+      <!-- ===== 电力综合查询（pwr_*） ===== -->
+      <div style="color:var(--accent);font-weight:600;margin:18px 0 6px">⚡ 电力综合查询（pwr_*）— 三源统一口径</div>
+      <div style="color:var(--text2);line-height:1.7">
+        口径：<b>年</b>=年表 → 日表汇总 → 全屋实时；<b>月</b>=月表 → 日表汇总 → 全屋实时；
+        <b>日</b>=电网日表 → env_power 当天最后一条；<b>小时</b>=env_power 相邻采样差值；
+        <b>房间/设备</b>=device_history（电网和实时都没有房间级数据）。
+        所有总量都带 <code>source</code>（grid/realtime/device/none）与 <code>settled</code> 标记。
+      </div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_meta 参数</div>
+      <div><code style="color:var(--green)">day_table / month_table / year_table</code> <span style="color:var(--text2)">— 电网表名（可选，默认 attr_ele_day / attr_ele_month / attr_ele_year；换了前缀也能识别）</span></div>
+      <div><code style="color:var(--green)">entity_id</code> <span style="color:var(--text2)">— 电网表内实体（可选，留空=表里记录最多的那个）</span></div>
+      <div><code style="color:var(--green)">env_entity</code> <span style="color:var(--text2)">— 全屋日用电实体（可选，留空=env_power 里 room=全屋 的第一个）</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回 sources（grid/realtime/device 的可用性、时间范围、缺天数、采样间隔）+ years/months + latest_settled_day + warnings</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_dashboard 参数</div>
+      <div><code style="color:var(--green)">level=day|month|year</code> <span style="color:var(--text2)">— 粒度（默认 day）</span></div>
+      <div><code style="color:var(--green)">year / month / date</code> <span style="color:var(--text2)">— 按 level 取（year=YYYY，month=YYYY-MM，date=YYYY-MM-DD）</span></div>
+      <div><code style="color:var(--green)">source=auto|grid|realtime|device</code> <span style="color:var(--text2)">— 主口径（auto=电网优先，电网缺则实时）</span></div>
+      <div><code style="color:var(--green)">room / entity_id</code> <span style="color:var(--text2)">— 限定范围（房间级只有设备口径）</span></div>
+      <div><code style="color:var(--green)">top=20</code> <span style="color:var(--text2)">— 设备列表条数（0=全部）</span></div>
+      <div><code style="color:var(--green)">parts=totals,series,rooms,devices</code> <span style="color:var(--text2)">— 裁剪返回部分；<b>room_totals 需显式指定</b>（房间轴首页用，会扫今年整年设备表）</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回 period + totals（primary/grid/realtime/device/gaps）+ compare（prev/yoy）+ series（buckets/grid/realtime/device/unmetered）+ room_series + rooms + devices；日级另给 hourly（24 桶 + 原始采样点）</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_breakdown 参数</div>
+      <div><code style="color:var(--green)">group_by=room|device|room_device</code> <span style="color:var(--text2)">— 分组方式（默认 room）</span></div>
+      <div><code style="color:var(--green)">level / year / month / date</code> <span style="color:var(--text2)">— 周期（与 dashboard 同）</span></div>
+      <div><code style="color:var(--green)">start / end</code> <span style="color:var(--text2)">— 自定义区间（YYYY-MM-DD，优先于 level）</span></div>
+      <div><code style="color:var(--green)">room / entity_id / limit</code> <span style="color:var(--text2)">— 过滤与截断；给 entity_id 时额外返回该设备的逐日 series</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回 items（room_device 时每项含 children）+ total_kwh + totals（三源对照）</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_reconcile 参数</div>
+      <div><code style="color:var(--green)">start / end</code> <span style="color:var(--text2)">— 对账区间（可选）</span></div>
+      <div><code style="color:var(--green)">days=30</code> <span style="color:var(--text2)">— 未给区间时取最近 N 天</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回逐日 grid/realtime/device + grid_vs_realtime_pct / realtime_vs_device_pct + summary（含缺失天数）</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_periods 参数</div>
+      <div><code style="color:var(--green)">level=year|month|day</code> <span style="color:var(--text2)">— 年清单 / 指定年 12 个月 / 指定月每天</span></div>
+      <div><code style="color:var(--green)">year / month</code> <span style="color:var(--text2)">— level=month 用 year；level=day 用 month</span></div>
+      <div style="color:var(--text2);margin-top:4px">每项含 grid/realtime/device 布尔 + source（日级）+ 天数；日级另给 source_summary（含 filled_by_realtime / missing）</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_calendar 参数</div>
+      <div><code style="color:var(--green)">month=2026-09</code> <span style="color:var(--text2)">— 月份（必填）</span></div>
+      <div><code style="color:var(--green)">room</code> <span style="color:var(--text2)">— 只算该房间的设备合计（grid/realtime 仍是全屋）</span></div>
+      <div><code style="color:var(--green)">include_device=1</code> <span style="color:var(--text2)">— 是否附带设备合计（0=不算）</span></div>
+      <div style="color:var(--text2);margin-top:4px">每天返回 kwh/source/settled/grid/realtime/device/filled_by_realtime/has_data；<b>电网优先，缺日走 env_power 当天最后一条并标记</b>；另给 max_kwh 供色阶归一化</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_query 参数</div>
+      <div><code style="color:var(--green)">keyword</code> <span style="color:var(--text2)">— 实体 id / 名称模糊匹配（LIKE %kw%）</span></div>
+      <div><code style="color:var(--green)">start / end</code> <span style="color:var(--text2)">— 日期范围（缺省最近 30 天）</span></div>
+      <div><code style="color:var(--green)">room / entity_id / limit</code> <span style="color:var(--text2)">— 过滤与条数；给 entity_id 时额外返回该设备逐日 trend</span></div>
+      <div style="color:var(--text2);margin-top:4px">返回 filters + total（已格式化）+ items（name/room/value/text/pct/color）+ trend</div>
+
+      <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">pwr_dashboard 的视图模型（前端直接渲染）</div>
+      <div style="color:var(--text2);line-height:1.7">
+        <b>level 支持 years | year | month | day</b>：<code>years</code> = 主图第一级（每年一根柱，全部年份），
+        其余三级为「该年 12 个月 / 该月每天 / 该日 24 小时」。<br>
+        返回的 <code>header.time</code> / <code>header.room</code>（两套指标：时间页看三源缺口、房间页看房间/设备数）、<code>crumb</code>（面包屑）、
+        <code>charts.main/room/device</code>（kind/xAxis/keys/series 或 items，含颜色与格式化文本）、
+        日级额外 <code>charts.hourly[HH]</code>（24 份房间/设备排行）——<b>前端只 setOption 与导航</b>。
+      </div>
 
       <div style="color:var(--accent);font-weight:600;margin:12px 0 6px">aggregate_daily 参数</div>
       <div><code style="color:var(--green)">entity_id=switch.ac</code> <span style="color:var(--text2)">— 实体 ID（必填）</span></div>
@@ -14452,7 +14617,7 @@ function _hideAllApiFormRows() {
     'apiHealthNameRow','apiHealthTypeRow','apiMediaUserRow','apiMediaIdRow','apiMediaNameRow',
     'apiDeviceUserNameRow','apiDeviceUserDirRow',
     'apiAutoIdRow','apiAutoKeywordRow','apiAutoFuzzyRow','apiAutoStatusRow','apiAutoForceRow',
-    'apiBillRow'];
+    'apiBillRow','apiPowerRow'];
   ids.forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.style.display = 'none';
@@ -14748,6 +14913,9 @@ function apiHideAllParamRows() {
 
 function onApiTypeChange() {
   const qt = document.getElementById('apiQueryType').value;
+  // 电力综合查询（pwr_*）：整块默认隐藏；命中时按 data-pw 显示对应子控件
+  const _elPowerRow = document.getElementById('apiPowerRow');
+  if (_elPowerRow) _elPowerRow.style.display = 'none';
   // 自定义路由：value 格式 "custom:{route_path}"
   const isCustomRoute = qt.startsWith('custom:');
   const isCustomRoutePath = isCustomRoute ? qt.slice('custom:'.length) : '';
@@ -14835,6 +15003,30 @@ function onApiTypeChange() {
   const isWholeHouseUsage = qt === 'whole_house_usage';
   const isRanking = qt === 'ranking_daily' || qt === 'ranking_monthly' || qt === 'ranking_yearly';
   const isElectricityStandard = qt === 'electricity_standard';
+  // ---- 电力综合查询（pwr_*）：独立参数块，按接口只显示需要的子控件 ----
+  if (qt.startsWith('pwr_')) {
+    const elPR = document.getElementById('apiPowerRow');
+    if (elPR) {
+      elPR.style.display = '';
+      const scopeMap = {
+        pwr_meta: ['tables', 'room', 'entity'],
+        pwr_dashboard: ['level', 'year', 'month', 'date', 'room', 'entity', 'source', 'tables', 'top'],
+        pwr_breakdown: ['group', 'level', 'year', 'month', 'date', 'room', 'entity', 'tables'],
+        pwr_reconcile: ['tables'],
+        pwr_periods: ['level', 'year', 'month'],
+        pwr_calendar: ['month', 'room', 'tables', 'calendar'],
+        pwr_query: ['query', 'room', 'entity', 'tables']
+      };
+      const allow = scopeMap[qt] || [];
+      elPR.querySelectorAll('[data-pw]').forEach(function (node) {
+        node.style.display = allow.indexOf(node.getAttribute('data-pw')) !== -1 ? '' : 'none';
+      });
+    }
+    // 让通用行（实体/房间/日期/分页…）全部让位，避免和电力参数块重复
+    apiHideAllParamRows();
+    generateApiUrl();
+    return;
+  }
   const isHealthHistory = qt === 'health_history';
   const isHealthLatest = qt === 'health_latest';
   const isHealth = isHealthHistory || isHealthLatest;
@@ -15898,6 +16090,72 @@ async function loadHealthTypes() {
 
 function generateApiUrl() {
   const qt = document.getElementById('apiQueryType').value;
+  // ---- 电力综合查询（pwr_*）：参数全部来自独立参数块，不复用通用行 ----
+  if (qt.startsWith('pwr_')) {
+    const el = (id) => document.getElementById(id);
+    const val = (id) => (el(id) ? String(el(id).value || '').trim() : '');
+    const qp = [];
+    const push = (k, v) => {
+      if (v !== '' && v !== null && v !== undefined) qp.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+    };
+    if (selectedApiKey) qp.push('key=' + encodeURIComponent(selectedApiKey));
+
+    const level = val('apiPowerLevel') || 'day';
+    const year = val('apiPowerYear');
+    const month = val('apiPowerMonth');
+    const dateV = val('apiPowerDate');
+    const room = val('apiPowerRoom');
+    const entity = val('apiPowerEntity');
+    const source = val('apiPowerSource') || 'auto';
+    const top = val('apiPowerTop');
+    const groupBy = val('apiPowerGroupBy') || 'room';
+    const dayTable = val('apiPowerDayTable');
+    const monthTable = val('apiPowerMonthTable');
+    const yearTable = val('apiPowerYearTable');
+    const envEntity = val('apiPowerEnvEntity');
+
+    if (qt === 'pwr_query') {
+      push('keyword', val('apiPowerKeyword'));
+      push('start', val('apiPowerStart'));
+      push('end', val('apiPowerEnd'));
+      push('room', room);
+      push('entity_id', entity);
+      push('limit', top);
+    } else if (qt === 'pwr_calendar') {
+      push('month', month);
+    } else if (qt === 'pwr_reconcile') {
+      // 默认最近 30 天；需要自定义区间可手改 URL（start/end）
+    } else {
+      push('level', level);
+      if (level !== 'day') push('year', year);
+      if (level === 'month') push('month', month);
+      if (level === 'day') push('date', dateV);
+    }
+
+    if (qt === 'pwr_breakdown') push('group_by', groupBy);
+    if (qt === 'pwr_dashboard' || qt === 'pwr_breakdown' || qt === 'pwr_meta') {
+      push('room', room);
+      push('entity_id', entity);
+    }
+    if (qt === 'pwr_dashboard') {
+      push('source', source);
+      push('top', top);
+    }
+    if (dayTable) push('day_table', dayTable);
+    if (qt === 'pwr_meta' || qt === 'pwr_dashboard' || qt === 'pwr_breakdown' || qt === 'pwr_reconcile') {
+      push('month_table', monthTable);
+      push('year_table', yearTable);
+    }
+    if (envEntity) push('env_entity', envEntity);
+    if (qt === 'pwr_calendar' && el('apiPowerInclDevice') && !el('apiPowerInclDevice').checked) {
+      qp.push('include_device=0');
+    }
+
+    document.getElementById('apiUrlOutput').value =
+      BASE_PATH + BASE_URL + '?type=' + qt + (qp.length ? '&' + qp.join('&') : '');
+    return;
+  }
+
   const selected = getSelectedApiTable();
   const tables = selected.join(',');
   const entityId = document.getElementById('apiEntityId').value;
