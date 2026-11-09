@@ -330,4 +330,4 @@ ENTITY_GROUP_DOMAIN_SERVICE_MAP = {
 }
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "6.0.7"
+VERSION = "6.0.8"
