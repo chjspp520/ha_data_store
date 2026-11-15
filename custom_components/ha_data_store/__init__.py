@@ -920,6 +920,7 @@ def _init_database(db_path: str) -> None:
                 trigger_config TEXT NOT NULL DEFAULT '{{}}',
                 conditions     TEXT NOT NULL DEFAULT '[]',
                 logic          TEXT NOT NULL DEFAULT 'all',
+                condition_tree TEXT NOT NULL DEFAULT '',
                 actions        TEXT NOT NULL DEFAULT '[]',
                 stop_on_error  INTEGER NOT NULL DEFAULT 0,
                 next_run       TEXT NOT NULL DEFAULT '',
@@ -930,6 +931,15 @@ def _init_database(db_path: str) -> None:
             )
             """
         )
+        # 【v6.14.93】老库补列：条件分组树。
+        #   默认空串 = 没有分组 → 引擎走原来的平铺 all/any 求值，老规则行为一行不变
+        #   （用户明确要求：老数据不迁移，新功能只对新数据起作用）。
+        _auto_cols = [r[1] for r in conn.execute(f"PRAGMA table_info({TABLE_AUTOMATIONS})")]
+        if "condition_tree" not in _auto_cols:
+            conn.execute(
+                f"ALTER TABLE {TABLE_AUTOMATIONS} "
+                f"ADD COLUMN condition_tree TEXT NOT NULL DEFAULT ''"
+            )
         # 18) 自动化执行记录表 — 时间/触发/条件明细/动作结果/耗时
         conn.execute(
             f"""

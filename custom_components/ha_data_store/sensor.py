@@ -17,7 +17,7 @@ from homeassistant.helpers.event import async_track_time_change, async_track_tim
 from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     TABLE_FILE_SOURCE_CONFIGS, TABLE_API_SOURCE_CONFIGS, TABLE_REPORT_ENTITIES,
     TABLE_USER_ACTIONS, TABLE_AUTOMATIONS, TABLE_AUTOMATION_LOGS,
-    CATEGORY_ATTRIBUTE, VERSION, RECENT_DAYS_ENTITY_ID,
+    CATEGORY_ATTRIBUTE, VERSION, AUTOMATION_ENGINE_VERSION, RECENT_DAYS_ENTITY_ID,
     TABLE_DEVICE_HISTORY,
     TODAY_IN_HISTORY_SENSOR_ID, TODAY_IN_HISTORY_RANGE_ENTITY_ID,
     COMM_TYPE_NAME_ENTITY_ID, MANAGER_PATH)
@@ -1359,6 +1359,8 @@ class AutomationStatusSensor(SensorEntity):
         db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
         empty = {"total": 0, "enabled": 0, "disabled": 0, "success": 0,
                  "failed": 0, "skipped": 0, "never": 0, "total_runs": 0,
+                 # 空数据（数据库未就绪）时也要能读到引擎版本
+                 "engine_version": AUTOMATION_ENGINE_VERSION,
                  "updated_at": "", "automations": [], "ha_automation": []}
         if not db_path:
             return empty
@@ -1456,6 +1458,10 @@ class AutomationStatusSensor(SensorEntity):
             "never": never,
             "total_runs": total_runs,
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            # 【v6.14.74】自动化引擎版本 —— 确认后端改动是否真的生效。
+            #   后端目录没有 git，改了文件但没重启 HA 是常见误判，
+            #   看到这个号没变就说明还在跑旧代码。
+            "engine_version": AUTOMATION_ENGINE_VERSION,
             "automations": automations,
             "ha_automation": report_rows,
             "log_max_id": max_log_id,

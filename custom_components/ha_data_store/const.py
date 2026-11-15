@@ -330,4 +330,26 @@ ENTITY_GROUP_DOMAIN_SERVICE_MAP = {
 }
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "6.0.8"
+VERSION = "6.0.10"
+
+# ── 自动化执行引擎版本 ──
+# 独立于集成版本（VERSION）：引擎能力单独演进，集成版本跟整个仓库走。
+# 用途：确认「后端改动是否真的生效」—— 前端/日志里看到这个号变了，
+#   说明 HA 已经重启并加载了新代码（后端目录没有 git，改了不重启是常见误判）。
+# 版本规则（语义化）：主版本 = 数据结构不兼容；次版本 = 新增能力；修订 = 修 bug。
+#   1.0.0  初版（定时 / 间隔触发 + state 条件 + 服务调用）
+#   1.1.0  条件支持属性比较（attribute 字段）+ 布尔比较大小写修正
+#   1.2.0  状态触发（trigger_type=state：from / to / for），事件驱动 + 防抖 + 防自触发 + 启动静默期
+#   1.2.1  状态触发的冷却时间改为可配（trigger_config.cooldown，0 = 关闭）
+#   1.2.2  修复：CRUD 入参校验漏了 state（保存状态触发规则被 400 拒绝）
+#   1.2.3  修复：compute_next_run 对 state 返回 None 撞上 next_run 列的 NOT NULL 约束
+#   1.2.4  状态触发增加 entity_id 后端校验（防建出永不触发的空规则）
+#   1.5.1  修复：微信 ClawBot 动作的域名不再写死，改为按 HA 服务注册表探测（集成改名后
+#          曾静默失效，只报 "Action ha-clawbot.send_media not found"）；缺集成时试运行也会报错
+AUTOMATION_ENGINE_VERSION = "1.5.1"
+
+# ── 自动化触发类型的单一事实来源 ──
+# 【v6.14.83】http_api 的入参校验原先在这里和那边各手写了一份 ("time", "interval")，
+#   加 state 时漏了一处连出两个 bug（400 / NOT NULL）。收口到这里，以后加新触发类型
+#   只改这一行。
+AUTOMATION_TRIGGER_TYPES = ("time", "interval", "state")

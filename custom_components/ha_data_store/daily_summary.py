@@ -30,6 +30,7 @@ from typing import Any
 
 from .const import (
     DEFAULT_TIMEZONE,
+    TABLE_AUTOMATION_LOGS,
     TABLE_DEVICE_HISTORY,
     TABLE_HEALTH_RECORDS,
     TABLE_REPORT_ENTITIES,
@@ -481,6 +482,51 @@ def _agg_vacuum(conn, day: str) -> dict:
     return {"count": len(rows)}
 
 
+def _agg_automations(conn, day: str) -> dict:
+    """今日自动化执行情况（automation_logs）。
+
+    只回答「有没有出问题」：执行总数 / 成功 / 失败 / 跳过 + 失败规则名。
+    明细留给自动化卡片，日报放不下也不必放。
+
+    返回空 dict 表示「今天没有任何执行」—— 调用方据此不显示这一节，
+    避免「执行 0 次」这种没信息量的行占位。
+    """
+    since = f"{day} 00:00:00"
+    try:
+        rows = conn.execute(
+            f"SELECT status, COUNT(*) AS cnt FROM {TABLE_AUTOMATION_LOGS} "
+            f"WHERE created_at >= ? GROUP BY status",
+            (since,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    stat = {r["status"]: r["cnt"] for r in rows}
+    total = sum(stat.values())
+    if not total:
+        return {}
+    failed = stat.get("failed", 0) + stat.get("partial_failed", 0)
+    failed_names: list[str] = []
+    if failed:
+        try:
+            failed_names = [
+                r["automation_name"] for r in conn.execute(
+                    f"SELECT DISTINCT automation_name FROM {TABLE_AUTOMATION_LOGS} "
+                    f"WHERE created_at >= ? AND status IN ('failed','partial_failed') "
+                    f"AND automation_name <> '' ORDER BY automation_name LIMIT 5",
+                    (since,),
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            failed_names = []
+    return {
+        "total_runs": total,
+        "success": stat.get("success", 0),
+        "failed": failed,
+        "skipped": stat.get("skipped", 0),
+        "failed_names": failed_names,
+    }
+
+
 def _agg_health(conn, day: str) -> dict:
     try:
         rows = conn.execute(
@@ -521,8 +567,21 @@ def _agg_xiaoai(conn, day: str) -> dict:
 # =========================================================================== #
 #  异常提醒                                                                      #
 # =========================================================================== #
-def _build_alerts(env: dict, devices: dict, power_changed: float | None) -> list[str]:
+def _build_alerts(
+    env: dict,
+    devices: dict,
+    power_changed: float | None,
+    auto: dict | None = None,
+) -> list[str]:
     alerts: list[str] = []
+
+    # 【v6.14.75】自动化执行失败 —— 放在**最前**：
+    #   · 这是"需要你处理"的失败，比"今天最高温 32°C"更该先看到；
+    #   · 末尾有 alerts[:MAX_ALERTS] 截断，放后面可能被挤掉。
+    if auto and auto.get("failed"):
+        names = auto.get("failed_names") or []
+        suffix = ("（" + "、".join(names[:3]) + "）") if names else ""
+        alerts.append(f"自动化今日失败 {auto['failed']} 次{suffix}")
 
     # 温度异常
     t = env.get("temperature")
@@ -583,6 +642,8 @@ def build_daily_summary_sync(db_path: str, hass=None, date_str: str | None = Non
         vacuum = _agg_vacuum(conn, day)
         health = _agg_health(conn, day)
         xiaoai = _agg_xiaoai(conn, day)
+        # 【v6.14.75】今日自动化执行情况（失败项会进 alerts，其余进 sections.automation）
+        automations = _agg_automations(conn, day)
 
         # 离线实体（实时，需读表 + hass states）
         offline = _agg_offline_entities(hass, conn)
@@ -610,7 +671,7 @@ def build_daily_summary_sync(db_path: str, hass=None, date_str: str | None = Non
     }
 
     # 异常提醒（离线设备单独在 summary 体现，不并入 alerts）
-    alerts = _build_alerts(env, devices, power_change)
+    alerts = _build_alerts(env, devices, power_change, automations)
 
     # 结构化分节（只保留有数据的）
     sections: dict[str, Any] = {}
@@ -626,6 +687,9 @@ def build_daily_summary_sync(db_path: str, hass=None, date_str: str | None = Non
         sections["health"] = health
     if xiaoai.get("count"):
         sections["xiaoai"] = xiaoai
+    # 【v6.14.75】自动化：今天有执行过才显示（全是 0 的那天不占位）
+    if automations:
+        sections["automation"] = automations
     sections["presence"] = presence
     sections["door"] = {"state": presence["door"], "name": presence["door_name"]}
     sections["lights"] = lights

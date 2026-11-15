@@ -156,6 +156,53 @@ def consume(entity_id: str, when, tolerance: float = TOLERANCE_SECONDS) -> dict 
         return None
 
 
+def peek(entity_id: str, when=None, tolerance: float = TOLERANCE_SECONDS) -> dict | None:
+    """只读查询是否有匹配的登记 —— **不删除**。
+
+    与 `consume` 的区别：
+      · `consume` 会 pop 掉记录，供 device_history 写「这次变化是自动化造成的」时
+        **一次性消费**；
+      · `peek` 只判断、不消费。状态触发的回调需要它来回答一个相反的问题：
+        「这次状态变化是不是我自己刚才造成的？」—— 如果是，就跳过，避免自触发死循环。
+
+    用 consume 代替会出问题：那会把本该给 device_history 的记录吃掉，
+    导致历史曲线里这次变化丢失「自动化」来源标记。
+
+    @param entity_id 被控实体
+    @param when      可选。传了就按时间窗匹配（同 consume）；不传则只要该实体
+                     有未过期的登记就返回（状态回调不关心精确时刻）
+    @return {"type","id","name"} 或 None
+    """
+    try:
+        eid = str(entity_id or "").strip()
+        if not eid:
+            return None
+        now = time.time()
+        target = _to_ts(when) if when is not None else None
+        best_idx = -1
+        best_diff = None
+        with _lock:
+            _prune_locked(now)
+            for idx, it in enumerate(_items):
+                if it.get("entity_id") != eid:
+                    continue
+                if target is None:
+                    best_idx = idx
+                    break
+                diff = abs(float(it.get("ts", 0.0)) - target)
+                if diff > tolerance:
+                    continue
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    best_idx = idx
+            if best_idx < 0:
+                return None
+            it = _items[best_idx]
+        return {"type": it.get("type", ""), "id": it.get("id", ""), "name": it.get("name", "")}
+    except Exception:
+        return None
+
+
 def pending_count() -> int:
     """当前待匹配条数（仅用于日志/调试，正常应长期接近 0）。"""
     try:

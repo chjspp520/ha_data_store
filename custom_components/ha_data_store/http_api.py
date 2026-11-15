@@ -58,6 +58,7 @@ from .const import (
     TABLE_MEDIA_NOW_PLAYING,
     TABLE_AUTOMATIONS,
     TABLE_AUTOMATION_LOGS,
+    AUTOMATION_TRIGGER_TYPES,
     TABLE_POWER_METER_CONFIGS,
     TABLE_POWER_ENERGY_DAILY,
     SOURCE_TYPE_CARD,
@@ -16939,13 +16940,25 @@ class AutomationsView(_BaseDBView):
             if not name:
                 return self.json({"success": False, "error": "name 不能为空"}, status_code=400)
             trigger_type = str(body.get("trigger_type") or "time").strip()
-            if trigger_type not in ("time", "interval"):
+            # 【v6.14.80】加入 state（状态触发）——
+            #   v6.14.76 实现了状态触发，但漏改了这两处入参校验，
+            #   保存时被 400 拒绝（前端提示 "trigger_type 仅支持 time / interval"）。
+            if trigger_type not in AUTOMATION_TRIGGER_TYPES:
                 return self.json(
-                    {"success": False, "error": "trigger_type 仅支持 time / interval"},
+                    {"success": False, "error": "trigger_type 仅支持 time / interval / state"},
                     status_code=400,
                 )
             trigger_config = _json_field(body.get("trigger_config"), {})
             if not isinstance(trigger_config, dict):
+                trigger_config = {}
+            # 【v6.14.82】状态触发必须有 entity_id —— 前端有拦截，但绕过前端直接调 API
+            #   时（或旧版前端缓存）会建出"永远不会被触发"的规则（entity_id 为空 →
+            #   reload_state_watch 跳过订阅），列表里还显示「（未设置实体）」。
+            if trigger_type == "state" and not str(trigger_config.get("entity_id") or "").strip():
+                return self.json(
+                    {"success": False, "error": "状态触发（state）必须填写 trigger_config.entity_id"},
+                    status_code=400,
+                )
                 trigger_config = {}
             conditions = _json_field(body.get("conditions"), [])
             if not isinstance(conditions, list):
@@ -16953,6 +16966,9 @@ class AutomationsView(_BaseDBView):
             logic = str(body.get("logic") or "all").strip()
             if logic not in ("all", "any"):
                 logic = "all"
+            # 【v6.14.93】条件分组树：新数据专用。不是 dict → 存空串（走老平铺求值）
+            tree = _json_field(body.get("condition_tree"), None)
+            tree_json = json.dumps(tree, ensure_ascii=False) if isinstance(tree, dict) and tree.get("items") else ""
             actions = _json_field(body.get("actions"), [])
             if not isinstance(actions, list):
                 actions = []
@@ -16966,12 +16982,12 @@ class AutomationsView(_BaseDBView):
                     cur = conn.execute(
                         f"INSERT INTO {TABLE_AUTOMATIONS} "
                         f"(name, enabled, trigger_type, trigger_config, conditions, logic, "
-                        f"actions, stop_on_error, created_at, updated_at) "
-                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        f"condition_tree, actions, stop_on_error, created_at, updated_at) "
+                        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (name, enabled, trigger_type,
                          json.dumps(trigger_config, ensure_ascii=False),
                          json.dumps(conditions, ensure_ascii=False),
-                         logic, json.dumps(actions, ensure_ascii=False),
+                         logic, tree_json, json.dumps(actions, ensure_ascii=False),
                          stop_on_error, now, now),
                     )
                     conn.commit()
@@ -16984,6 +17000,8 @@ class AutomationsView(_BaseDBView):
             manager = hass.data.get(DOMAIN, {}).get("automation_manager")
             if manager:
                 next_run = await manager.recompute_next_run(new_id)
+                # 【v6.14.76】规则变了 → 重建状态监听（状态触发型靠它才会被订阅）
+                await manager.reload_state_watch()
             return self.json({"success": True, "id": new_id, "next_run": next_run})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -17019,9 +17037,10 @@ class AutomationItemView(_BaseDBView):
                 params.append(1 if body["enabled"] else 0)
             if "trigger_type" in body:
                 ttype = str(body["trigger_type"] or "").strip()
-                if ttype not in ("time", "interval"):
+                # 【v6.14.80】与新增路径同步加入 state
+                if ttype not in AUTOMATION_TRIGGER_TYPES:
                     return self.json(
-                        {"success": False, "error": "trigger_type 仅支持 time / interval"},
+                        {"success": False, "error": "trigger_type 仅支持 time / interval / state"},
                         status_code=400,
                     )
                 fields.append("trigger_type = ?")
@@ -17044,6 +17063,13 @@ class AutomationItemView(_BaseDBView):
                     logic = "all"
                 fields.append("logic = ?")
                 params.append(logic)
+            # 【v6.14.93】条件分组树（新数据）。传 null / 空 dict = 清空，回到老平铺模式
+            if "condition_tree" in body:
+                tree = _json_field(body["condition_tree"], None)
+                tree_json = (json.dumps(tree, ensure_ascii=False)
+                             if isinstance(tree, dict) and tree.get("items") else "")
+                fields.append("condition_tree = ?")
+                params.append(tree_json)
             if "actions" in body:
                 acts = _json_field(body["actions"], [])
                 if not isinstance(acts, list):
@@ -17080,6 +17106,8 @@ class AutomationItemView(_BaseDBView):
             manager = hass.data.get(DOMAIN, {}).get("automation_manager")
             if manager:
                 next_run = await manager.recompute_next_run(auto_id)
+                # 【v6.14.76】改过的规则要重新订阅（实体可能换了、可能从定时改成状态触发）
+                await manager.reload_state_watch()
             return self.json({"success": True, "id": auto_id, "next_run": next_run})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -17109,6 +17137,11 @@ class AutomationItemView(_BaseDBView):
             affected = await self._exec_in_executor(hass, _delete)
             if not affected:
                 return self.json({"success": False, "error": "自动化不存在"}, status_code=404)
+            # 【v6.14.76】删掉的规则必须解绑 —— 否则状态监听还留着它，
+            #   下次状态变化会执行一条用户以为已经删掉的规则。
+            manager = hass.data.get(DOMAIN, {}).get("automation_manager")
+            if manager:
+                await manager.reload_state_watch()
             return self.json({"success": True, "id": auto_id})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
@@ -17129,11 +17162,13 @@ class AutomationRunView(_BaseDBView):
         except Exception:
             return self.json({"success": False, "error": "auto_id 无效"}, status_code=400)
         force = request.query.get("force", "") in ("1", "true", "True", "yes", "on")
+        # 【v6.14.92】?dry=1 → 只算条件、不执行动作
+        dry = request.query.get("dry", "") in ("1", "true", "True", "yes", "on")
         manager = hass.data.get(DOMAIN, {}).get("automation_manager")
         if not manager:
             return self.json({"success": False, "error": "自动化引擎未运行"}, status_code=500)
         try:
-            result = await manager.run_by_id(auto_id, force=force)
+            result = await manager.run_by_id(auto_id, force=force, dry_run=dry)
             return self.json(result)
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
