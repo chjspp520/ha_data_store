@@ -645,7 +645,7 @@ class EntityGroupClimate(_EntityGroupBase, ClimateEntity):
 
     entity_domain = "climate"
     _default_icon = DEFAULT_AC_ICON
-    _attr_temperature_unit = _TEMP_UNIT
+    _attr_native_temperature_unit = _TEMP_UNIT
 
     def __init__(self, hass: HomeAssistant, manager: "EntityGroupManager",
                  group: dict, device_info=None) -> None:
@@ -735,12 +735,12 @@ class EntityGroupClimate(_EntityGroupBase, ClimateEntity):
         return HVACMode.OFF
 
     @property
-    def current_temperature(self):
+    def native_current_temperature(self):
         values = self._numbers("current_temperature")
         return round(sum(values) / len(values), 1) if values else None
 
     @property
-    def target_temperature(self):
+    def native_target_temperature(self):
         values = self._numbers("temperature")
         if not values:
             return None

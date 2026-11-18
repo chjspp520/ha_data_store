@@ -59,6 +59,9 @@ from .const import (
     TABLE_AUTOMATIONS,
     TABLE_AUTOMATION_LOGS,
     AUTOMATION_TRIGGER_TYPES,
+    NOTIFICATION_ASSET_DENY_DIRS,
+    NOTIFICATION_ASSET_DENY_FILES,
+    NOTIFICATION_ASSET_DENY_SUFFIX,
     TABLE_POWER_METER_CONFIGS,
     TABLE_POWER_ENERGY_DAILY,
     SOURCE_TYPE_CARD,
@@ -17487,3 +17490,348 @@ class AutomationStatsView(_BaseDBView):
             return self.json({"success": True, **result})
         except Exception as exc:
             return self.json({"success": False, "error": str(exc)}, status_code=500)
+
+
+# =========================================================================== #
+#  通知中心 API（v6.1.0）                                                     #
+# ---------------------------------------------------------------------------
+#  设计见 c:\HA\src\plan\notification-center-plan.md：                        #
+#    · 投递唯一入口是 NotificationManager.send()，这里只做 HTTP 包装；          #
+#    · 历史与已读状态存 notifications 表，前端读 API + sensor；                 #
+#    · 鉴权复用 _check_api_enabled（?key=），不新增开关。                       #
+# =========================================================================== #
+
+def _notification_manager(hass: HomeAssistant):
+    """取 NotificationManager（集成未就绪时返回 None）。"""
+    return hass.data.get(DOMAIN, {}).get("notification_manager")
+
+
+def _parse_id_list(raw: Any) -> list[int]:
+    """把 "1,2,3" / [1,2] / [1,"2"] 统一成去重后的 int 列表。"""
+    items: list[int] = []
+    if isinstance(raw, str):
+        raw = raw.replace("，", ",").split(",")
+    if not isinstance(raw, (list, tuple)):
+        return items
+    for x in raw:
+        s = str(x).strip()
+        if s.isdigit():
+            v = int(s)
+            if v not in items:
+                items.append(v)
+    return items
+
+
+class NotificationsView(_BaseDBView):
+    """通知列表 / 发送 / 批量删除。
+
+    GET    /api/ha_data_store/notifications?key=..&limit=20&offset=0
+             &unread_only=1&category=..&level=..&since=<毫秒>
+    POST   /api/ha_data_store/notifications?key=..[&dry=1]   Body 即载荷契约
+    DELETE /api/ha_data_store/notifications?key=..&ids=1,2  或  &mode=read|all
+    """
+
+    url = "/api/ha_data_store/notifications"
+    name = "api:ha_data_store:notifications"
+
+    async def get(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        q = request.query
+        try:
+            limit = int(q.get("limit", 20))
+            offset = int(q.get("offset", 0))
+            since = int(q.get("since", 0) or 0)
+        except (TypeError, ValueError):
+            return self.json({"success": False, "error": "分页参数非法"}, status_code=400)
+        result = await manager.list_notifications(
+            limit=limit,
+            offset=offset,
+            unread_only=str(q.get("unread_only", "")).lower() in ("1", "true", "yes"),
+            category=str(q.get("category", "") or ""),
+            level=str(q.get("level", "") or ""),
+            since=since,
+            user_id=str(q.get("user", "") or ""),
+        )
+        return self.json(result)
+
+    async def post(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return self.json({"success": False, "error": "请求体必须是 JSON 对象"}, status_code=400)
+        dry = str(request.query.get("dry", "")).lower() in ("1", "true", "yes") or bool(body.get("dry"))
+        payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+        result = await manager.send(payload, source={"type": "api"}, dry=dry)
+        return self.json(result, status_code=200 if result.get("success") else 400)
+
+    async def delete(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        q = request.query
+        mode = str(q.get("mode", "") or "").strip().lower() or None
+        ids = _parse_id_list(q.get("ids", ""))
+        removed = await manager.remove(ids=ids, mode=mode)
+        await manager.refresh_sensor()
+        return self.json({"success": True, "removed": removed})
+
+
+class NotificationItemView(_BaseDBView):
+    """单条通知：查看全文 / 已读状态 / 删除。
+
+    GET    /api/ha_data_store/notifications/{id}?key=..
+    PUT    /api/ha_data_store/notifications/{id}?key=..   Body: {"read": true|false}
+    DELETE /api/ha_data_store/notifications/{id}?key=..
+    """
+
+    url = "/api/ha_data_store/notifications/{notification_id}"
+    name = "api:ha_data_store:notification_item"
+
+    async def get(self, request: web.Request, notification_id: str = "") -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        if not str(notification_id).isdigit():
+            return self.json({"success": False, "error": "id 非法"}, status_code=400)
+        item = await manager.get(int(notification_id))
+        if item is None:
+            return self.json({"success": False, "error": "通知不存在"}, status_code=404)
+        return self.json({"success": True, "item": item})
+
+    async def put(self, request: web.Request, notification_id: str = "") -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        if not str(notification_id).isdigit():
+            return self.json({"success": False, "error": "id 非法"}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        read = bool(body.get("read", True)) if isinstance(body, dict) else True
+        nid = int(notification_id)
+        marked = (
+            await manager.mark_read(ids=[nid]) if read
+            else await manager.mark_unread(ids=[nid])
+        )
+        await manager.refresh_sensor()
+        return self.json({"success": True, "id": nid, "read": read, "changed": marked})
+
+    async def delete(self, request: web.Request, notification_id: str = "") -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        if not str(notification_id).isdigit():
+            return self.json({"success": False, "error": "id 非法"}, status_code=400)
+        removed = await manager.remove(ids=[int(notification_id)])
+        await manager.refresh_sensor()
+        return self.json({"success": True, "removed": removed})
+
+
+class NotificationsMarkView(_BaseDBView):
+    """批量已读 / 批量标为未读。
+
+    POST /api/ha_data_store/notifications_mark?key=..
+      Body: {"ids": [1,2]} 或 {"all": true}；{"read": false} 表示标为未读（默认 true）
+    """
+
+    url = "/api/ha_data_store/notifications_mark"
+    name = "api:ha_data_store:notifications_mark"
+
+    async def post(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"success": False, "error": "请求体不是合法的 JSON"}, status_code=400)
+        body = body if isinstance(body, dict) else {}
+        all_ = bool(body.get("all"))
+        ids = _parse_id_list(body.get("ids"))
+        if not all_ and not ids:
+            return self.json({"success": False, "error": "ids 与 all 至少要给一个"}, status_code=400)
+        read = bool(body.get("read", True))
+        marked = (
+            await manager.mark_read(ids=ids, all_=all_) if read
+            else await manager.mark_unread(ids=ids, all_=all_)
+        )
+        await manager.refresh_sensor()
+        return self.json({"success": True, "marked": marked, "read": read})
+
+
+class NotificationTargetsView(_BaseDBView):
+    """可用收件人（hass 里注册的 notify.* 平台服务）。
+
+    GET /api/ha_data_store/notification_targets?key=..
+      → {"success":1, "count":2, "targets":[{"service":"notify.mobile_app_x","name":"..."}]}
+    """
+
+    url = "/api/ha_data_store/notification_targets"
+    name = "api:ha_data_store:notification_targets"
+
+    async def get(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        items = manager.targets()
+        return self.json({"success": True, "count": len(items), "targets": items})
+
+
+class NotificationUsersView(_BaseDBView):
+    """HA 用户 + 各自名下的 notify 服务（动作行「收件用户 / 通知设备」下拉的数据源）。
+
+    GET /api/ha_data_store/notification_users?key=..
+      → {"success":1, "count":2, "users":[
+           {"user_id":"abc","name":"张三","is_admin":true,
+            "services":[{"service":"notify.mobile_app_iphone","device_name":"iPhone 15"}]}
+         ]}
+
+    没有设备的用户也会返回（services 为空），前端据此禁用勾选。
+    匹配不上用户的 notify 服务归到 user_id="" 的「未关联用户」分组，保证不漏。
+    """
+
+    url = "/api/ha_data_store/notification_users"
+    name = "api:ha_data_store:notification_users"
+
+    async def get(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        manager = _notification_manager(hass)
+        if manager is None:
+            return self.json({"success": False, "error": "通知模块未就绪"}, status_code=503)
+        users = await manager.users_with_targets()
+        # 有设备的排前面，同组按名字排序
+        users.sort(key=lambda u: (0 if u["services"] else 1, str(u["name"])))
+        return self.json({"success": True, "count": len(users), "users": users})
+
+
+class NotificationDatesView(_BaseDBView):
+    """通知的日期分布（前端「今日 / 昨天 / 指定日期」选择器用）。
+
+    GET /api/ha_data_store/notification_dates?key=..
+      → {"success": true, "count": 2, "months": ["2026-11", "2026-10"]}
+
+    GET /api/ha_data_store/notification_dates?key=..&month=2026-11
+      → {"success": true, "count": 2, "month": "2026-11",
+         "dates": ["2026-11-16", "2026-11-17"]}
+
+    格式与 project 里同类接口（`room_data_dates` / `device_data_dates`）一致：
+    `dates` 是**日期字符串数组**（升序），不是对象数组。
+    归组按**本地时区**（与 sensor 的「今日」同一口径），不依赖 SQLite 的 localtime。
+    数据量级：90 天 × 每天 100 条 ≈ 9000 行，一次全表扫描 + Python 归组，几十毫秒。
+    """
+
+    url = "/api/ha_data_store/notification_dates"
+    name = "api:ha_data_store:notification_dates"
+
+    async def get(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        db_path = hass.data.get(DOMAIN, {}).get("db_path")
+        if not db_path:
+            return self.json({"success": False, "error": "数据库未就绪"}, status_code=503)
+        month = str(request.query.get("month", "") or "").strip()
+        from .notifications import build_date_index
+
+        res = await hass.async_add_executor_job(build_date_index, db_path, month)
+        if not res.get("ok"):
+            return self.json(
+                {"success": False, "error": res.get("error") or "查询失败"},
+                status_code=400,
+            )
+        out = {"success": True}
+        out.update({k: v for k, v in res.items() if k != "ok"})
+        return self.json(out)
+
+
+class NotificationAssetView(_BaseDBView):
+    """通知附件代理：把 config 目录内的文件流式返回给前端。
+
+    GET /api/ha_data_store/notification_asset?key=..&path=<config 相对路径 | 绝对路径>
+
+    · 只允许 config 目录内（realpath 解析后再比对，`../` 与符号链接都逃不出去）
+    · 黑名单：.storage / .cloud / ssl / secrets.yaml / 数据库本体（后缀 .db/.sqlite*）
+    · web.FileResponse 流式返回，自带 Range —— 视频可以拖进度条
+    """
+
+    url = "/api/ha_data_store/notification_asset"
+    name = "api:ha_data_store:notification_asset"
+
+    async def get(self, request: web.Request) -> web.Response:
+        if (resp := self._check_api_enabled(request)):
+            return resp
+        hass: HomeAssistant = request.app["hass"]
+        raw = str(request.query.get("path", "") or "").strip()
+        if not raw:
+            return self.json({"success": False, "error": "缺少 path 参数"}, status_code=400)
+
+        config_dir = hass.config.path()
+        try:
+            base = os.path.realpath(config_dir)
+            candidate = raw
+            if candidate.startswith("/local/"):
+                candidate = os.path.join(config_dir, "www", candidate[len("/local/"):])
+            elif candidate.startswith("/config/"):
+                # HA 生态常见写法：/config/xxx → config 相对路径
+                candidate = os.path.join(config_dir, candidate[len("/config/"):])
+            elif not os.path.isabs(candidate):
+                candidate = os.path.join(config_dir, candidate)
+            real = os.path.realpath(candidate)
+        except Exception as exc:  # noqa: BLE001
+            return self.json({"success": False, "error": f"路径非法: {exc}"}, status_code=400)
+
+        # 必须在 config 目录内（realpath 已展开符号链接）
+        if real != base and not real.startswith(base + os.sep):
+            return self.json({"success": False, "error": "路径越界"}, status_code=403)
+
+        rel = os.path.relpath(real, base)
+        parts = [p for p in rel.split(os.sep) if p]
+        if parts and parts[0] in NOTIFICATION_ASSET_DENY_DIRS:
+            return self.json({"success": False, "error": "该目录不允许访问"}, status_code=403)
+        if parts and parts[-1] in NOTIFICATION_ASSET_DENY_FILES:
+            return self.json({"success": False, "error": "该文件不允许访问"}, status_code=403)
+        lower = real.lower()
+        if any(lower.endswith(suf) for suf in NOTIFICATION_ASSET_DENY_SUFFIX):
+            return self.json({"success": False, "error": "该文件不允许访问"}, status_code=403)
+
+        if not os.path.isfile(real):
+            return self.json({"success": False, "error": "文件不存在"}, status_code=404)
+
+        return web.FileResponse(
+            real,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )

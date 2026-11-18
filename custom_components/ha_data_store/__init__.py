@@ -64,6 +64,7 @@ from .const import (
     TABLE_POWER_METER_CONFIGS,
     TABLE_POWER_ENERGY_DAILY,
     TABLE_METRICS_CATALOG,
+    TABLE_NOTIFICATIONS,
     SOURCE_TYPE_EXTERNAL,
     CATEGORY_DEVICE,
     CATEGORY_ENVIRONMENT,
@@ -967,6 +968,39 @@ def _init_database(db_path: str) -> None:
         )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_automation_logs_time ON {TABLE_AUTOMATION_LOGS} (created_at);"
+        )
+        # 19) 通知中心（v6.1.0）— 后端统一投递 notify.* 后落库，前端读 sensor/API 展示
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_NOTIFICATIONS} (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           INTEGER NOT NULL DEFAULT 0,
+                level        TEXT NOT NULL DEFAULT 'info',
+                category     TEXT NOT NULL DEFAULT '通知',
+                title        TEXT NOT NULL DEFAULT '',
+                message      TEXT NOT NULL DEFAULT '',
+                detail       TEXT NOT NULL DEFAULT '',
+                targets      TEXT NOT NULL DEFAULT '[]',
+                status       TEXT NOT NULL DEFAULT '',
+                results      TEXT NOT NULL DEFAULT '[]',
+                url          TEXT NOT NULL DEFAULT '',
+                payload      TEXT NOT NULL DEFAULT '{{}}',
+                source_type  TEXT NOT NULL DEFAULT '',
+                source_id    TEXT NOT NULL DEFAULT '',
+                source_name  TEXT NOT NULL DEFAULT '',
+                attachments  TEXT NOT NULL DEFAULT '[]',
+                from_config_id TEXT NOT NULL DEFAULT '',
+                user_ids     TEXT NOT NULL DEFAULT '[]',
+                read         INTEGER NOT NULL DEFAULT 0,
+                read_at      INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_notifications_ts ON {TABLE_NOTIFICATIONS} (ts);"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_notifications_read ON {TABLE_NOTIFICATIONS} (read, ts);"
         )
 
         if local_logger:
@@ -5201,6 +5235,13 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
         AutomationLogsView,
         AutomationLookupView,
         AutomationStatsView,
+        NotificationsView,
+        NotificationItemView,
+        NotificationsMarkView,
+        NotificationTargetsView,
+        NotificationUsersView,
+        NotificationDatesView,
+        NotificationAssetView,
         RecentExcludeView,
         RecentEntitiesView,
         OnThisDayExcludeView,
@@ -5303,6 +5344,16 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     hass.http.register_view(AutomationLogsView(db_path))
     hass.http.register_view(AutomationLookupView(db_path))
     hass.http.register_view(AutomationStatsView(db_path))
+    # 通知中心（列表/发送/批量删除 + 单条 + 批量已读 + 收件人清单）
+    hass.http.register_view(NotificationsView(db_path))
+    hass.http.register_view(NotificationItemView(db_path))
+    hass.http.register_view(NotificationsMarkView(db_path))
+    hass.http.register_view(NotificationTargetsView(db_path))
+    hass.http.register_view(NotificationUsersView(db_path))
+    # 通知日期分布（哪些年月 / 某月哪些日有数据，前端日期选择器用）
+    hass.http.register_view(NotificationDatesView(db_path))
+    # 通知附件代理（config 内任意路径，带越界/黑名单校验）
+    hass.http.register_view(NotificationAssetView(db_path))
 
     # 小爱对话 API（独立模块）
     from .xiaoai import register_api_views as _xiaoai_register_api_views
@@ -5474,6 +5525,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_manager.start()
     hass.data[DOMAIN]["automation_manager"] = automation_manager
 
+    # ── 通知中心（v6.1.0）：后端统一调 notify.* 投递 + 历史落库 ──
+    #    前端读 sensor.ha_data_store_notifications（未读数）+ HTTP API（历史/已读）。
+    #    try 包裹：通知模块异常不应拖垮整个集成加载。
+    try:
+        from .notifications import NotificationManager
+
+        notification_manager = NotificationManager(hass, db_path)
+        await notification_manager.start()
+        hass.data[DOMAIN]["notification_manager"] = notification_manager
+        _LOGGER.info("[HDS] 通知中心已启动（db=%s）", os.path.basename(db_path))
+    except Exception:
+        _LOGGER.exception("[HDS] 通知中心初始化失败（其它模块不受影响）")
+
     # ── 定时精灵（设备倒计时/周期任务 + 空调窗帘状态恢复；与上面的简单自动化独立并存）──
     #    持久化直接用本集成 SQLite（timer_tasks 表），不落 JSON 文件。
     #    单独 try 包裹：它出问题不应拖垮整个集成加载。
@@ -5519,6 +5583,65 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }),
     )
     hass.data.setdefault(DOMAIN, {})["async_generate_daily_summary"] = _async_generate_daily_summary
+
+    # ── 服务：发送通知（v6.1.0）──
+    #    本批的验证入口：开发者工具 / 原生自动化 / 脚本都能调；
+    #    下一批自建自动化的「HA推送」动作会直接复用 NotificationManager.send()。
+    async def _async_send_notification(call) -> None:
+        manager = hass.data.get(DOMAIN, {}).get("notification_manager")
+        if manager is None:
+            _LOGGER.warning("[notification] 服务调用失败：通知模块未初始化")
+            return
+        data = dict(call.data or {})
+        targets = data.get("targets") or []
+        if isinstance(targets, str):
+            targets = [x.strip() for x in targets.replace("，", ",").split(",") if x.strip()]
+        # 收件用户（HA user_id）：后端按用户展开成其名下所有 notify 服务
+        users = data.get("users") or []
+        if isinstance(users, str):
+            users = [x.strip() for x in users.replace("，", ",").split(",") if x.strip()]
+        result = await manager.send(
+            {
+                "title": data.get("title") or "",
+                "message": data.get("message") or "",
+                "detail": data.get("detail") or "",
+                "level": data.get("level") or "info",
+                "category": data.get("category") or "",
+                "targets": targets,
+                "users": users,
+                "url": data.get("url") or "",
+                "attachments": data.get("attachments") or [],
+                "from_config_id": data.get("from_config_id") or "",
+            },
+            source={"type": "service"},
+            dry=bool(data.get("dry")),
+        )
+        if not result.get("success"):
+            _LOGGER.warning("[notification] 服务调用未发送: %s", result.get("error"))
+        else:
+            _LOGGER.info(
+                "[notification] 已发送 id=%s status=%s",
+                result.get("id"), result.get("status"),
+            )
+
+    hass.services.async_register(
+        DOMAIN,
+        "send_notification",
+        _async_send_notification,
+        schema=vol.Schema({
+            vol.Optional("title", default=""): cv.string,
+            vol.Required("message"): cv.string,
+            vol.Optional("detail", default=""): cv.string,
+            vol.Optional("targets", default=[]): vol.Any(cv.string, [cv.string]),
+            vol.Optional("users", default=[]): vol.Any(cv.string, [cv.string]),
+            vol.Optional("level", default="info"): cv.string,
+            vol.Optional("category", default=""): cv.string,
+            vol.Optional("url", default=""): cv.string,
+            vol.Optional("attachments", default=[]): vol.Any(list, cv.string),
+            vol.Optional("from_config_id", default=""): cv.string,
+            vol.Optional("dry", default=False): cv.boolean,
+        }),
+    )
 
     # ── 实体编组：执行预设动作 / 内置 on·off（自动化与外部脚本的统一入口） ──
     async def _async_run_entity_group_action(call) -> None:
@@ -6092,6 +6215,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_manager = hass.data.get(DOMAIN, {}).get("automation_manager")
     if automation_manager:
         automation_manager.stop()
+
+    # 停止通知中心（取消每日清理定时器）
+    notification_manager = hass.data.get(DOMAIN, {}).get("notification_manager")
+    if notification_manager:
+        try:
+            await notification_manager.stop()
+        except Exception:
+            _LOGGER.exception("[HDS] 通知中心停止异常")
 
     # 停止定时精灵（取消句柄 + 强制落盘）
     timer_coordinator = hass.data.get(DOMAIN, {}).get("timer_elves")

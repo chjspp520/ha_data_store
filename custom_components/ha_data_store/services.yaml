@@ -1,3 +1,89 @@
+send_notification:
+  name: 发送通知
+  description: >-
+    通过 HA 官方推送通道（notify.*）发送一条通知，并写入通知中心历史。
+    message 是手机通知栏看到的短文本，detail 是通知卡片里显示的详细内容（可长文本）。
+    「通知设备」targets 填 notify.mobile_app_xxx 这类平台服务名；
+    「收件用户」users 填 HA 用户 ID，后端自动展开成该用户名下所有设备；
+    两者可同时使用，最终按服务名合并去重。可用清单见
+    GET /api/ha_data_store/notification_users。
+  fields:
+    title:
+      name: 标题
+      description: 通知标题；留空显示「通知」。
+      example: "门口有人按铃"
+      selector:
+        text:
+    message:
+      name: 推送正文
+      description: 手机通知栏显示的短文本（必填）。
+      example: "14:32 检测到访客"
+      required: true
+      selector:
+        text:
+    detail:
+      name: 详情
+      description: 通知卡片里显示的详细内容；留空则卡片显示推送正文。
+      example: "14:32:07 门口摄像头检测到访客按铃，已持续 12 秒。"
+      selector:
+        text:
+          multiline: true
+    targets:
+      name: 通知设备
+      description: notify.* 服务名，可填多个（逗号分隔）；例如 notify.mobile_app_xxx。
+      example: "notify.mobile_app_ailex_de_iphone15pro"
+      selector:
+        text:
+    users:
+      name: 收件用户
+      description: >-
+        HA 用户 ID（可多个，逗号分隔）。后端会展开成该用户名下的全部设备，
+        与「通知设备」合并去重。用户没有任何已注册设备时会被跳过。
+      example: "a1b2c3d4e5f6..."
+      selector:
+        text:
+    level:
+      name: 级别
+      description: >-
+        影响通知卡片里的图标与颜色。内置 info / success / warning / error /
+        message / action；也可自定义（小写字母开头，字母数字下划线短横，≤24 字符）。
+      example: "info"
+      selector:
+        text:
+    category:
+      name: 分类
+      description: 通知卡片里的分类标签，默认「通知」。
+      example: "安防"
+      selector:
+        text:
+    url:
+      name: 点击打开页面
+      description: 手机点击通知后打开的 HA 页面（相对路径）。
+      example: "/lovelace/0"
+      selector:
+        text:
+    attachments:
+      name: 附件
+      description: >-
+        最多 5 个。每项 {type, path} 或 {type, entity}；只落库给通知卡片渲染，
+        不随手机推送发出。path 相对 HA config 目录（也可写绝对路径）。
+      example: '[{"type":"image","path":"media/snap.jpg"}]'
+      selector:
+        object:
+    from_config_id:
+      name: 关联配置
+      description: >-
+        RoomElvesStore 里已注册的 config_id（可带 .path）。填了以后通知卡片里会
+        出现「打开」按钮，点击弹出该配置对应的窗口；留空则只展示详情与附件。
+      example: "all_curtain"
+      selector:
+        text:
+    dry:
+      name: 只预览
+      description: 为 true 时只渲染与校验，不推送、不写历史。
+      selector:
+        boolean:
+
 generate_daily_summary:
   name: 生成今日家庭状态总结
   description: 按需聚合数据库历史表，生成今日家庭状态中文总结并刷新 sensor.today_family_status。

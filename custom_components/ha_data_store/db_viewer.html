@@ -2479,6 +2479,17 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="auto_delete">删除自动化</option>
           <option value="auto_logs_clear">清理执行记录</option>
         </optgroup>
+        <!-- 通知中心（v6.1.0）：独立路径 /api/ha_data_store/notifications，
+             不走 /query?type=...；读取用 GET，标记/删除/发送用 POST / DELETE -->
+        <optgroup label="🔔 通知中心">
+          <option value="notice_list">📋 通知列表（分页 / 仅未读 / 分类 / 级别 / 起始时间）</option>
+          <option value="notice_item">📄 单条通知详情（含完整 detail）</option>
+          <option value="notice_dates">🗓 哪些日期有数据（年月清单 / 某月日期清单）</option>
+          <option value="notice_targets">📮 可用收件人（hass 里注册的 notify.* 服务）</option>
+          <option value="notice_mark">✅ 批量标记已读 / 未读（POST）</option>
+          <option value="notice_delete">🗑 删除通知（DELETE · 支持批量清理）</option>
+          <option value="notice_send">📤 发送通知（POST · 复用后端投递通道）</option>
+        </optgroup>
         <optgroup label="实体上报">
           <option value="report_auto_entities">🤖 自动化实体列表</option>
           <option value="report_search">🔎 实体上报复合查询</option>
@@ -3156,6 +3167,67 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <div style="font-size:11px;color:var(--text2);margin-top:4px">
         口径：年/月优先电网表 → 日表汇总 → 全屋实时；日优先电网 → 实时当天最后一条；小时只有实时/设备；房间/设备只来自 device_history。
       </div>
+    </div>
+    <!-- 通知中心（notice_*）：后端 v6.1.0，独立路径 /api/ha_data_store/notifications -->
+    <div id="apiNoticeRow" class="full" style="display:none">
+      <label>通知参数</label>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;width:100%">
+        <div style="flex:0 0 90px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">通知 id</div>
+          <input id="apiNoticeId" type="number" min="1" placeholder="1" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 90px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">条数 limit</div>
+          <input id="apiNoticeLimit" type="number" min="1" value="20" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 90px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">偏移 offset</div>
+          <input id="apiNoticeOffset" type="number" min="0" placeholder="0" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 140px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">分类 category</div>
+          <input id="apiNoticeCategory" type="text" placeholder="留空=全部" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 120px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">级别 level</div>
+          <select id="apiNoticeLevel" onchange="generateApiUrl()" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="">全部</option>
+            <option value="info">info 信息</option>
+            <option value="success">success 成功</option>
+            <option value="warning">warning 警告</option>
+            <option value="error">error 错误</option>
+          </select>
+        </div>
+        <div style="flex:0 0 150px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">起始时间 since（毫秒）</div>
+          <input id="apiNoticeSince" type="text" placeholder="留空=全部" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 120px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">年月 month（日期分布用）</div>
+          <input id="apiNoticeMonth" type="text" placeholder="2026-11（留空=列年月）" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 auto;display:flex;align-items:center;gap:5px;padding-bottom:6px">
+          <input id="apiNoticeUnreadOnly" type="checkbox" onchange="generateApiUrl()">
+          <span style="font-size:12px;white-space:nowrap">仅未读</span>
+        </div>
+        <div style="flex:1 1 200px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">ids（逗号分隔 · 标记/删除用）</div>
+          <input id="apiNoticeIds" type="text" placeholder="1,2,3（留空=全部已读）" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px;box-sizing:border-box" oninput="generateApiUrl()">
+        </div>
+        <div style="flex:0 0 auto;display:flex;align-items:center;gap:5px;padding-bottom:6px">
+          <input id="apiNoticeReadFlag" type="checkbox" checked onchange="generateApiUrl()">
+          <span style="font-size:12px;white-space:nowrap">标记为已读</span>
+        </div>
+        <div style="flex:0 0 120px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:2px">批量模式 mode</div>
+          <select id="apiNoticeMode" onchange="generateApiUrl()" style="width:100%;padding:5px;font-size:12px;background:var(--input-bg);color:var(--text1);border:1px solid var(--border);border-radius:6px">
+            <option value="">按 ids</option>
+            <option value="read">清已读 read</option>
+            <option value="all">清全部 all</option>
+          </select>
+        </div>
+      </div>
+      <div id="apiNoticeHint" style="font-size:11px;color:var(--text2);margin-top:4px"></div>
     </div>
     <div id="apiHealthNameRow" style="display:none">
       <label>姓名</label>
@@ -14901,7 +14973,7 @@ function apiHideAllParamRows() {
     ['apiLevelRow', 0],
     ['apiHealthNameRow', 0], ['apiHealthTypeRow', 0], ['apiMediaUserRow', 0],
     ['apiMediaIdRow', 0], ['apiMediaNameRow', 0], ['apiDeviceUserNameRow', 0],
-    ['apiDeviceUserDirRow', 0], ['apiCommRow', 0], ['apiOtdRow', 0],
+    ['apiDeviceUserDirRow', 0], ['apiCommRow', 0], ['apiOtdRow', 0], ['apiNoticeRow', 0],
     ['apiBillRow', 0], ['apiEgRow', 0],
   ];
   rows.forEach(function (item) {
@@ -14913,6 +14985,32 @@ function apiHideAllParamRows() {
 
 function onApiTypeChange() {
   const qt = document.getElementById('apiQueryType').value;
+  // ---- 通知中心（notice_*）：独立路径 /api/ha_data_store/notifications ----
+  //   与 pwr_* 同一套路：参数块整块显隐，命中即提前返回（不参与后面的通用行逻辑）
+  const _elNoticeRow = document.getElementById('apiNoticeRow');
+  if (_elNoticeRow) _elNoticeRow.style.display = 'none';
+  if (qt.startsWith('notice_')) {
+    apiHideAllParamRows();
+    if (_elNoticeRow) _elNoticeRow.style.display = 'block';
+    const hint = document.getElementById('apiNoticeHint');
+    if (hint) {
+      if (qt === 'notice_send') {
+        hint.textContent = 'POST body 示例：{"title":"标题","message":"推送正文","detail":"卡片详情","targets":["notify.mobile_app_xxx"],"level":"info","url":"/lovelace/0"}';
+      } else if (qt === 'notice_mark') {
+        hint.textContent = 'POST body 示例：{"ids":[1,2]}；{"all":true} 表示全部；{"read":false} 表示标为未读。';
+      } else if (qt === 'notice_delete') {
+        hint.textContent = 'DELETE 调用：按 ids 删单条/多条；mode=read 清已读，mode=all 清全部（此时忽略 ids）。';
+      } else if (qt === 'notice_targets') {
+        hint.textContent = '返回 hass 里注册的 notify.* 服务清单，可直接把 service 名填到 targets。';
+      } else if (qt === 'notice_dates') {
+        hint.textContent = 'month 留空 → {months:["2026-11",...],count}；填 2026-11 → {month, dates:["2026-11-17",...], count}。日期字符串数组（升序），按本地时区归组。';
+      } else {
+        hint.textContent = '按时间倒序返回；unread_only=1 只看未读；since 为毫秒时间戳。';
+      }
+    }
+    generateApiUrl();
+    return;
+  }
   // 电力综合查询（pwr_*）：整块默认隐藏；命中时按 data-pw 显示对应子控件
   const _elPowerRow = document.getElementById('apiPowerRow');
   if (_elPowerRow) _elPowerRow.style.display = 'none';
@@ -16090,6 +16188,52 @@ async function loadHealthTypes() {
 
 function generateApiUrl() {
   const qt = document.getElementById('apiQueryType').value;
+  // ---- 通知中心（notice_*）：独立路径 /api/ha_data_store/notifications ----
+  if (qt.startsWith('notice_')) {
+    const el = (id) => document.getElementById(id);
+    const val = (id) => (el(id) ? String(el(id).value || '').trim() : '');
+    const qp = [];
+    const push = (k, v) => {
+      if (v !== '' && v !== null && v !== undefined) {
+        qp.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+      }
+    };
+    if (selectedApiKey) qp.push('key=' + encodeURIComponent(selectedApiKey));
+
+    const base = BASE_PATH + '/api/ha_data_store';
+    const withQs = (path) => base + path + (qp.length ? '?' + qp.join('&') : '');
+    let url = '';
+
+    if (qt === 'notice_item') {
+      url = withQs('/notifications/' + encodeURIComponent(val('apiNoticeId') || '1'));
+    } else if (qt === 'notice_dates') {
+      // month 留空 = 返回「哪些年月有数据」；填 2026-11 = 返回该月「哪些日有数据」
+      push('month', val('apiNoticeMonth'));
+      url = withQs('/notification_dates');
+    } else if (qt === 'notice_targets') {
+      url = withQs('/notification_targets');
+    } else if (qt === 'notice_mark') {
+      url = withQs('/notifications_mark');
+    } else if (qt === 'notice_delete') {
+      if (val('apiNoticeIds')) push('ids', val('apiNoticeIds'));
+      if (val('apiNoticeMode')) push('mode', val('apiNoticeMode'));
+      url = withQs('/notifications');
+    } else if (qt === 'notice_send') {
+      url = withQs('/notifications');
+    } else {
+      // notice_list
+      push('limit', val('apiNoticeLimit') || '20');
+      push('offset', val('apiNoticeOffset'));
+      push('category', val('apiNoticeCategory'));
+      push('level', val('apiNoticeLevel'));
+      push('since', val('apiNoticeSince'));
+      if (el('apiNoticeUnreadOnly') && el('apiNoticeUnreadOnly').checked) qp.push('unread_only=1');
+      url = withQs('/notifications');
+    }
+    document.getElementById('apiUrlOutput').value = url;
+    return;
+  }
+
   // ---- 电力综合查询（pwr_*）：参数全部来自独立参数块，不复用通用行 ----
   if (qt.startsWith('pwr_')) {
     const el = (id) => document.getElementById(id);

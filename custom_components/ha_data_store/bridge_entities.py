@@ -185,15 +185,15 @@ class BridgeLight(LightEntity, BridgeBaseEntity):
 class BridgeClimate(ClimateEntity, BridgeBaseEntity):
     def __init__(self, hass: HomeAssistant, bridge_config: dict, entity_id: str) -> None:
         from homeassistant.const import UnitOfTemperature
-        self._attr_temperature_unit = UnitOfTemperature.CELSIUS
+        self._attr_native_temperature_unit = UnitOfTemperature.CELSIUS
         ClimateEntity.__init__(self)
         BridgeBaseEntity.__init__(self, bridge_config, entity_id)
         self._attr_unique_id = f"{DOMAIN}_bridge_{entity_id}"
         self._attr_name = entity_id
         self._attr_hvac_mode = HVACMode.OFF
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL, HVACMode.HEAT, HVACMode.AUTO, HVACMode.DRY, HVACMode.FAN_ONLY]
-        self._attr_current_temperature = None
-        self._attr_target_temperature = 24
+        self._attr_native_current_temperature = None
+        self._attr_native_target_temperature = 24
         self._attr_target_temperature_step = 1
         self._attr_min_temp = 16
         self._attr_max_temp = 30
@@ -206,10 +206,10 @@ class BridgeClimate(ClimateEntity, BridgeBaseEntity):
             except ValueError:
                 pass
         # 不更新 hvac_modes，保持本地列表（桥接应报告自己能支持的模式）
-        self._attr_current_temperature = attributes.get("current_temperature")
+        self._attr_native_current_temperature = attributes.get("current_temperature")
         t = attributes.get("temperature")
         if t is not None:
-            self._attr_target_temperature = t
+            self._attr_native_target_temperature = t
         if attributes.get("min_temp") is not None:
             self._attr_min_temp = attributes["min_temp"]
         if attributes.get("max_temp") is not None:
@@ -225,7 +225,7 @@ class BridgeClimate(ClimateEntity, BridgeBaseEntity):
         if "temperature" in kwargs:
             extra["temperature"] = kwargs["temperature"]
         if await self._service_call("climate", "set_temperature", extra if extra else None):
-            self._attr_target_temperature = kwargs.get("temperature", self._attr_target_temperature)
+            self._attr_native_target_temperature = kwargs.get("temperature", self._attr_native_target_temperature)
             self.async_write_ha_state()
 
 

@@ -20,7 +20,8 @@ from .const import (DOMAIN, TABLE_ENTITY_CONFIGS, TABLE_EXPORT_CONFIGS,
     CATEGORY_ATTRIBUTE, VERSION, AUTOMATION_ENGINE_VERSION, RECENT_DAYS_ENTITY_ID,
     TABLE_DEVICE_HISTORY,
     TODAY_IN_HISTORY_SENSOR_ID, TODAY_IN_HISTORY_RANGE_ENTITY_ID,
-    COMM_TYPE_NAME_ENTITY_ID, MANAGER_PATH)
+    COMM_TYPE_NAME_ENTITY_ID, MANAGER_PATH,
+    NOTIFICATION_SENSOR_ID, NOTIFICATION_TODAY_LATEST_MAX)
 from .bridge_entities import get_bridge_entities_for_platform, get_bridge_device_info
 from .daily_summary import build_daily_summary_sync
 from .recent_devices import compute_device_last_used_sync, get_window_days
@@ -571,6 +572,99 @@ class ReportedEntitiesHealthSensor(SensorEntity):
     async def _async_refresh(self, now=None):
         data = await self._hass.async_add_executor_job(self._load_data)
         self._attr_native_value = data.get("offline", 0)
+        self._attr_extra_state_attributes = data
+        self.async_write_ha_state()
+
+
+class NotificationSensor(SensorEntity):
+    """通知中心传感器。
+
+    状态值 = 未读通知条数（**必须是纯数字**：前端据此判定是否自动弹窗）
+    状态属性 = 汇总（total/today/by_level/by_category）+ 最近 N 条明细（latest）
+
+    latest 里 detail 超长会截断（前端点开时走单条 API 取全文），并进
+    `_unrecorded_attributes` 不写 recorder 历史，避免撑爆 16KB 上限。
+    """
+
+    # 显式 False：has_entity_name=True 时 HA 会把 friendly_name 拼成「设备名 + 实体名」，
+    # 这里要的就是纯「通知」（entity_id 仍固定为 sensor.ha_data_store_notifications）
+    _attr_has_entity_name = False
+    _attr_name = "通知"
+    _attr_icon = "mdi:bell"
+    _attr_native_unit_of_measurement = "条"
+    # recorder 单状态属性上限 16384 字节：latest / targets 不进历史
+    _unrecorded_attributes = frozenset({"latest", "targets"})
+
+    def __init__(self, hass, device_info):
+        self._hass = hass
+        self._attr_unique_id = f"{DOMAIN}_notifications"
+        # 强制固定实体 id：sensor.ha_data_store_notifications
+        self.entity_id = NOTIFICATION_SENSOR_ID
+        self._attr_device_info = device_info
+        self._attr_native_value = 0
+        self._attr_extra_state_attributes = {}
+
+    async def async_added_to_hass(self):
+        """实体加入后：修正注册表名称 + 立即读一次。"""
+        # 旧版本注册时 has_entity_name=True，friendly_name 会带「设备名 + 」前缀；
+        # 这里把注册表里的名称固定为「通知」（只在不曾手动改名时写，之后用户改的优先）。
+        try:
+            from homeassistant.helpers import entity_registry as _er
+            _reg = _er.async_get(self._hass)
+            _entry = _reg.async_get(self.entity_id)
+            if _entry and not _entry.name_by_user and _entry.name != "通知":
+                _reg.async_update_entity(self.entity_id, name="通知")
+        except Exception as _exc:  # noqa: BLE001
+            _LOGGER.debug("[HDS] 通知传感器名称修正失败: %s", _exc)
+        await self.async_refresh_now()
+
+    async def _collect_notify_targets(self):
+        """枚举 hass 里已注册的 notify.* 平台服务（排除 send_message / notify 两个通用项）。
+
+        放在属性里是为了让前端/模板能直接拿到「能发给谁」，不用再查一次接口。
+        """
+        # 优先复用 NotificationManager（单一来源，排除项与投递侧完全一致）
+        _mgr = self._hass.data.get(DOMAIN, {}).get("notification_manager")
+        if _mgr is not None:
+            try:
+                # 带上归属用户：前端「收件用户 / 通知设备」两个下拉都靠它，
+                # 不需要额外配 API 地址（sensor 属性任何卡片都能读）
+                return await _mgr.targets_with_users()
+            except Exception:
+                try:
+                    return _mgr.targets()
+                except Exception:
+                    pass
+        out = []
+        try:
+            services = self._hass.services.async_services().get("notify", {})
+        except Exception:
+            return out
+        for name, svc in (services or {}).items():
+            if name in ("send_message", "notify", "persistent_notification"):
+                continue
+            label = getattr(svc, "name", None) or name
+            out.append({
+                "service": f"notify.{name}",
+                "name": str(label),
+                "user_id": "",
+                "user_name": "",
+            })
+        out.sort(key=lambda x: x["service"])
+        return out
+
+    def _load_data(self):
+        from .notifications import build_sensor_stats
+        db_path = self._hass.data.get(DOMAIN, {}).get("db_path")
+        # 只装「今日」+ 软上限（统计仍按全量算，见 build_sensor_stats 的注释）
+        return build_sensor_stats(db_path, NOTIFICATION_TODAY_LATEST_MAX)
+
+    async def async_refresh_now(self, now=None):
+        """主动刷新（通知投递/已读/删除后由 NotificationManager 调用）。"""
+        data = await self._hass.async_add_executor_job(self._load_data)
+        # targets 在事件循环里枚举（services 是循环内的对象，不要丢进 executor）
+        data["targets"] = await self._collect_notify_targets()
+        self._attr_native_value = int(data.get("unread") or 0)
         self._attr_extra_state_attributes = data
         self.async_write_ha_state()
 
@@ -1689,6 +1783,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     disk_sensor = DiskUsageSensor(hass, device_info)
     timer_elves_sensor = TimerElvesSensor(hass, device_info)
     today_in_history_sensor = TodayInHistorySensor(hass, device_info)
+    notification_sensor = NotificationSensor(hass, device_info)
     # 实体编组（挂在「编组设备」下）：
     #   sensor.ha_data_store_entity_groups  目录 sensor，属性即全量快照
     #   sensor.ha_data_store_group_entities 所有编组实体，属性只留 icon/name
@@ -1700,12 +1795,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
     hass.data.setdefault(DOMAIN, {})["automation_status_sensor"] = automation_status_sensor
     hass.data.setdefault(DOMAIN, {})["all_entities_sensor"] = all_entities_sensor
     hass.data.setdefault(DOMAIN, {})["timer_elves_sensor"] = timer_elves_sensor
+    hass.data.setdefault(DOMAIN, {})["notification_sensor"] = notification_sensor
     entities = [sensor, report_sensor, summary_sensor, user_actions_sensor,
                 automation_status_sensor, db_viewer_url_sensor,
                 helper_summary_sensor, power_all_sensor, whole_usage_sensor,
                 all_entities_sensor,
                 cpu_sensor, mem_sensor, disk_sensor, timer_elves_sensor,
-                today_in_history_sensor, entity_group_sensor,
+                today_in_history_sensor, notification_sensor, entity_group_sensor,
                 group_entities_sensor]
     # db_viewer 访问地址：启动时立即获取一次，后续低频刷新
     url, attrs = await db_viewer_url_sensor._fetch_url()
@@ -1862,6 +1958,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
         _LOGGER.info("[bridge] sensor 创建 %d 个实体", len(bridge_entities))
 
     async_add_entities(entities)
+
+    # ── 通知中心：60 秒兜底刷新 ──
+    # 正常路径由 NotificationManager 在投递/已读/删除后主动刷新（1 秒合并）；
+    # 这里兜「外部直接改库」；实体挂载时的首次读取在 async_added_to_hass 里。
+    try:
+        async_track_time_interval(
+            hass, notification_sensor.async_refresh_now, timedelta(seconds=60)
+        )
+    except Exception as e:  # noqa: BLE001
+        _LOGGER.warning("[HDS] 通知传感器兜底刷新注册失败: %s", e)
+
     # 供配置端（如「历史今日」排除实体保存后）主动触发刷新
     hass.data.setdefault(DOMAIN, {})["today_in_history_sensor"] = today_in_history_sensor
     # 历史今日：每整点刷新一次（分钟 0、秒 0）；设置实体变化时另有即时刷新

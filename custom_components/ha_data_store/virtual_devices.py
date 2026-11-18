@@ -381,14 +381,14 @@ class VirtualClimate(ClimateEntity, RestoreEntity):
     def __init__(self, entity_id: str, name: str, device_info: DeviceInfo,
                  temp_sensor_entity_id: str | None = None) -> None:
         from homeassistant.const import UnitOfTemperature
-        self._attr_temperature_unit = UnitOfTemperature.CELSIUS
+        self._attr_native_temperature_unit = UnitOfTemperature.CELSIUS
         super().__init__()
         self._attr_unique_id = f"{DOMAIN}_virtual_{entity_id}"
         self._attr_name = name
         self._attr_device_info = device_info
         self._attr_hvac_mode = HVACMode.OFF
-        self._attr_current_temperature = 24
-        self._attr_target_temperature = 24
+        self._attr_native_current_temperature = 24
+        self._attr_native_target_temperature = 24
         self._attr_fan_mode = "自动"
         self._attr_swing_mode = SWING_OFF
         self._temp_sensor_entity_id = temp_sensor_entity_id
@@ -401,8 +401,8 @@ class VirtualClimate(ClimateEntity, RestoreEntity):
             hvac = last.attributes.get("hvac_mode")
             if hvac and hvac in HVACMode.__members__:
                 self._attr_hvac_mode = HVACMode(hvac)
-            self._attr_current_temperature = last.attributes.get("current_temperature", 24)
-            self._attr_target_temperature = last.attributes.get("temperature", 24)
+            self._attr_native_current_temperature = last.attributes.get("current_temperature", 24)
+            self._attr_native_target_temperature = last.attributes.get("temperature", 24)
             self._attr_fan_mode = last.attributes.get("fan_mode", "自动")
             self._attr_swing_mode = last.attributes.get("swing_mode", SWING_OFF)
 
@@ -412,7 +412,7 @@ class VirtualClimate(ClimateEntity, RestoreEntity):
 
     async def async_set_temperature(self, **kwargs) -> None:
         if "temperature" in kwargs:
-            self._attr_target_temperature = kwargs["temperature"]
+            self._attr_native_target_temperature = kwargs["temperature"]
         self.async_write_ha_state()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
@@ -456,7 +456,7 @@ class VirtualClimateSensor(SensorEntity, RestoreEntity):
     async def _simulate_tick(self, now=None) -> None:
         """每 30 秒模拟温度趋近目标值。"""
         if self._climate._attr_hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
-            target = self._climate._attr_target_temperature
+            target = self._climate._attr_native_target_temperature
             current = self._attr_native_value or 22
             # 向目标趋近 6-12%
             diff = target - current
@@ -478,7 +478,7 @@ class VirtualClimateSensor(SensorEntity, RestoreEntity):
             self._attr_native_value = round(current + step, 1)
 
         # 同步到空调实体
-        self._climate._attr_current_temperature = self._attr_native_value
+        self._climate._attr_native_current_temperature = self._attr_native_value
         self.async_write_ha_state()
 
     def start_simulation(self, hass: HomeAssistant) -> None:
@@ -1847,13 +1847,13 @@ def _apply_snapshot_fields(entity: Any, snapshot: dict) -> None:
         try:
             cur = attrs.get("current_temperature")
             if cur is not None:
-                entity._attr_current_temperature = float(cur)
+                entity._attr_native_current_temperature = float(cur)
         except (TypeError, ValueError):
             pass
         try:
             target = attrs.get("temperature", attrs.get("target_temperature"))
             if target is not None:
-                entity._attr_target_temperature = float(target)
+                entity._attr_native_target_temperature = float(target)
         except (TypeError, ValueError):
             pass
         if attrs.get("fan_mode") is not None:

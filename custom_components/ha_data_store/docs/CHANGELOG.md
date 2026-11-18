@@ -1,5 +1,87 @@
 # 更新日志
 
+## 2026-11-16 — v6.1.1 通知附件 + 关联配置 + 自动化「HA推送」动作
+
+### 一、后端
+
+| 文件 | 内容 |
+|---|---|
+| `const.py` | 附件常量：最多 5 个、类型白名单、属性里每条带 2 个、快照目录 `www/chj/_notify_tmp`、代理接口黑名单（`.storage` / `.cloud` / `ssl` / `secrets.yaml` / `*.db*`）；VERSION → 6.1.1 |
+| `notifications.py` | `_normalize` 收 `attachments` / `from_config_id`；`_normalize_attachments`（按扩展名补 type/mime）；`_snapshot_entity`（camera/image 快照落盘）；`_resolve_attachments`（**路径/实体支持 jinja2 渲染** + `/config/` 前缀归一化 + 实体→路径 + 补 size）；`_migrate_sync`（老库 `ALTER TABLE` 补两列）；`_store_sync` 写新列；`row_to_item` 返回附件（brief 时截到 2 个 + `att_total` / `att_trimmed`） |
+| `http_api.py` | 新增 `NotificationAssetView` → `GET /notification_asset?key=&path=`：config 内任意路径的附件代理，`realpath` 防越界、黑名单防 `.storage`/私钥/数据库外泄、`web.FileResponse` 流式（支持 Range） |
+| `automations.py` | 新增 `{"notify": {...}}` 动作分支 + `_run_notify`（文本走 notify，附件只落库；`stop_on_error` 天然复用）；试运行文案补通知分支 |
+| `__init__.py` | 建表 DDL 补两列；服务 schema 补 `attachments` / `from_config_id`；注册 `NotificationAssetView` |
+| `services.yaml` | 同上两个字段的描述 |
+
+### 二、前端
+
+| 文件 | 内容 |
+|---|---|
+| `modules/cards/automation.js` | 执行动作新增「＋ 通知」按钮 + `_createAutoNotifyRow` / `_createAutoNotifyAttachRow`（标题 / 收件人 / 推送正文 / 详情 / 附件×5 / 打开页面 / 来源配置）+ 回填 + 保存校验 + 摘要 + 执行日志 |
+| `modules/cards/notice-center.js` | 附件渲染（图片缩略图 / 视频播放器 / 音频 / 文件下载；展开时拉单条补全 5 个）；图片点击全屏预览；`from_config_id` → 标题右侧「打开」按钮 → `RoomElvesStore.get()` 后按 `action` / `type` 打开窗口 |
+| `room-elves-card-styles.css` | `.nc-attach*` / `.nc-img-viewer` / `.nc-open-cfg` / `.auto-f-nc-*` |
+
+### 三、行为约定
+
+- 附件**不参与** `notify.*` 推送（手机只收文本），只落库由通知卡片渲染；
+- 附件路径允许 config 目录内任意位置，前端通过代理接口读取（`/local/` 直连，其它走代理）；
+- `from_config_id` 只是字符串，后端不解释；点条目本体仍是展开，点「打开」才弹窗口（避免误触）；
+- 附件最多 5 个，超出截断；`sensor.latest` 里每条只带 2 个（其余走单条 API）。
+
+### 四、验证
+
+- `Y:\tmp\_test_notifications.py`：53 项断言（含附件规整 / 实体快照 / 属性截断 / 老库补列迁移）。
+- `src/plan/notice-center-selftest.mjs`：31 项。
+- 前端构建通过并同步 `Z:\www\chj\`。
+
+---
+
+## 2026-11-16 — v6.1.0 通知中心（HA 官方推送通道 + 历史）
+
+> 本批只做「通道」：后端统一调 `notify.*` 投递 + 落库，前端负责展示与已读。
+> 自动化卡片的「HA推送」动作（含图片等富内容）留到下一批。
+
+### 一、后端
+
+| 文件 | 内容 |
+|---|---|
+| `notifications.py`（新） | `NotificationManager`：`send()` 唯一投递入口（模板渲染 / 规整 / 多目标投递 / 落库 / 传感器刷新）+ `list_notifications` / `get` / `mark_read` / `mark_unread` / `remove` / `cleanup` / `targets`；`build_sensor_stats()` 纯函数供传感器调用 |
+| `const.py` | `TABLE_NOTIFICATIONS` + 通知常量（级别白名单 / 保留 90 天 2000 条 / latest 20 条）；VERSION → 6.1.0 |
+| `__init__.py` | 建表 `notifications` + 2 个索引；装配 `NotificationManager`；注册 4 个 HTTP View；注册服务 `ha_data_store.send_notification`；卸载时停止 |
+| `http_api.py` | `NotificationsView`（GET 分页 / POST 发送 / DELETE 批量删）、`NotificationItemView`（GET 全文 / PUT 已读 / DELETE）、`NotificationsMarkView`（批量已读）、`NotificationTargetsView`（可用收件人） |
+| `sensor.py` | `NotificationSensor` → `sensor.ha_data_store_notifications`（state = 未读数；属性 `latest` 只留 20 条、`targets` 为可用收件人清单，二者都进 `_unrecorded_attributes` 不写 recorder；`friendly_name` 固定「通知」——显式 `has_entity_name=False` + 注册表名称修正） |
+| `services.yaml` | `send_notification` 字段定义（title / message / detail / targets / level / category / url / dry） |
+| `db_viewer.html` | API 地址生成器新增「🔔 通知中心」分组（列表 / 单条 / 收件人 / 标记 / 删除 / 发送）+ 独立参数块 `apiNoticeRow`（id / limit / offset / category / level / since / 仅未读 / ids / 已读方向 / 批量 mode） |
+
+### 二、前端
+
+| 文件 | 内容 |
+|---|---|
+| `modules/cards/notice-center.js`（新） | 通知中心卡片（列表 / 筛选 / 展开详情 / 已读 / 删除 / 加载更多）+ `_checkNoticePopup` 自动弹出 + `NC_ALERT` 单例（防多实例弹多个） |
+| `room-elves-card.js` | 注册 `notice_center`（MIXIN_CHAIN / COMPOSITE_CARD_REGISTRY） |
+| `modules/core/actions.js` | `action: card` 支持 `notice_center` |
+| `modules/core/subscriptions.js` | 所有实例无条件订阅 `sensor.ha_data_store_notifications`（不要求页面放了通知卡片） |
+| `modules/core/lifecycle.js` | hass 更新时调用 `_checkNoticePopup`（实体状态驱动，**不监听页面可见性**） |
+| `modules/cards/card-updater.js` | 通知弹窗打开时刷新列表 |
+| `modules/popup/popup-core.js` | 弹窗缓存新增 `noticePopup` |
+| `room-elves-card-styles.css` | `.nc-*` 样式（级别色 / 未读点 / 空态 / 窄屏） |
+
+### 三、行为约定
+
+- **投递**：`targets` 必须是 `notify.<service>`（排除 `send_message` / `notify` 两个通用项）；多目标逐个调用，失败只记该目标 → `status = ok / partial / failed`，不影响其它目标、不影响调用方。
+- **两套文本**：`message` 给手机通知栏（短），`detail` 给通知卡片（长，空则回退 message）。
+- **自动弹出**：未读数 > 0 且当前没弹窗 → 弹；关闭弹窗即标记已读；未关闭就切走/杀进程则下次启动再弹一次（符合"没看完"）。
+- **历史**：保留 90 天 / 2000 条；清理只裁已读的老数据，未读一律保留。
+- **模板**：`title` / `message` / `detail` 含 `{{ }}` 才渲染，失败降级原文；`targets` / `url` / `level` / `category` 不渲染。
+
+### 四、验证
+
+- `Y:\tmp\_test_notifications.py`：45 项后端逻辑断言（规整 / 投递 / 落库 / 分页 / 已读 / 删除 / 清理 / 统计 / dry）。
+- `src/plan/notice-center-selftest.mjs`：27 项前端断言（数据解析 / 自动弹出判定 / 未读短路 / 关闭即已读 / 时间格式）。
+- 构建通过（rollup 产物 4,613,494 字节）。
+
+---
+
 ## 2026-11-03 — v6.0.4 空调 / 窗帘定时支持「同时执行」
 
 | 项 | 内容 |

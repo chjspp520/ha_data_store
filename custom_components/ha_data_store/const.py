@@ -40,6 +40,7 @@ TABLE_AUTOMATION_LOGS = "automation_logs"
 TABLE_POWER_METER_CONFIGS = "power_meter_configs"
 TABLE_POWER_ENERGY_DAILY = "power_energy_daily"
 TABLE_METRICS_CATALOG = "metrics_catalog"
+TABLE_NOTIFICATIONS = "notifications"
 
 # ── 设备控制来源（device_history.on/off_source_*）────────────────────────────
 # 记录「这次状态变化是被什么控制的」，前端只看 device_history 一张表即可展示来源：
@@ -329,8 +330,40 @@ ENTITY_GROUP_DOMAIN_SERVICE_MAP = {
     },
 }
 
+# ── 通知中心（v6.1.0）────────────────────────────────────────────────────────
+# 通道只有 HA 官方推送 notify.*：后端统一投递 + 落库，前端读 sensor / API 展示。
+NOTIFICATION_LEVELS = ("info", "success", "warning", "error")
+NOTIFICATION_SENSOR_ID = "sensor.ha_data_store_notifications"
+NOTIFICATION_RETENTION_DAYS = 90    # 历史保留天数（唯一条数闸门：不再限制总条数）
+NOTIFICATION_RETENTION_MAX = 2000   # 【已停用】原「历史最大条数」；保留常量供老代码引用
+NOTIFICATION_LATEST_LIMIT = 20      # 【旧】sensor 属性里保留的条数（v6.2 起改用 TODAY_LATEST_MAX）
+# sensor 属性里「今日」最多保留的条数（软上限）：
+#   · 统计（state / by_*）始终按**今日全量**算，不受这个上限影响；
+#   · 只有 latest 数组受它限制 —— 防"刷屏那天"属性 JSON 膨胀成几百 KB，跟着每次 hass 推送走。
+#   · 超出部分由前端走 /notifications（since/until/offset）翻页。
+NOTIFICATION_TODAY_LATEST_MAX = 50
+NOTIFICATION_DETAIL_ATTR_MAX = 800  # sensor 属性里 detail 的最大长度（超出前端走单条 API 取全文）
+NOTIFICATION_TITLE_MAX = 120
+NOTIFICATION_MESSAGE_MAX = 500
+NOTIFICATION_DETAIL_MAX = 4000
+NOTIFICATION_CLEANUP_HOUR = 4       # 每天几点清理过期历史
+
+# ── 通知附件（v6.1.1）──
+#   · 附件只落库、不参与 notify.* 推送；前端通知卡片自己渲染
+#   · 路径允许 config 目录内任意位置，读取走 notification_asset 代理接口
+NOTIFICATION_ATTACH_MAX = 5
+NOTIFICATION_ATTACH_KINDS = ("image", "video", "audio", "file")
+# sensor.latest 里每条最多带几个附件（其余走单条 API，控属性体积）
+NOTIFICATION_ATTACH_ATTR_MAX = 2
+# 实体来源（camera/image）快照的落盘目录（相对 config 目录）
+NOTIFICATION_TMP_SUBDIR = ("www", "chj", "_notify_tmp")
+# 附件代理接口禁止访问的路径（相对 config；防 .storage / 私钥 / 数据库本体外泄）
+NOTIFICATION_ASSET_DENY_DIRS = (".storage", ".cloud", "ssl")
+NOTIFICATION_ASSET_DENY_FILES = ("secrets.yaml", "configuration.yaml")
+NOTIFICATION_ASSET_DENY_SUFFIX = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3")
+
 # 系统版本号（与 manifest.json 同步）
-VERSION = "6.0.10"
+VERSION = "6.1.1"
 
 # ── 自动化执行引擎版本 ──
 # 独立于集成版本（VERSION）：引擎能力单独演进，集成版本跟整个仓库走。

@@ -8,7 +8,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 | **存储** | 统一落库 SQLite（WAL 模式）；支持整库备份与「排队 + 重启后原子应用」式恢复 |
 | **导入导出** | 数据浏览页把 CSV / JSON 导入任意表（字段映射 + 固定值、追加 / Upsert、自动建表与补列），并把表数据或空模板导出为 CSV |
 | **对外** | 完整 HTTP API（API Key 鉴权、安全沙箱下的自定义 SQL 路由）、**实体→网络（读数据 / 控制设备）**、实体→JSON 文件、文件源 / API 源 ↔ 实体映射 |
-| **交互** | 远程 HA 设备桥接（WebSocket）、虚拟设备、原生辅助元素自管实体化、轻量自动化引擎 |
+| **交互** | 远程 HA 设备桥接（WebSocket）、虚拟设备、原生辅助元素自管实体化、轻量自动化引擎、**通知中心（HA 官方推送 + 历史）** |
 | **分析展示** | 内置数据库浏览器、可视化查询构造器、通用指标引擎、家庭洞察、今日家庭状态中文总结、系统健康监控传感器 |
 | **安全** | API 访问 / 数据库浏览 / 数据库修改 / 实体网络控制 等独立开关，控制类接口另有读写凭证分离、动作白名单、参数锁定与审计日志 |
 
@@ -45,6 +45,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
   - [22. 数据导入 / 导出（CSV · JSON）](#22-数据导入--导出csv--json)
   - [23. 个人账单（查询 / 分析 / 备注）](#23-个人账单查询--分析--备注)
   - [24. 实体编组（含前端调用说明）](#24-实体编组含前端调用说明)
+  - [25. 通知中心（HA 官方推送 + 历史）](#25-通知中心ha-官方推送--历史)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -101,6 +102,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 | 📞 **通讯数据** | 属性提取新增 `comm` 采集模式：按数组展开写入 **18 个固定字段**（我方/对方号码、归属地、姓名、通讯时间、地点、消息类型、数据来源、呼叫类型、时长、金额、流量、流量类型、内容、图片路径、我的坐标、对方运营商、对方坐标），列名与类型由系统固定，目标列可选源字段或**直接填固定值**；`2026/9/1 17:24` 自动规范化为 `2026-09-01 17:24:00`，`3分53秒` 等中文时长自动换算为秒，`1.5GB` / `512MB` 等流量自动换算为 MB；`comm.py` 提供明细/日期/排行/趋势/汇总/联系人/地点/时段 8 类查询，API 工具含专属分组 |
 | 📥 **数据导入 / 导出** | 数据浏览页把 CSV / JSON 导入任意表：字段映射 + 固定值、**追加 / Upsert**（多列唯一键）、自动建表与补列、🧪 试运行、分批进度与错误明细；基础值转换（`¥1,234.5`→`1234.5`、`2026/9/1`→`2026-09-01`）；导出表数据或空模板为 CSV（UTF-8 BOM，Excel 友好） |
 | 🧾 **个人账单** | 独立模块 `personal_bill.py` + 新表 `personal_bills`（支付宝 / 微信账单落库）：**42 类查询/分析**（明细、按单号/账号/多名称、多值分类汇总、数据可用性多档、分组/趋势/排行、交叉汇总、资金流向、净现金流、同比、异常、定期订阅、固定开销、金额分位数等）+ **写接口**（增 / 批 / 改 / 删）；支持**多名称**与**逗号多值**过滤、`fields` 返回字段**手动点选**、可编辑备注 `note`（`POST /bill/remark` 单独提交、`GET /bill/notes` 取候选供点击） |
+| 🔔 **通知中心** | 后端统一调 HA 官方推送 `notify.*` 并把结果落库留痕：服务 `ha_data_store.send_notification` + 6 个 HTTP 接口（列表 / 单条 / 收件人 / 标记 / 删除 / 发送）；传感器 `sensor.ha_data_store_notifications`（state = 未读数，属性含最近 20 条 + **可用收件人清单**）；前端 room-elves-card 的 `notice_center` 卡片按「实体状态驱动」自动弹出（关闭即已读），不新建 WS 通道；与微信 ClawBot 无关 |
 | 🔗 **实体编组** | 独立模块 `entity_group_store.py` / `entity_group_views.py` / `entity_group_entities.py` / `entity_group_actions.py` + 三张新表（`entity_groups` / `entity_group_members` / `entity_groups_meta`）：把一组实体当一个设备控制，**每个启用编组自动生成一个对应域的实体**——**灯光组 `light.hds_eg_*`、窗帘组 `cover.hds_eg_*`、媒体组 `media_player.hds_eg_*`、空调组 `climate.hds_eg_*`**、其余（socket / 混编 / 设备）为聚合开关 `switch.hds_eg_*`（**实体域只由「类型」决定，与成员域无关**，域平台不可用则降级为开关；成员是 switch 的灯/窗帘也能用 `turn_on/off` 兜底控制；亮度/色温/颜色、位置、音量、温度/模式/风速/摆风都直接广播给成员；state 由成员实时汇总，含 `on_count` / `partial` / `missing` / `on_entities`；单监听 + 反向索引只刷受影响实体；编组 id 可自定义、改名即换实体 id、域变化自动重建）；编组动作与 `automations.actions` 同构并支持 `$group` / `$group:light` 占位符；REST 全套 `/api/ha_data_store/entity_groups`（列表/新建/详情/全量·局部更新/删除/成员增删改排序/批量/排序/按实体反查/自检 `_diag`），db_viewer「🔗 实体编组」可视化编辑；所有编组实体挂在独立**「编组设备」**下，含两个传感器：`sensor.ha_data_store_entity_groups`（目录全量快照）、`sensor.ha_data_store_group_entities`（所有编组实体，精简投影 `entity_id`/`name`/`icon`，供前端与语音助手直接遍历） |
 
 ---
@@ -1979,6 +1981,201 @@ data:
 
 ---
 
+### 25. 通知中心（HA 官方推送 + 历史）
+
+> v6.1.0 新增。定位是**只做通道**：把调用方给的内容原样转发到 HA 官方推送 `notify.*`，并落库留痕；
+> **内容与收件人由调用方决定**（本批是服务 / HTTP，下一批是前端自动化卡片的「HA推送」动作）。
+
+#### 25.1 数据流
+
+```
+调用方（服务 / HTTP / 下一批的自动化动作）
+      │  title / message / detail / targets / url
+      ▼
+NotificationManager.send()
+      ├─ 规整：级别白名单、标题/正文截断、targets 校验
+      ├─ 逐个调 notify.<service>（title + message + data.url）
+      ├─ 落库 notifications 表（含每个目标的投递结果 status / results）
+      └─ 刷新 sensor.ha_data_store_notifications（state = 未读数）
+      ▼
+手机通知栏：标题 = title，正文 = message
+      │ 用户点击 → HA 打开 data.url
+      ▼
+前端通知卡片：读到未读 → 自动弹出，显示 detail 全文
+```
+
+设计要点：**不新建 WebSocket 事件通道**。前端靠 HA 对 `sensor` 的状态推送 + 自己的实体订阅感知新通知，
+停机/断链时最多是"少弹一次"，历史仍可从 API 补齐。
+
+#### 25.2 传感器实体
+
+`sensor.ha_data_store_notifications`（名称「通知」，entity_id 固定）：
+
+| 项 | 说明 |
+|---|---|
+| `state` | **未读条数**（纯数字；前端据此判断是否自动弹窗） |
+| `attributes.unread` / `total` / `today` | 未读 / 总数 / 今日条数 |
+| `attributes.by_level` | `{info: n, success: n, warning: n, error: n}` |
+| `attributes.by_category` | 未读按分类计数 |
+| `attributes.latest` | 最近 **20** 条：`id / ts / level / category / title / message / detail(超长截断) / detail_truncated / targets / status / url / source_name / read / read_at` |
+| `attributes.targets` | **可用收件人**：`[{service: "notify.mobile_app_xxx", name: "手机"}]`（排除 `send_message` / `notify` 两个通用项） |
+
+`latest` 与 `targets` 已加入 `_unrecorded_attributes`（不写 recorder 历史）；超过 20 条走 API 分页。
+
+#### 25.3 服务
+
+```yaml
+service: ha_data_store.send_notification
+data:
+  title: 门口有人按铃            # 可选；空则「通知」
+  message: 14:32 检测到访客       # 必填 —— 手机通知栏正文（短）
+  detail: 14:32:07 门口摄像头…    # 可选 —— 通知卡片里显示的详细内容（长，空则回退 message）
+  targets: notify.mobile_app_ailex_de_iphone15pro   # 必填；多个用逗号
+  level: warning                 # info / success / warning / error
+  category: 安防                  # 可选
+  url: /lovelace/0               # 可选；点击通知打开哪一页
+  attachments:                   # 可选，最多 5 个；只内联到通知卡片，不随推送发出
+    - {type: image, path: media/snap.jpg}
+    - {type: image, entity: camera.doorbell}   # 后端拍快照后落盘
+    - {type: file,  path: www/chj/report.pdf, name: 周报}
+  from_config_id: all_curtain    # 可选；填了通知里出现「打开」按钮（见 25.5）
+  users: ["<user_id>"]           # 可选；按 HA 用户推送（自动展开成该用户全部设备）
+  level: warning                 # 可选；内置 info/success/warning/error/message/action，也可自定义
+  category: 安防                  # 可选；卡片里的分类标签
+  dry: false                     # true = 只校验并返回渲染结果，不推送、不落库
+```
+
+#### 25.4 HTTP 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/ha_data_store/notifications` | 列表：`limit / offset / unread_only / category / level / since` |
+| GET | `/api/ha_data_store/notifications/{id}` | 单条全文（`latest` 里 detail 被截断时用） |
+| GET | `/api/ha_data_store/notification_targets` | 可用收件人清单 |
+| GET | `/api/ha_data_store/notification_users` | **HA 用户 + 各自名下设备**：动作行「收件用户 / 通知设备」下拉的数据源 |
+| GET | `/api/ha_data_store/notification_asset?path=` | **附件代理**：config 目录内任意文件（`realpath` 防越界 + `.storage`/私钥/数据库黑名单），流式返回、支持 Range |
+| POST | `/api/ha_data_store/notifications` | 发送一条（body 即 25.3 的字段；`?dry=1` 只预览） |
+| POST | `/api/ha_data_store/notifications_mark` | 批量已读：`{"ids":[1,2]}` / `{"all":true}` / `{"read":false}` 标未读 |
+| PUT | `/api/ha_data_store/notifications/{id}` | 单条已读状态：`{"read":true}` |
+| DELETE | `/api/ha_data_store/notifications` | 删除：`ids=1,2` 或 `mode=read`（清已读）/ `mode=all` |
+| DELETE | `/api/ha_data_store/notifications/{id}` | 单条删除 |
+
+列表响应：`{"success":1, "total":123, "unread":3, "count":20, "items":[...]}`。
+全部接口与 `action_log` 一致，用 `?key=<API Key>` 鉴权。
+
+```bash
+# 未读列表
+curl "http://HA:8123/api/ha_data_store/notifications?key=KEY&unread_only=1&limit=10"
+
+# 发一条
+curl -X POST "http://HA:8123/api/ha_data_store/notifications?key=KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"测试","message":"推送正文","detail":"卡片详情","targets":["notify.mobile_app_xxx"]}'
+
+# 全部已读
+curl -X POST "http://HA:8123/api/ha_data_store/notifications_mark?key=KEY" \
+  -H "Content-Type: application/json" -d '{"all":true}'
+```
+
+#### 25.5 前端 UI（room-elves-card）
+
+**① head 模式：顶部下拉抽屉（推荐）**
+
+```yaml
+type: custom:room-elves-card
+head: true
+primary_text_variant: minimal
+theme: input_select.theme
+dark_light_theme: dark,light
+```
+
+`head: true` 的卡片顶部中央会出现一根**小拉手**（`notice_drawer: false` 可关）：
+
+| 操作 | 效果 |
+|---|---|
+| 点击拉手 | 抽屉从视口顶部滑下（高度 `min(560px, 72vh)`） |
+| 在拉手上向下拖 | 跟手拉出，松手按位移吸附（超过 30% 展开，否则回弹） |
+| 抽屉内列表上滑 / 点遮罩 / 拖抽屉顶部把手 | 收起 |
+| 有未读 | 拉手变主题色 + 右侧红点 |
+
+- 抽屉是 `shadowRoot` 级 `fixed` 层，不占卡片布局、不进页面滚动链；
+- 拉手 `touch-action:none` + `touchmove` 主动 `preventDefault`，**不会触发系统下拉刷新**；
+- 列表区 `overscroll-behavior: contain`，滚到底不会带动页面；
+- 面板**没有头部**：只有筛选胶囊（frame/card 的 `createSegTabs`）+ 列表 + 右下角「全部已读」；
+- 关闭抽屉 = 本次展示的未读**批量标记已读**（未读归零后自然不会再弹）。
+
+**② 独立卡片 / 弹窗**
+
+```yaml
+# 独立卡片
+- type: custom:room-elves-card
+  buttons:
+    - type: notice_center
+      limit: 20
+
+# 按钮点开弹窗（action: card）
+- type: custom:room-elves-card
+  buttons:
+    - name: 通知
+      icon: mdi:bell
+      tap_action:
+        action: card
+        card: notice_center
+
+# popup_card 里嵌一张通知卡
+      tap_action:
+        action: popup_card
+        card:
+          type: notice_center
+```
+
+**③ 自动弹出**（与 `auto_open_entity` 无关）：
+
+- 所有 `room-elves-card` 实例无条件订阅 `sensor.ha_data_store_notifications`，页面不放通知卡片也能触发；
+- 触发：通知产生（sensor 状态推送）或页面首次拿到 hass；
+- 判定：未读数 > 0 且当前没有打开 → **优先展开页面上的抽屉**；页面没有 head 抽屉时回退到 `showPopup`；
+- 关闭 → 把本次展示的未读批量标记已读；
+- 没关闭就切走/杀进程 → 未读保留，下次启动再弹一次（符合"用户没看完"）；
+- 多实例由模块级单例 `NC_ALERT` / `NC_DRAWERS` 防重叠，一个页面只会开一个。
+
+面板内支持：级别色条/图标、未读点、筛选（全部/未读/警告+错误）、点击展开详情（被截断时自动拉单条全文）、
+单条已读/未读、删除、全部已读。
+
+**附件与关联配置**（v6.1.1）：
+
+| 能力 | 说明 |
+|---|---|
+| 图片 | 折叠时 1 张缩略图（多张显示 `+N`），展开后全部显示；点击全屏预览 |
+| 视频 / 音频 | `<video controls>` / `<audio controls>`，走附件代理，支持拖进度 |
+| 其它文件 | 图标 + 文件名 + 大小，点击下载（新窗口） |
+| 附件路径 | `/local/...` 直连；其它 config 内路径走 `notification_asset` 代理（需配 `api_base_url` + key）；**支持 jinja2**（含 `{{ }}` / `{% %}` 才渲染，配置时存原文、执行时渲染）与 `/config/...` 写法 |
+| 只看我的 | 卡片配 `notice_scope: mine`（默认）只看当前登录用户收到的通知；`all` 看全部 |
+| 关联配置 | 配了 `from_config_id` 时标题右侧出现「打开」按钮 → `RoomElvesStore.get(id)` 后按其 `action` / `type` 打开窗口；**点条目本体仍然是展开**（避免误触） |
+
+#### 25.6 行为约定与边界
+
+| 项 | 约定 |
+|---|---|
+| 收件人校验 | 必须是 `notify.<service>`，且 `hass.services.has_service` 命中；否则该目标失败，其它目标继续 |
+| 多目标结果 | `status = ok / partial / failed`，`results` 逐目标记录 `{target, ok, error}`；失败**不影响**调用方后续动作 |
+| 两套文本 | `message` 给手机通知栏（短），`detail` 给卡片（长，空则回退 `message`） |
+| 模板 | `title` / `message` / `detail` 含 `{{ }}` 才渲染（Jinja2，失败降级原文）；`targets` / `url` / `level` / `category` **不渲染** |
+| 保存策略 | 90 天 / 2000 条；每天 04:00 清理，只裁已读的老数据，未读一律保留 |
+| 长度上限 | 标题 120 字、推送正文 200 字、详情 4000 字（超出截断，`detail_truncated=true`） |
+| 与 ClawBot 的区别 | 微信 `clawbot` 动作是单渠道直发、不留痕；通知中心是多目标 + 历史 + 已读，下一批自动化动作里会提供「HA推送」行 |
+| 与 `persistent_notification` 的区别 | 本模块**不**创建 HA 侧边栏持久通知；如需网页端也能看到，自行额外调用 `persistent_notification.create` |
+
+#### 25.7 排障
+
+| 现象 | 排查 |
+|---|---|
+| 手机收不到 | 日志搜 `[notification]`；看返回值 `status` / `results[].error`（`service_not_found` = 服务名写错） |
+| 有通知但页面不弹 | `sensor.ha_data_store_notifications` 的 `state` 是否为数字且 > 0；页面上是否至少有一个 `room-elves-card` |
+| 弹过一次后不再弹 | 关闭弹窗会标记已读（未读归零）；新通知会重新弹 |
+| 名称显示成「设备名 + 通知」 | 到「设置 → 实体」搜 `notifications`，把「名称」清空保存一次（清掉旧版残留的自定义名） |
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -2411,6 +2608,32 @@ curl ".../entity_groups/version?key=$KEY"
 5. 上限：单编组最多 **200** 个成员、**12** 个预设动作（单个动作最多 20 条行为），
    编组 `name` ≤ 50 字符；`id` 一旦被外部自动化引用，建议不要再改。
 
+### 通知接口
+
+独立路径（不走 `/query?type=`），鉴权与其它接口一致（URL 或 Header 带 `key`）。
+字段、行为与排障见 [25. 通知中心](#25-通知中心ha-官方推送--历史)。
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/ha_data_store/notifications` | GET | 列表：`limit` / `offset` / `unread_only` / `category` / `level` / `since`（毫秒） |
+| `/api/ha_data_store/notifications` | POST | 发送：body 为 `title` / `message` / `detail` / `targets` / `level` / `category` / `url`；`?dry=1` 只预览 |
+| `/api/ha_data_store/notifications` | DELETE | 删除：`ids=1,2`，或 `mode=read` / `mode=all` |
+| `/api/ha_data_store/notifications/{id}` | GET | 单条全文 |
+| `/api/ha_data_store/notifications/{id}` | PUT | 已读状态：`{"read":true}` / `{"read":false}` |
+| `/api/ha_data_store/notifications/{id}` | DELETE | 单条删除 |
+| `/api/ha_data_store/notifications_mark` | POST | 批量已读：`{"ids":[...]}` / `{"all":true}`；`{"read":false}` 标未读 |
+| `/api/ha_data_store/notification_targets` | GET | 可用收件人清单 `[{service, name}]` |
+| `/api/ha_data_store/notification_asset` | GET | 附件代理：`path` 为 config 相对或绝对路径；越界/`.storage`/私钥/数据库一律 403 |
+
+**错误码（body 的 `error` 字段）**
+
+| error | 说明 |
+|---|---|
+| `no_target` | 未提供 `targets` |
+| `invalid_target` | 目标不是 `notify.<service>` 形式（形如 `invalid_target:xxx`） |
+| `empty_message` | `message` 为空 |
+| `service_not_found` | 目标服务在 hass 里不存在（记在该目标的 `results` 上，不算整体失败） |
+
 ### 管理接口（仅局域网）
 
 以下接口仅允许局域网同网段访问，需要管理员密码登录。
@@ -2627,6 +2850,7 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `helper_entities` | 辅助元素持久化（原生 helper 导入为本集成自管实体，含 source_type/source_entity_id/extra_config） |
 | `power_meter_configs` | 功率→用电计量登记表（功率实体/设备名/房间/id_slug/日用电量实体/单位/启用；`enabled=0` 表示已取消登记并归档到回收站，行保留以便恢复与沿用） |
 | `power_energy_daily` | 用电计量日表（每功率实体每天一条 kwh，月/年由日表实时聚合） |
+| `notifications` | 通知中心（`ts` 毫秒时间戳 / `level` / `category` / `title` / `message` 推送正文 / `detail` 卡片详情 / `targets` JSON / `status` / `results` JSON / `url` / `payload` 原始入参 / `attachments` 附件 JSON（最多 5 个，只给前端渲染） / `from_config_id` 关联配置 / `user_ids` 涉及的用户 ID（供「只看我的」过滤） / `source_*` 来源 / `read` / `read_at`）；保留 90 天 2000 条 |
 
 ---
 
@@ -2722,6 +2946,32 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v6.1.0 通知中心：HA 官方推送 + 历史留痕（2026-11-16）
+
+> 本批只做「通道」：后端统一调 `notify.*` 投递并落库，前端负责展示与已读。
+> 详细用法见 [25. 通知中心](#25-通知中心ha-官方推送--历史)。
+
+**一、后端**
+
+| 文件 | 改动 |
+|---|---|
+| `notifications.py`（新） | `NotificationManager`：`send()` 唯一投递入口（规整 / 多目标投递 / 落库 / 传感器刷新）+ 列表 / 单条 / 已读 / 删除 / 清理 / 收件人；`build_sensor_stats()` 供传感器调用 |
+| `const.py` | `TABLE_NOTIFICATIONS` + 级别白名单 + 保留策略（90 天 / 2000 条） |
+| `__init__.py` | 建表 + 2 索引；装配 Manager；注册 4 个 View；服务 `ha_data_store.send_notification`；卸载清理 |
+| `http_api.py` | `notifications`（列表/发送/删除）、`notifications/{id}`（单条/已读）、`notifications_mark`（批量）、`notification_targets`（收件人） |
+| `sensor.py` | `NotificationSensor`（state = 未读数；属性含最近 20 条 + 可用收件人；名称固定「通知」） |
+| `db_viewer.html` | API 工具新增「🔔 通知中心」分组（6 个选项 + 独立参数块） |
+
+**二、前端（room-elves-card）**
+
+- 新卡片 `notice_center`：独立卡 / `action: card` 弹窗 / `popup_card` 三种形态；
+- 自动弹出：所有实例无条件订阅 `sensor.ha_data_store_notifications`，未读 > 0 且当前无弹窗时弹出，**关闭弹窗即批量标记已读**；
+- 不新建 WebSocket 通道、不依赖 `auto_open_entity`、不监听页面可见性。
+
+**三、下一批**
+
+自动化卡片里的「HA推送」动作行（标题 / 推送正文 / 详情 / 收件人 / 打开页面 + 图片等富内容）。
 
 ### v6.0.0 实体编组：实体域只由「类型」决定 + ID 前缀固定 + 前端调用说明（2026-10-26）
 

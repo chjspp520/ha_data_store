@@ -566,6 +566,15 @@ class AutomationManager:
                                 + str(r.get("target") or "") + "："
                                 + str(r.get("resolved") or "")
                             )
+                    elif r.get("notify"):
+                        if r.get("error"):
+                            would_run.append("✗ 通知：" + str(r["error"]))
+                        else:
+                            would_run.append(
+                                "发通知 → " + str(len(r.get("targets") or [])) + " 个收件人："
+                                + str(r.get("resolved") or "")
+                                + ("（附件 %s 个）" % r["att_count"] if r.get("att_count") else "")
+                            )
                     elif str(r.get("service") or "").strip():
                         would_run.append(str(r["service"]) + (
                             " " + str(r.get("entity_id") or "") if r.get("entity_id") else ""
@@ -1133,6 +1142,92 @@ class AutomationManager:
                 except OSError:
                     pass
 
+    async def _run_notify(
+        self, results: list[dict], idx: int, cfg: dict,
+        auto: dict | None, dry: bool,
+    ) -> None:
+        """执行一条「HA推送」动作。
+
+        文本走 notify.* 真推送；attachments 只落库（内联进通知卡片），不参与推送。
+        """
+        result: dict[str, Any] = {
+            "index": idx, "service": "", "entity_id": "", "data": {},
+            "ok": False, "skipped": False, "error": "", "notify": True,
+        }
+        results.append(result)
+
+        targets = cfg.get("targets")
+        if isinstance(targets, str):
+            targets = [
+                x.strip() for x in targets.replace("，", ",").split(",") if x.strip()
+            ]
+        if not isinstance(targets, (list, tuple)):
+            targets = []
+        targets = [str(t).strip() for t in targets if str(t or "").strip()]
+
+        # 收件用户（HA user_id）：send() 里会展开成该用户名下的 notify 服务
+        raw_users = cfg.get("users")
+        if isinstance(raw_users, str):
+            raw_users = [
+                x.strip()
+                for x in raw_users.replace("，", ",").split(",") if x.strip()
+            ]
+        if not isinstance(raw_users, (list, tuple)):
+            raw_users = []
+        users = [str(u).strip() for u in raw_users if str(u or "").strip()]
+
+        result["targets"] = targets
+        result["users"] = users
+        if not targets and not users:
+            result["error"] = "没有选择通知设备或收件用户"
+            return
+
+        manager = self.hass.data.get(DOMAIN, {}).get("notification_manager")
+        if manager is None:
+            result["error"] = "通知模块未就绪（集成尚未加载完成）"
+            return
+
+        attachments = cfg.get("attachments")
+        if not isinstance(attachments, (list, tuple)):
+            attachments = []
+        result["att_count"] = len(attachments)
+
+        payload = {
+            "title": str(cfg.get("title") or ""),
+            "message": str(cfg.get("message") or ""),
+            "detail": str(cfg.get("detail") or ""),
+            "level": str(cfg.get("level") or "info"),
+            "category": str(cfg.get("category") or ""),
+            "targets": targets,
+            "users": users,
+            "url": str(cfg.get("url") or ""),
+            "attachments": list(attachments),
+            "from_config_id": str(cfg.get("from_config_id") or ""),
+        }
+        source = {
+            "type": "automation",
+            "id": str((auto or {}).get("id") or ""),
+            "name": str((auto or {}).get("name") or ""),
+            "trigger_type": str((auto or {}).get("trigger_type") or ""),
+        }
+
+        try:
+            out = await manager.send(payload, source=source, dry=dry)
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = str(exc)[:300]
+            return
+
+        if not out.get("success"):
+            result["error"] = str(out.get("error") or "发送失败")
+            return
+
+        result["ok"] = True
+        result["dry"] = bool(out.get("dry"))
+        result["status"] = out.get("status") or ""
+        result["notification_id"] = out.get("id")
+        result["results"] = out.get("results") or []
+        result["resolved"] = str((out.get("payload") or {}).get("message") or "")
+
     async def _execute_actions(
         self, actions: list, stop_on_error: bool, auto: dict | None = None,
         dry: bool = False,
@@ -1146,6 +1241,8 @@ class AutomationManager:
           {"assign": {"to": 实体, "template": "{{ … }}"}}         把模板结果赋给目标实体
           {"assign": {"to": 实体, "value": "固定内容"}}           直接赋一个固定值
           {"clawbot": {"kind": …, "entity"|"path"|"message": …}}  发微信（文字/图片/视频/语音/文件）
+          {"notify": {"title"…, "message"…, "targets": […], "attachments": […]}}
+                                                                 发 HA 推送（附件只进通知中心）
 
         auto 传入时，会在每次服务调用前把目标实体登记到 source_registry，
         供 device_history 标记「这次状态变化是自动化造成的」（纯内存旁路）。
@@ -1185,6 +1282,14 @@ class AutomationManager:
             clawbot = act.get("clawbot")
             if isinstance(clawbot, dict):
                 await self._run_clawbot(results, idx, clawbot, auto, dry)
+                if stop_on_error and results and not results[-1].get("ok") \
+                        and not results[-1].get("skipped"):
+                    break
+                continue
+            # ──【v6.1.1】HA 推送：{"notify": {"title"… , "targets": […], …}} ──
+            notify = act.get("notify")
+            if isinstance(notify, dict):
+                await self._run_notify(results, idx, notify, auto, dry)
                 if stop_on_error and results and not results[-1].get("ok") \
                         and not results[-1].get("skipped"):
                     break
