@@ -363,7 +363,7 @@ NOTIFICATION_ASSET_DENY_FILES = ("secrets.yaml", "configuration.yaml")
 NOTIFICATION_ASSET_DENY_SUFFIX = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3")
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "6.1.1"
+VERSION = "6.2.9"
 
 # ── 自动化执行引擎版本 ──
 # 独立于集成版本（VERSION）：引擎能力单独演进，集成版本跟整个仓库走。
