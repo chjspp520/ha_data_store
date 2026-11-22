@@ -5387,6 +5387,10 @@ def _register_api_views(hass: HomeAssistant, db_path: str) -> None:
     from .entity_group_views import register_api_views as _entity_group_register_api_views
     _entity_group_register_api_views(hass, db_path)
 
+    # 日积月累 API（独立模块：按实体采集每日开启/关闭/使用量）
+    from .daily_stats import register_api_views as _daily_stats_register_api_views
+    _daily_stats_register_api_views(hass, db_path)
+
 
 # =========================================================================== #
 #  主设备「访问」链接（管理页面）                                                  #
@@ -6179,6 +6183,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("[power] 用电计量启动失败")
     hass.async_create_background_task(_start_power_energy(), "start_power_energy")
 
+    # 启动日积月累（后台：恢复配置实体 + 启动状态监听 + 零点拆段）
+    from .daily_stats import async_setup_daily_stats
+
+    async def _start_daily_stats():
+        await asyncio.sleep(3)  # 等平台全部就绪（async_add_sensor 已就位）
+        try:
+            await async_setup_daily_stats(hass, db_path)
+        except Exception:
+            _LOGGER.exception("[daily_stats] 日积月累启动失败")
+    hass.async_create_background_task(_start_daily_stats(), "start_daily_stats")
+
     # 启动设备桥接（延迟后台，不阻塞 HA 启动）
     from .bridge import BridgeManager
     bridge_manager = BridgeManager(hass, db_path, entry.entry_id)
@@ -6247,6 +6262,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await power_manager.async_stop()
         except Exception:
             _LOGGER.exception("[power] 用电计量停止异常")
+
+    # 停止日积月累（取消状态监听 + 零点定时器；会话行已在事件发生时落库）
+    daily_stats_manager = hass.data.get(DOMAIN, {}).get("daily_stats_manager")
+    if daily_stats_manager:
+        try:
+            await daily_stats_manager.async_stop()
+        except Exception:
+            _LOGGER.exception("[daily_stats] 日积月累停止异常")
 
     entity_group_manager = hass.data.get(DOMAIN, {}).get("entity_group_manager")
     if entity_group_manager is not None:

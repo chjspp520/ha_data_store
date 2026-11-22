@@ -46,6 +46,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
   - [23. 个人账单（查询 / 分析 / 备注）](#23-个人账单查询--分析--备注)
   - [24. 实体编组（含前端调用说明）](#24-实体编组含前端调用说明)
   - [25. 通知中心（HA 官方推送 + 历史）](#25-通知中心ha-官方推送--历史)
+  - [26. 日积月累（按实体采集每日开启/关闭/使用量）](#26-日积月累按实体采集每日开启关闭使用量)
 - [API 接口文档](#api-接口文档)
   - [数据查询接口](#数据查询接口)
   - [配置管理接口](#配置管理接口)
@@ -104,6 +105,7 @@ ha_data_store 是一款 Home Assistant 自定义集成：**无需修改 `configu
 | 🧾 **个人账单** | 独立模块 `personal_bill.py` + 新表 `personal_bills`（支付宝 / 微信账单落库）：**42 类查询/分析**（明细、按单号/账号/多名称、多值分类汇总、数据可用性多档、分组/趋势/排行、交叉汇总、资金流向、净现金流、同比、异常、定期订阅、固定开销、金额分位数等）+ **写接口**（增 / 批 / 改 / 删）；支持**多名称**与**逗号多值**过滤、`fields` 返回字段**手动点选**、可编辑备注 `note`（`POST /bill/remark` 单独提交、`GET /bill/notes` 取候选供点击） |
 | 🔔 **通知中心** | 后端统一调 HA 官方推送 `notify.*` 并把结果落库留痕：服务 `ha_data_store.send_notification` + 6 个 HTTP 接口（列表 / 单条 / 收件人 / 标记 / 删除 / 发送）；传感器 `sensor.ha_data_store_notifications`（state = 未读数，属性含最近 20 条 + **可用收件人清单**）；前端 room-elves-card 的 `notice_center` 卡片按「实体状态驱动」自动弹出（关闭即已读），不新建 WS 通道；与微信 ClawBot 无关 |
 | 🔗 **实体编组** | 独立模块 `entity_group_store.py` / `entity_group_views.py` / `entity_group_entities.py` / `entity_group_actions.py` + 三张新表（`entity_groups` / `entity_group_members` / `entity_groups_meta`）：把一组实体当一个设备控制，**每个启用编组自动生成一个对应域的实体**——**灯光组 `light.hds_eg_*`、窗帘组 `cover.hds_eg_*`、媒体组 `media_player.hds_eg_*`、空调组 `climate.hds_eg_*`**、其余（socket / 混编 / 设备）为聚合开关 `switch.hds_eg_*`（**实体域只由「类型」决定，与成员域无关**，域平台不可用则降级为开关；成员是 switch 的灯/窗帘也能用 `turn_on/off` 兜底控制；亮度/色温/颜色、位置、音量、温度/模式/风速/摆风都直接广播给成员；state 由成员实时汇总，含 `on_count` / `partial` / `missing` / `on_entities`；单监听 + 反向索引只刷受影响实体；编组 id 可自定义、改名即换实体 id、域变化自动重建）；编组动作与 `automations.actions` 同构并支持 `$group` / `$group:light` 占位符；REST 全套 `/api/ha_data_store/entity_groups`（列表/新建/详情/全量·局部更新/删除/成员增删改排序/批量/排序/按实体反查/自检 `_diag`），db_viewer「🔗 实体编组」可视化编辑；所有编组实体挂在独立**「编组设备」**下，含两个传感器：`sensor.ha_data_store_entity_groups`（目录全量快照）、`sensor.ha_data_store_group_entities`（所有编组实体，精简投影 `entity_id`/`name`/`icon`，供前端与语音助手直接遍历） |
+| 📆 **日积月累** | 独立模块 `daily_stats.py` + 两张新表（`daily_stats_configs` / `daily_stats_sessions`）：在「系统配置 → 📆 日积月累」选一个源实体，**每次「开启↔关闭」记录一段会话**（开/关时间、时长、可选使用量：会话读数差 或 固定功率），并投影成 `sensor.hds_ds_<stat_id>`（设备「日积月累」）；state 可选 今日次数 / 今日使用量 / 今日开启时长 / 当前状态，属性 `daylist` 全量（含逐段会话）、`monthlist` / `yearlist` 按需生成（实时聚合不落表）；**只在判定翻转时写库与写状态**（零轮询，仅午夜拆段），跨日自动拆段、重启自动对账；不配置则无实体、无设备；API 工具与系统监控页均已接入 |
 
 ---
 
@@ -2176,6 +2178,173 @@ dark_light_theme: dark,light
 
 ---
 
+### 26. 日积月累（按实体采集每日开启/关闭/使用量）
+
+> 独立模块 `daily_stats.py`，两张表 `daily_stats_configs` / `daily_stats_sessions`。
+> **一条配置 = 一个实体**：在「系统配置 → 📆 日积月累」选定源实体后，后端只在该实体
+> 「开启 ↔ 关闭」判定翻转时记录一段会话，并投影成 `sensor.hds_ds_<stat_id>`（设备「日积月累」）。
+> **不配置就没有实体、也没有设备**；数据全部落库，实体上的 `daylist` 等只是读取时的聚合视图。
+
+#### 26.1 采集口径
+
+- **只在判定翻转时动作**：`climate` 的 `cool→heat`、`cover` 的 `open→opening` 不算翻转，不写库、不写状态；
+- `unavailable` / `unknown` 不判定，**会话保持原状**（离线期间继续计时，恢复后按当时状态继续）；
+- 开启写一行会话，关闭回填 `off_time / duration / usage`；**每次开关机都保留一行**，不做合并；
+- 跨午夜仍在开启 → 00:00 把上一段关在 `23:59:59`，并补一段 `00:00:00` 起的续接会话（`restored=1`）；
+- 时间口径：本地时间字符串 `YYYY-MM-DD HH:MM:SS`（取集成时区设置，默认东八区）。
+
+按域的开/关判定（总原则：非 `off` / 非未知 / 非离线 = 开启）：
+
+| 域 | 视为「开启」 | 视为「关闭」 |
+|---|---|---|
+| `climate` | 非 `off`（`auto` / `cool` / `heat` / `dry` / `fan_only` / `heat_cool` 均算开） | `off` |
+| `cover` | `open` / `opening` | `closed` / `closing` |
+| `light` `switch` `fan` `input_boolean` `humidifier` `siren` … | `on` | `off` |
+| `media_player` | 非 `off` / `standby` | `off` / `standby` |
+| `vacuum` | `cleaning` / `returning` / `paused` | `docked` / `idle` / `off` |
+| `device_tracker` / `person` | `home` | 其它 |
+| `lock` | 非 `locked` | `locked` |
+| `water_heater` | 非 `off` | `off` |
+| `valve` | 非 `closed` / `closing` | `closed` / `closing` |
+| `sensor` / `number` / `input_number` / `counter` / `proximity` | 仅字面量 `on` / `true` / `open` | 仅字面量 `off` / `false` / `closed`（其它一律不判定） |
+| 其它域 | 非 `off` | `off` |
+
+#### 26.2 使用量（可选）
+
+| 模式 | 配置 | 计算 |
+|---|---|---|
+| `none` | 不采集（默认） | 属性不出现 `usage` |
+| `entity` | 选一个累计读数实体 | `(关闭读数 − 开启读数) × 换算系数`；负数（表被重置）记 0；任一读数缺失 → `usage_known=0`（不参与日/月/年求和） |
+| `power` | 填固定功率 W | `W ÷ 1000 × 时长(小时)`，单位固定 `kWh`，保留 3 位 |
+
+- 跨日拆段时会**再读一次表**（昨日段的 `off_reading` = 今日段的 `on_reading`），两天用量都对得上；
+- `on_reading` 随会话落库，重启后仍能算出准确差值；
+- 换算系数用于单位换算（如表读数是 `Wh`、想显示 `kWh` → 填 `0.001`）。
+
+#### 26.3 实体与属性
+
+```text
+sensor.hds_ds_<stat_id>        # unique_id: ha_data_store_dstats_<stat_id>
+```
+
+| state 选项 | 值 | 说明 |
+|---|---|---|
+| `count`（默认） | 整数 | 今日开关次数 |
+| `usage` | 小数 + 单位 | 今日使用量（需已配置使用量） |
+| `duration` | 小数（`min`） | 今日开启时长 |
+| `state` | `开启` / `关闭` | 当前是否有未关闭会话 |
+
+属性：
+
+```json
+{
+  "stat_id": "ke_ting_deng",
+  "source_entity": "switch.ke_ting_deng",
+  "state_metric": "count",
+  "usage_mode": "power",
+  "unit": "",
+  "sessions_total": 128,
+  "today": {
+    "date": "2026-11-22", "on": "08:00:00", "off": "13:00:00",
+    "count": 2, "duration": 5400, "usage": 0.15,
+    "sessions": [
+      {"on": "08:00:00", "off": "09:30:00", "dur": 5400, "usage": 0.15}
+    ]
+  },
+  "daylist": [
+    {"date": "2026-11-21", "on": "07:30:00", "off": "13:00:00",
+     "count": 2, "duration": 6300, "usage": 0.18,
+     "sessions": [
+       {"on": "07:30:00", "off": "08:15:00", "dur": 2700, "usage": 0.08},
+       {"on": "12:00:00", "off": "13:00:00", "dur": 3600, "usage": 0.10}
+     ]}
+  ],
+  "monthlist": [{"month": "2026-11", "count": 52, "duration": 3120, "usage": 7.8, "days": 22}],
+  "yearlist":  [{"year":  "2026",    "count": 610, "duration": 38000, "usage": 92.4, "days": 250}]
+}
+```
+
+- `daylist` **不裁剪**（按需求全量），`sessions` 逐段展开；
+- `monthlist` / `yearlist` 由配置勾选生成，读取时按 `SUBSTR(date,1,7)` / `SUBSTR(date,1,4)` **实时聚合，不落表**；
+- `daylist` / `monthlist` / `yearlist` / `today` 已登记 `_unrecorded_attributes`（不进 recorder 历史，避免 16384 字节上限），`state` 值照常记历史。
+
+> ⚠️ **属性体积较大，建议在 recorder 里排除该实体**
+>
+> `daylist` 不裁剪、`sessions` 逐段展开：一个配置一年的 `daylist` 约 30~60KB，十年可达数百 KB；
+> 而且**每次状态更新都会把整份属性通过 WebSocket 推给所有订阅的前端**（模块已做事件驱动 + 脏检查，正常情况下一天只推几次）。
+>
+> - 只想保留 `state` 曲线、不要属性历史 → **无需任何配置**，模块已用 `_unrecorded_attributes` 把四组大属性排除在 recorder 之外；
+> - 连 `state` 也不想进 HA 历史库（实体多 / 历史长 / 数据库增长快）→ 在 `configuration.yaml` 里按实体前缀整类排除，需要历史时走本模块的 `daylist` 或 API：
+
+```yaml
+# configuration.yaml
+recorder:
+  exclude:
+    entity_globs:
+      - sensor.hds_ds_*      # 日积月累生成的全部实体
+    # 单个实体也可以直接写 entities: [sensor.hds_ds_ke_ting_deng]
+```
+
+> 排除 recorder **不影响**本模块采集与统计：数据在 `daily_stats_sessions` 表里，`daylist` / `monthlist` / `yearlist` 与 API 照常可用。
+
+#### 26.4 更新策略（零轮询）
+
+| 事件 | 是否写实体 |
+|---|---|
+| 源实体判定翻转（开→关 / 关→开） | ✅ 写会话 + 刷状态 |
+| 状态变了但判定没翻转 / 离线出现或消失 / 读数实体数值变化 | ❌ 不写库、不写状态 |
+| 午夜 00:00 拆段 | ✅ |
+| 保存 / 删除配置、HA 启动对账 | ✅ 各一次 |
+
+除午夜那一个 `async_track_time_change`，模块**不注册任何定时器**；写状态前做 `state + attributes` 脏检查。
+因此「今日开启时长」在会话进行中不会自行跳动 —— 要实时的用 `today.on`（本次开启时刻）自行计算。
+
+#### 26.5 跨日、重启与新建
+
+- **跨日**：00:00 关闭昨日段（`23:59:59`）+ 新建今日段（`00:00:00`），两段都标记 `restored=1`；
+- **重启**：对账补齐停机期间漏掉的关闭/开启（优先用 `state.last_changed`，无效则用当前时间）；
+  `entity` 口径在补出来的段上 `usage_known=0`（读数不可信，不参与求和）；
+- **新建**：若源实体当前正处于开启状态，会立刻补一段会话（不会等到下一次「关→开」）。
+
+#### 26.6 前台配置
+
+「系统配置 → 📆 日积月累」：
+
+| 字段 | 说明 |
+|---|---|
+| 源实体 | 要采集的实体；**建好后不可修改**（换实体请新建配置） |
+| 名称 / 图标 | 实体显示名与图标 |
+| 实体 ID | `sensor.hds_ds_<stat_id>`；`stat_id` 默认由源实体的 object_id 生成，可改（小写字母/数字/下划线） |
+| 状态显示 | 次数 / 使用量 / 时长 / 当前状态 |
+| 使用量 | 不采集 / 读数实体（会话读数差）/ 固定功率（W） |
+| 使用量单位 / 换算系数 | 显示单位；读数模式可自动取实体的 `unit_of_measurement` |
+| 生成月列表 / 年列表 | 是否输出 `monthlist` / `yearlist` |
+| 启用 | 停用后移除实体，配置与历史保留 |
+
+列表操作：`✎ 编辑`、`📜 明细`（按日/月/年查看，逐段会话）、`🧹 清历史`、`🗑 删除`（默认保留历史）。
+保存即建实体、删除即移除，**无需重启 HA**。
+
+#### 26.7 系统监控与 API 工具
+
+- 「系统监控」新增汇总卡片「📆 日积月累」（数字 = 配置条数，第三行 = 今日次数/时长/用量/运行中）
+  与区块（逐条列出 `stat_id / 名称 / 源实体 / 状态显示 / 使用量 / 今日三项 / 状态`，含「🔄 刷新」「⚙ 前往配置」）；
+- 「API 工具」新增分组「📆 日积月累」（列表 / 日·月·年 / 会话明细 / 候选实体 / 新建·修改 / 删除 / 维护动作），
+  参数区按类型动态显隐，`stat_id` 为下拉（自动拉取现有配置）。
+
+#### 26.8 排障
+
+| 现象 | 排查 |
+|---|---|
+| 配了但没有数据 | 源实体是否真的发生过「开↔关」；是否长期 `unavailable`（不判定）；日志搜 `[daily_stats]` |
+| 实体没出现 | 配置是否「启用」；`sensor` 平台是否就绪（HA 启动后约 3 秒恢复，日志有「已启动：N 条配置，M 个实体」） |
+| 今日时长不增长 | 设计如此（只在事件时写状态），用 `today.on` 自行计算 |
+| 用量一直是 0 | 读数实体在开启/关闭时是否都能取到数值（`usage_known=0` 表示缺失）；`power` 模式检查功率是否 > 0 |
+| 重启后当天数据偏小 | 停机期间的采样无法补（不接 recorder 历史）；**已落库的历史日不受影响** |
+| 改源实体被拒绝 | 设计如此：源实体不可改，需删除后新建 |
+| 数据库增长快 / 前端变卡 | 该实体属性较大（`daylist` 不裁剪）。属性已排除在 recorder 之外；建议按 26.3 用 `recorder.exclude.entity_globs: sensor.hds_ds_*` 把整类实体排除，历史改走 `daylist` 或 API |
+
+---
+
 ## API 接口文档
 
 所有 API 通过 `/api/ha_data_store/` 路径访问。外部访问需在 URL 或 Header 中携带 API Key。
@@ -2634,6 +2803,24 @@ curl ".../entity_groups/version?key=$KEY"
 | `empty_message` | `message` 为空 |
 | `service_not_found` | 目标服务在 hass 里不存在（记在该目标的 `results` 上，不算整体失败） |
 
+### 日积月累接口
+
+独立路径（不走 `/query?type=`），鉴权与其它接口一致（URL 或 Header 带 `key`）。
+口径与字段说明见 [26. 日积月累](#26-日积月累按实体采集每日开启关闭使用量)。
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/ha_data_store/daily_stats` | GET | 配置列表 + 今日摘要（每项含 `today{count,duration,usage,on,off}` / `sensor_entity_id` / `open`） |
+| `/api/ha_data_store/daily_stats` | POST | 新建 / 修改配置（body：`stat_id` / `entity_id` / `name` / `icon` / `state_metric` / `usage_mode` / `usage_entity_id` / `usage_power_w` / `usage_unit` / `usage_scale` / `opt_monthlist` / `opt_yearlist` / `enabled`）；保存即建实体 |
+| `/api/ha_data_store/daily_stats` | DELETE | 删除配置：`stat_id`；`keep_history=0` 一并删除历史会话 |
+| `/api/ha_data_store/daily_stats/values` | GET | 日 / 月 / 年列表：`stat_id`、`group=day\|month\|year`、`days`（仅 day，0=全部） |
+| `/api/ha_data_store/daily_stats/sessions` | GET | 会话明细：`stat_id`、`date`（优先）或 `start`/`end`、`limit`（默认 500） |
+| `/api/ha_data_store/daily_stats/entities` | GET | 候选实体：`keyword` / `domain` / `limit`，返回 `{entity_id,name,domain,state,unit}` |
+| `/api/ha_data_store/daily_stats/action` | POST | 维护动作：`{"action":"clear_history","stat_id":"..."}` / `{"action":"refresh","stat_id":"..."}` |
+
+常见错误（body 的 `error` 字段）：`400` 参数非法（`usage_mode=entity` 缺读数实体、功率 ≤ 0、
+`state_metric=usage` 但未配使用量、试图修改源实体、`stat_id` 非法）；`404` 配置不存在；`500` 内部错误。
+
 ### 管理接口（仅局域网）
 
 以下接口仅允许局域网同网段访问，需要管理员密码登录。
@@ -2826,6 +3013,13 @@ GET /api/ha_data_store/custom?q=SELECT...&key=xxx
 | `push_targets` | 实体→网络 目标配置（读 token + 控制 token，同一实体可多套配置） |
 | `control_logs` | 实体→网络 控制审计日志（保留 30 天） |
 
+### 日积月累表
+
+| 表名 | 说明 |
+|------|------|
+| `daily_stats_configs` | 统计配置（`stat_id` 唯一 / `entity_id` 源实体 / `state_metric` 状态指标 / `usage_mode`+`usage_entity_id`+`usage_power_w`+`usage_unit`+`usage_scale` / `opt_monthlist` / `opt_yearlist` / `enabled`），见 [26. 日积月累](#26-日积月累按实体采集每日开启关闭使用量) |
+| `daily_stats_sessions` | 会话明细（**每次开关机一行**）：`stat_id` / `date` / `on_time` / `off_time`（空串 = 进行中）/ `duration`（秒）/ `usage` / `usage_known`（0 = 读数缺失，不参与求和）/ `on_reading` / `off_reading` / `restored`（1 = 跨日或重启补出来的段）；月/年不落表，读取时聚合 |
+
 ### 桥接表
 
 | 表名 | 说明 |
@@ -2946,6 +3140,39 @@ curl -X POST /api/ha_data_store/apikey/settings \
 ---
 
 ## 更新日志
+
+### v6.3.0 日积月累：按实体采集每日开启/关闭与使用量（2026-11-22）
+
+> 新增独立模块，**一条配置 = 一个实体**（设备「日积月累」），不配置就没有实体/设备。
+> 详细口径见 [26. 日积月累](#26-日积月累按实体采集每日开启关闭使用量)。
+
+**一、后端**
+
+| 文件 | 改动 |
+|---|---|
+| `daily_stats.py`（新） | 建表 / 配置 CRUD / `state_changed` 采集 / 开·关判定 / 日值缓存 / `DailyStatSensor` / 5 个 View / 启动对账与午夜拆段 |
+| `const.py` | `TABLE_DAILY_STATS_CONFIGS` / `TABLE_DAILY_STATS_SESSIONS` + 设备名/实体前缀常量；版本 → 6.3.0 |
+| `__init__.py` | 注册 API（3 行接入）、`forward_entry_setups` 之后延迟 3 秒后台启动、卸载释放监听 |
+| `manifest.json` | 6.3.0 |
+
+**二、前端（db_viewer）**
+
+- 系统配置新增子页「📆 日积月累」：列表（今日次数/时长/用量、开启中标记）/ 新建·编辑 / 历史明细（按日·月·年）/ 清历史 / 删除；
+- API 工具新增分组「📆 日积月累」（7 个查询类型 + 动态参数块 + `stat_id` 下拉）；
+- 系统监控新增汇总卡片与区块（今日次数/时长/用量/运行中 + 逐条表格）。
+
+**三、口径要点**
+
+- 只在「开启 ↔ 关闭」判定翻转时动作：`unavailable`/`unknown` 不判定且会话不关闭；`climate` 非 `off` 即开、`cover` 的 `open/opening` 为开；
+- 使用量三态：`none` / `entity`（会话读数差 × 换算系数，负值记 0）/ `power`（`W × 小时 ÷ 1000`）；
+- `state` 四选：今日次数（默认）/ 今日使用量 / 今日开启时长（min）/ 当前状态；
+- `daylist` 不裁剪并逐段展开 `sessions`，`monthlist`/`yearlist` 勾选生成（读取时聚合，不落表），全部进 `_unrecorded_attributes`；
+- 零轮询：仅午夜 00:00 一个定时器；跨日拆段、启动对账、新建时已在开启则立刻补段。
+
+**四、验证**
+
+`_test_daily_stats.py` **49 项断言全过**（判定表 / 配置校验 / 两种用量口径 / 同日多段 / 跨日拆段 / 月年聚合 / 重启对账 / 新建即开 / 指标取值）；
+`db_viewer.html` 内联脚本语法检查通过、新增子页与参数块 DOM 平衡、API 工具 7 个类型与分支一一对应。
 
 ### v6.1.0 通知中心：HA 官方推送 + 历史留痕（2026-11-16）
 

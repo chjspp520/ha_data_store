@@ -581,6 +581,7 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     <button class="sub-tab-btn" onclick="switchSubTab('recent')">🕘 近期使用设备<span class="sub-tab-badge" id="badge-recent"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('onthisday')">📜 历史今日<span class="sub-tab-badge" id="badge-onthisday"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('metrics')">📊 指标管理<span class="sub-tab-badge" id="badge-metrics"></span></button>
+    <button class="sub-tab-btn" onclick="switchSubTab('dailystats')">📆 日积月累<span class="sub-tab-badge" id="badge-dailystats"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('groups')">🧩 实体编组<span class="sub-tab-badge" id="badge-groups"></span></button>
     <button class="sub-tab-btn" onclick="switchSubTab('backfill')">📇 其他数据回填<span class="sub-tab-badge" id="badge-backfill"></span></button>
   </div>
@@ -2019,6 +2020,137 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
     </div>
   </div>
 
+  <!-- 子面板: 日积月累（daily_stats：按实体采集每日开启/关闭/使用量） -->
+  <div id="sub-dailystats" class="sub-panel">
+    <div class="section">
+      <h3>📆 日积月累</h3>
+      <div class="hint" style="line-height:1.8">
+        选定源实体后，后端只在该实体「开启 ↔ 关闭」判定翻转时记录一次会话（开/关时间、时长、可选使用量），
+        并生成一个传感器 <code>sensor.hds_ds_&lt;stat_id&gt;</code>。状态可选
+        「今日开关次数（默认）/ 今日使用量 / 今日开启时长 / 当前状态」；
+        属性 <code>daylist</code> 全量列出每天的时段与逐段会话，
+        <code>monthlist</code> / <code>yearlist</code> 按需生成。<br>
+        判定口径：非 <code>off</code> / 非 <code>unavailable</code> / 非 <code>unknown</code> 即视为开启
+        （空调非 off 即开、窗帘 open/opening 为开、媒体 standby 为关）；数值型实体只有字面量 on/off 才判定。<br>
+        保存即建实体、删除即移除，<b>无需重启 HA</b>；零配置时不会出现任何实体和设备。<br>
+        ⚠ 生成的实体<b>状态属性较大</b>（<code>daylist</code> 不裁剪、<code>sessions</code> 逐段展开）：
+        四组大属性已登记 <code>_unrecorded_attributes</code>（不进 recorder 历史），
+        如需进一步控制库体积，可在 <code>configuration.yaml</code> 的
+        <code>recorder.exclude.entity_globs</code> 里加 <code>sensor.hds_ds_*</code>（排除后不影响采集与统计）。
+      </div>
+      <div class="form-actions">
+        <button class="btn-accent" onclick="loadDailyStats()">🔄 刷新</button>
+        <button class="btn-green" onclick="dsNew()">➕ 新建统计</button>
+        <span class="hint" id="dsListHint"></span>
+      </div>
+      <div id="dsListWrap">加载中...</div>
+    </div>
+
+    <div class="section" id="dsEditWrap" style="display:none">
+      <h4 class="sep-title" id="dsEditTitle">新建统计</h4>
+      <div class="form-row">
+        <div>
+          <label>源实体（要采集的实体）</label>
+          <input type="text" id="dsEntity" list="dsEntityList" placeholder="switch.ke_ting_deng"
+                 oninput="dsOnEntityInput()" style="width:250px">
+          <datalist id="dsEntityList"></datalist>
+        </div>
+        <div>
+          <label>名称</label>
+          <input type="text" id="dsName" placeholder="客厅灯使用统计" maxlength="60" style="width:180px">
+        </div>
+        <div>
+          <label>图标（可选）</label>
+          <input type="text" id="dsIcon" placeholder="mdi:calendar-clock" style="width:160px">
+        </div>
+        <div>
+          <label>实体 ID（自动生成，可改）</label>
+          <div class="id-prefix-wrap">
+            <span class="id-prefix">sensor.hds_ds_</span>
+            <input type="text" id="dsStatId" placeholder="留空自动生成" maxlength="40"
+                   oninput="this.dataset.touched='1'">
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>状态显示</label>
+          <select id="dsStateMetric">
+            <option value="count">今日开关次数（默认）</option>
+            <option value="usage">今日使用量</option>
+            <option value="duration">今日开启时长（分钟）</option>
+            <option value="state">当前状态（开启/关闭）</option>
+          </select>
+        </div>
+        <div>
+          <label>使用量</label>
+          <select id="dsUsageMode" onchange="dsOnUsageModeChange()">
+            <option value="none">不采集</option>
+            <option value="entity">读数实体（会话读数差）</option>
+            <option value="power">固定功率（按时长计算）</option>
+          </select>
+        </div>
+        <div id="dsUsageEntityWrap">
+          <label>用电量实体</label>
+          <input type="text" id="dsUsageEntity" list="dsEntityList"
+                 placeholder="sensor.xxx_energy" style="width:200px">
+        </div>
+        <div id="dsUsagePowerWrap" style="display:none">
+          <label>固定功率（W）</label>
+          <input type="number" id="dsUsagePower" placeholder="100" min="0" step="1" style="width:110px">
+        </div>
+        <div>
+          <label>使用量单位</label>
+          <input type="text" id="dsUsageUnit" placeholder="kWh / L / m³" maxlength="16" style="width:110px">
+        </div>
+        <div>
+          <label>换算系数（可选）</label>
+          <input type="number" id="dsUsageScale" value="1" step="0.001" style="width:110px">
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>生成月列表</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:12px;margin-top:6px">
+            <input type="checkbox" id="dsOptMonth"> 属性 monthlist
+          </label>
+        </div>
+        <div>
+          <label>生成年列表</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:12px;margin-top:6px">
+            <input type="checkbox" id="dsOptYear"> 属性 yearlist
+          </label>
+        </div>
+        <div>
+          <label>启用</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:12px;margin-top:6px">
+            <input type="checkbox" id="dsEnabled" checked> 参与实体投影
+          </label>
+        </div>
+      </div>
+      <div class="hint">
+        源实体建好后不可修改（要换实体请新建配置），其余字段随时可改、保存立即生效。<br>
+        「读数实体」取本次开启到关闭之间的读数差；「固定功率」按 功率 ÷ 1000 × 时长(小时) 计算（单位 kWh）。
+      </div>
+      <div class="form-actions">
+        <button class="btn-green" onclick="dsSave()">💾 保存</button>
+        <button class="btn-accent" onclick="dsCloseEdit()">取消</button>
+        <span class="hint" id="dsEditHint"></span>
+      </div>
+    </div>
+
+    <div class="section" id="dsDetailWrap" style="display:none">
+      <h4 class="sep-title">历史明细 <span class="hint" id="dsDetailTitle" style="font-weight:400"></span></h4>
+      <div class="form-actions">
+        <button class="btn-accent" onclick="dsShowDetail(dsDetailId, 'day')">按日</button>
+        <button class="btn-accent" onclick="dsShowDetail(dsDetailId, 'month')">按月</button>
+        <button class="btn-accent" onclick="dsShowDetail(dsDetailId, 'year')">按年</button>
+        <button class="btn-accent" onclick="dsCloseDetail()">关闭</button>
+      </div>
+      <div id="dsDetailBody"></div>
+    </div>
+  </div>
+
   <!-- 子面板: 实体编组（entity_groups：一组实体当一个设备控制） -->
   <div id="sub-groups" class="sub-panel">
     <div class="section">
@@ -2577,6 +2709,16 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
           <option value="eg:member_delete">🗑 移除单个成员（DELETE）</option>
           <option value="eg:members_remove">🧹 批量移除成员（POST）</option>
           <option value="eg:members_order">↕ 成员排序（POST）</option>
+        </optgroup>
+        <optgroup label="📆 日积月累">
+          <option value="ds:list">📋 统计配置列表（含今日次数/时长/用量）</option>
+          <option value="ds:values">📈 日/月/年列表（按 stat_id · 实时聚合）</option>
+          <option value="ds:sessions">📜 会话明细（每次开关机 · 可指定日期/区间）</option>
+          <option value="ds:entities">🔎 候选实体列表（选源实体 / 读数实体用）</option>
+          <option disabled>──── 写接口（POST / DELETE） ────</option>
+          <option value="ds:save">➕ 新建 / 修改统计配置（POST）</option>
+          <option value="ds:delete">🗑 删除统计配置（DELETE）</option>
+          <option value="ds:action">🧹 维护动作：清空历史 / 重算刷新（POST）</option>
         </optgroup>
         <optgroup label="自定义路由" id="apiCustomRoutesGroup">
         </optgroup>
@@ -3328,6 +3470,69 @@ WHERE entity_id IN (SELECT entity_id FROM entity_configs WHERE power_rating > 0)
       <label>实体编组参数（按接口动态变化，留空表示默认）</label>
       <div id="apiEgParamsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
       <div id="apiEgHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
+    </div>
+    <!-- 日积月累参数区（按 ds:* 查询类型动态显隐） -->
+    <div id="apiDsRow" style="display:none">
+      <label>日积月累参数（留空表示不限制）</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <div data-ds="values sessions delete action">
+          <label>stat_id（统计标识）</label>
+          <select id="apiDsStatId" onchange="generateApiUrl()">
+            <option value="">-- 请选择（values/sessions/delete/action 必填） --</option>
+          </select>
+        </div>
+        <div data-ds="values">
+          <label>聚合粒度</label>
+          <select id="apiDsGroup" onchange="generateApiUrl()">
+            <option value="day">按日 day</option>
+            <option value="month">按月 month（实时聚合）</option>
+            <option value="year">按年 year（实时聚合）</option>
+          </select>
+        </div>
+        <div data-ds="values">
+          <label>最近 N 天（0 = 全部，仅 day 生效）</label>
+          <input type="number" id="apiDsDays" min="0" value="0" onchange="generateApiUrl()">
+        </div>
+        <div data-ds="sessions">
+          <label>指定日期（填了优先于区间）</label>
+          <input type="date" id="apiDsDate" onchange="generateApiUrl()">
+        </div>
+        <div data-ds="sessions">
+          <label>开始日期</label>
+          <input type="date" id="apiDsStart" onchange="generateApiUrl()">
+        </div>
+        <div data-ds="sessions">
+          <label>结束日期</label>
+          <input type="date" id="apiDsEnd" onchange="generateApiUrl()">
+        </div>
+        <div data-ds="sessions entities">
+          <label>返回条数上限</label>
+          <input type="number" id="apiDsLimit" min="0" value="500" onchange="generateApiUrl()">
+        </div>
+        <div data-ds="entities">
+          <label>关键字（entity_id / 名称）</label>
+          <input type="text" id="apiDsKeyword" placeholder="灯 / switch." oninput="generateApiUrl()">
+        </div>
+        <div data-ds="entities">
+          <label>域（可选）</label>
+          <input type="text" id="apiDsDomain" placeholder="switch" oninput="generateApiUrl()">
+        </div>
+        <div data-ds="delete">
+          <label>历史数据</label>
+          <select id="apiDsKeepHistory" onchange="generateApiUrl()">
+            <option value="1">保留（默认）</option>
+            <option value="0">一并删除</option>
+          </select>
+        </div>
+        <div data-ds="action">
+          <label>动作</label>
+          <select id="apiDsAction" onchange="generateApiUrl()">
+            <option value="clear_history">🧹 清空历史 clear_history</option>
+            <option value="refresh">🔄 重算刷新 refresh</option>
+          </select>
+        </div>
+      </div>
+      <div id="apiDsHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
     </div>
   </div>
 
@@ -4922,6 +5127,100 @@ function _egBody(qt, v) {
   return null;
 }
 
+// ---------- 日积月累（ds:*）地址生成器辅助 ----------
+function renderDsParams(qt) {
+  const scope = ({
+    'ds:list': 'list',
+    'ds:values': 'values',
+    'ds:sessions': 'sessions',
+    'ds:entities': 'entities',
+    'ds:save': 'save',
+    'ds:delete': 'delete',
+    'ds:action': 'action',
+  })[qt] || 'list';
+  document.querySelectorAll('#apiDsRow [data-ds]').forEach(function (el) {
+    const scopes = String(el.getAttribute('data-ds') || '').split(/\s+/);
+    el.style.display = scopes.indexOf(scope) >= 0 ? '' : 'none';
+  });
+  loadApiDsStatIds();
+  generateApiUrl();
+}
+
+async function loadApiDsStatIds() {
+  const sel = document.getElementById('apiDsStatId');
+  if (!sel) return;
+  if (sel.dataset.loaded === '1') return;
+  try {
+    const r = await fetch('/api/ha_data_store/daily_stats', { credentials: 'same-origin' });
+    const j = await r.json();
+    if (!j.success) return;
+    const cur = sel.value;
+    const items = j.items || [];
+    sel.innerHTML = '<option value="">-- 请选择 --</option>' + items.map(function (it) {
+      return '<option value="' + escAttr(it.stat_id) + '">' + escHtml(it.stat_id)
+        + (it.name ? ' · ' + escHtml(it.name) : '') + '</option>';
+    }).join('');
+    if (cur) sel.value = cur;
+    sel.dataset.loaded = '1';
+    generateApiUrl();
+  } catch (e) { /* 下拉加载失败不影响地址生成 */ }
+}
+
+function renderDsApiHint(qt) {
+  const box = document.getElementById('apiDsHint');
+  if (!box) return;
+  const head = '<div style="color:var(--accent);font-weight:600;margin-bottom:4px">';
+  const auth = '<div class="hint" style="margin-top:6px">鉴权：<code>?key=</code> 传 API Key；'
+    + '写接口还需 HA 开关「API 访问」与「数据库修改」都开启。</div>';
+  let html = '';
+  if (qt === 'ds:list') {
+    html = head + '调用方式：GET（直接访问地址）</div>'
+      + '返回 <code>{success, count, items[]}</code>；每项含配置字段、'
+      + '<code>today{count,duration,usage,on,off}</code> 今日摘要、'
+      + '<code>sensor_entity_id</code>、<code>open</code>（是否有未关闭会话）。';
+  } else if (qt === 'ds:values') {
+    html = head + '调用方式：GET</div>'
+      + '按日：<code>{date,on,off,count,duration,usage,sessions[]}</code>；'
+      + '<code>group=month</code> → <code>{month,count,duration,usage,days}</code>，'
+      + '<code>group=year</code> → <code>{year,...}</code>（月/年由日数据实时聚合，不落表）。<br>'
+      + '<code>days=N</code> 只保留最近 N 天（仅 day 生效，0 = 全部）。';
+  } else if (qt === 'ds:sessions') {
+    html = head + '调用方式：GET</div>'
+      + '每次开关机一行：<code>{date,on_time,off_time,duration,usage,usage_known,restored}</code>；'
+      + '<code>off_time</code> 为空串表示会话进行中，<code>usage_known=0</code> 表示读数缺失（不参与用量求和）。<br>'
+      + '<code>date</code> 优先于 <code>start/end</code>；都不填则取最近 <code>limit</code> 条。';
+  } else if (qt === 'ds:entities') {
+    html = head + '调用方式：GET</div>'
+      + '返回 <code>{entity_id,name,domain,state,unit}</code>；'
+      + '<code>entity_id</code> 可直接当源实体，<code>unit</code> 可作为使用量单位参考。';
+  } else if (qt === 'ds:save') {
+    html = head + '调用方式：POST（JSON body）</div>'
+      + '<pre style="white-space:pre-wrap;margin:0;font-size:11px">'
+      + escHtml('{\n  "stat_id": "ke_ting_deng",\n  "entity_id": "switch.ke_ting_deng",\n'
+        + '  "name": "客厅灯使用统计",\n  "state_metric": "count",\n'
+        + '  "usage_mode": "power",\n  "usage_power_w": 100,\n  "usage_unit": "kWh",\n'
+        + '  "usage_scale": 1,\n  "opt_monthlist": 1,\n  "opt_yearlist": 0,\n  "enabled": 1\n}')
+      + '</pre>'
+      + '<div class="hint" style="margin-top:6px">'
+      + '<code>stat_id</code> 留空会自动由源实体生成；<code>usage_mode</code> = none / entity / power；'
+      + '<code>state_metric</code> = count / usage / duration / state。'
+      + '保存后实体立即出现，无需重启；源实体建好后不可修改。</div>';
+  } else if (qt === 'ds:delete') {
+    html = head + '调用方式：DELETE</div>'
+      + '删除配置会同时移除实体 <code>sensor.hds_ds_&lt;stat_id&gt;</code>；'
+      + '<code>keep_history=1</code>（默认）保留历史会话，<code>0</code> 一并删除。';
+  } else if (qt === 'ds:action') {
+    html = head + '调用方式：POST（JSON body）</div>'
+      + '<pre style="white-space:pre-wrap;margin:0;font-size:11px">'
+      + escHtml('{"action": "clear_history", "stat_id": "ke_ting_deng"}')
+      + '</pre>'
+      + '<div class="hint" style="margin-top:6px">'
+      + '<code>action</code>：<code>clear_history</code> 清空该配置全部会话；'
+      + '<code>refresh</code> 重算日缓存并立即刷新实体状态。</div>';
+  }
+  box.innerHTML = html + auth;
+}
+
 function renderEgParams(qt) {
   const box = document.getElementById('apiEgParamsBox');
   if (!box) return;
@@ -5017,6 +5316,8 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof loadOtdBadge === 'function') loadOtdBadge();
   // 「📊 指标管理」角标：显示指标总数，无需点开子面板
   if (typeof loadMetricsBadge === 'function') loadMetricsBadge();
+  // 「📆 日积月累」角标：显示统计配置数
+  if (typeof loadDailyStatsBadge === 'function') loadDailyStatsBadge();
 });
 
 // ==============================
@@ -6616,6 +6917,7 @@ const MONITOR_SEC_LABELS = {
   automation: '🤖 自动化',
   timer: '⏱ 定时精灵',
   groups: '🧩 实体编组',
+  dailystats: '📆 日积月累',
 };
 
 // 给区块标题标注 data-sec（按标题文字匹配，忽略图标/角标/统计数字的差异）
@@ -6804,6 +7106,7 @@ async function loadMonitor() {
       '<div class="summary-card c-online" id="helperCard" data-target="helper" title="点击展开下方对应内容" onclick="expandMonitorSection(\'helper\')"><div class="num">--</div><div class="lbl">🧩 辅助元素</div><div class="card-sub"></div></div>' +
       '<div class="summary-card c-online" id="powerCard" data-target="power" title="点击展开下方对应内容" onclick="expandMonitorSection(\'power\')"><div class="num">--</div><div class="lbl">⚡ 用电计量</div><div class="card-sub"></div></div>' +
       '<div class="summary-card c-online" id="groupCard" data-target="groups" title="点击展开下方对应内容" onclick="expandMonitorSection(\'groups\')"><div class="num">--</div><div class="lbl">🧩 实体编组</div><div class="card-sub"></div></div>' +
+      '<div class="summary-card c-online" id="dailyStatsCard" data-target="dailystats" title="点击展开下方对应内容" onclick="expandMonitorSection(\'dailystats\')"><div class="num">--</div><div class="lbl">📆 日积月累</div><div class="card-sub"></div></div>' +
       makeCard('xiaoai','💬 小爱对话','xiaoaiCard') +
       makeCard('printer','🖨️ 打印机','printerCard') +
       makeCard('recent','🕘 最近使用设备','recentCard') +
@@ -7110,6 +7413,9 @@ async function loadMonitor() {
     // -- 实体编组（数据取自 /api/ha_data_store/entity_groups，只含启用的编组）--
     html += groupMonitorSectionHtml();
 
+    // -- 日积月累（按实体采集每日开启/关闭/使用量；数据取自 /api/ha_data_store/daily_stats）--
+    html += dailyStatsMonitorSectionHtml();
+
     content.innerHTML = html;
 
     // 绑定 section-head 点击展开/折叠（同时标注 data-sec，供 summary 卡片定位）
@@ -7135,6 +7441,7 @@ async function loadMonitor() {
     loadMonitorAutomation();
     loadMonitorTimer();
     loadMonitorGroups();
+    loadMonitorDailyStats();
   } catch(e) {
     content.innerHTML = '<div class="empty">请求失败: ' + e + '</div>';
     document.getElementById('pagination').style.display = 'none';
@@ -7792,6 +8099,113 @@ async function loadMonitorGroups() {
 function gotoEntityGroupManage() {
   if (typeof switchTab === 'function') switchTab('manage');
   if (typeof switchSubTab === 'function') switchSubTab('groups');
+}
+
+// ==============================
+//  📆 日积月累（系统监控区块）
+//  数据源：GET /api/ha_data_store/daily_stats（含 today 今日摘要）
+// ==============================
+function dailyStatsMonitorSectionHtml() {
+  return '<h4 class="section-head title-good">📆 日积月累 '
+    + '<span style="font-weight:400;font-size:11px;color:var(--text2)" id="dailyStatsStat">加载中...</span></h4>'
+    + '<div class="section-content collapsed"><div id="dailyStatsTbl" '
+    + 'style="padding:8px;color:var(--text2)">加载中...</div></div>';
+}
+
+// 从监控页跳到「系统配置 → 📆 日积月累」子页
+function gotoDailyStatsManage() {
+  if (typeof switchTab === 'function') switchTab('manage');
+  const btn = document.querySelector('.sub-tab-btn[onclick*="\'dailystats\'"]');
+  if (btn) btn.click();
+  else if (typeof switchSubTab === 'function') switchSubTab('dailystats');
+}
+
+async function loadMonitorDailyStats() {
+  const stat = document.getElementById('dailyStatsStat');
+  const tbl = document.getElementById('dailyStatsTbl');
+  const card = document.getElementById('dailyStatsCard');
+  try {
+    const r = await fetch('/api/ha_data_store/daily_stats', { credentials: 'same-origin' });
+    const json = await r.json();
+    if (!json.success) {
+      if (stat) stat.textContent = '加载失败';
+      if (card) card.querySelector('.num').textContent = '--';
+      if (tbl) {
+        tbl.innerHTML = '<div class="hint" style="padding:6px 0">加载失败：'
+          + escHtml(json.error || '') + '</div>';
+      }
+      return;
+    }
+    const items = json.items || [];
+    let enabledCount = 0, running = 0, dayCount = 0, dayDur = 0, dayUse = 0;
+    items.forEach(function(it) {
+      if (it.enabled) enabledCount += 1;
+      if (it.open) running += 1;
+      const t = it.today || {};
+      dayCount += Number(t.count || 0);
+      dayDur += Number(t.duration || 0);
+      dayUse += Number(t.usage || 0);
+    });
+    if (stat) {
+      stat.textContent = '共 ' + items.length + ' 条（启用 ' + enabledCount + '）'
+        + ' · 今日次数 ' + dayCount
+        + ' · 时长 ' + dsFmtDur(dayDur)
+        + (dayUse > 0 ? ' · 用量 ' + (Math.round(dayUse * 1000) / 1000) : '')
+        + (running ? ' · 运行中 ' + running : '');
+    }
+    if (card) card.querySelector('.num').textContent = items.length;
+    setSubTabBadge('dailystats', items.length);
+    syncSummarySub('dailystats');
+    if (!tbl) return;
+    if (!items.length) {
+      tbl.innerHTML = '<div class="hint" style="padding:6px 0">还没有统计配置，'
+        + '<a href="javascript:void(0)" onclick="gotoDailyStatsManage()" style="color:var(--accent)">前往配置新建</a>'
+        + '（配置一个源实体即生成 <code>sensor.hds_ds_&lt;stat_id&gt;</code>）</div>';
+      return;
+    }
+    let html = '<div style="display:flex;justify-content:space-between;align-items:center;'
+      + 'gap:8px;flex-wrap:wrap;margin-bottom:8px">'
+      + '<span class="hint">只在该实体「开启↔关闭」判定翻转时记录；会话明细落库表 <code>daily_stats_sessions</code>，'
+      + 'daylist / monthlist / yearlist 在实体属性里</span>'
+      + '<span style="display:flex;gap:6px">'
+      + '<button class="btn-accent" style="font-size:12px;padding:4px 10px" '
+      + 'onclick="loadMonitorDailyStats()">🔄 刷新</button>'
+      + '<button class="btn-accent" style="font-size:12px;padding:4px 10px" '
+      + 'onclick="gotoDailyStatsManage()">⚙ 前往配置</button>'
+      + '</span></div>'
+      + '<div class="table-wrap"><table><thead><tr>'
+      + '<th style="width:22%">stat_id</th><th style="width:12%">名称</th>'
+      + '<th style="width:20%">源实体</th><th style="width:8%">状态显示</th>'
+      + '<th style="width:11%">使用量</th><th style="width:7%">今日次数</th>'
+      + '<th style="width:7%">今日时长</th><th style="width:7%">今日用量</th>'
+      + '<th style="width:6%">状态</th></tr></thead><tbody>';
+    items.forEach(function(it) {
+      const t = it.today || {};
+      const usageSrc = (it.usage_mode === 'none') ? '-'
+        : (it.usage_mode === 'power'
+          ? (Number(it.usage_power_w) || 0) + ' W'
+          : '<code>' + escHtml(it.usage_entity_id || '') + '</code>');
+      const unit = it.usage_unit || (it.usage_mode === 'power' ? 'kWh' : '');
+      const badge = !it.enabled
+        ? '<span class="badge badge-offline">停用</span>'
+        : (it.open ? '<span class="badge badge-online">开启中</span>'
+                   : '<span class="badge badge-offline">已关闭</span>');
+      html += '<tr>'
+        + '<td><code>' + escHtml(it.stat_id || '') + '</code><br>'
+        + '<span class="hint">' + escHtml(it.sensor_entity_id || '') + '</span></td>'
+        + '<td>' + escHtml(it.name || '-') + '</td>'
+        + '<td><code>' + escHtml(it.entity_id || '') + '</code></td>'
+        + '<td style="font-size:12px">' + escHtml(dsMetricLabel(it.state_metric)) + '</td>'
+        + '<td style="font-size:12px">' + usageSrc + '</td>'
+        + '<td>' + (t.count || 0) + '</td>'
+        + '<td>' + dsFmtDur(t.duration) + '</td>'
+        + '<td>' + ((it.usage_mode === 'none') ? '-'
+          : ((t.usage || 0) + ' ' + escHtml(unit))) + '</td>'
+        + '<td>' + badge + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    tbl.innerHTML = html;
+  } catch (e) { /* 单区块失败不影响整页监控 */ }
 }
 
 // ── 系统配置子选项卡 ──────────────────────────────────────────
@@ -8734,6 +9148,7 @@ function switchSubTab(name) {
   if (name === 'recent') { loadRecentExclude(); }
   if (name === 'onthisday') { loadOtdExclude(); }
   if (name === 'metrics') { loadMetrics(); }
+  if (name === 'dailystats') { loadDailyStats(); }
   if (name === 'groups') { loadEntityGroups(); }
   if (name === 'backfill') { loadBackfillTypes(); loadCommBackfillStatus(); }
 }
@@ -9283,6 +9698,334 @@ async function deleteAttrType(typeName) {
     showToast(json.success ? json.message : ('删除失败: ' + json.error), json.success);
     if (json.success) { loadAttrTypes(); loadEntities(); }
   } catch(e) { showToast('请求失败: ' + e, false); }
+}
+
+// ==============================
+//  📆 日积月累（daily_stats）
+//  后端：daily_stats.py
+//  - 列表 GET  /api/ha_data_store/daily_stats
+//  - 保存 POST /api/ha_data_store/daily_stats
+//  - 删除 DELETE /api/ha_data_store/daily_stats?stat_id=
+//  - 历史 GET  /api/ha_data_store/daily_stats/values?stat_id=&group=day|month|year
+//  - 动作 POST /api/ha_data_store/daily_stats/action {action, stat_id}
+// ==============================
+const DS_API = '/api/ha_data_store/daily_stats';
+const DS_VALUES_API = DS_API + '/values';
+const DS_ENTITIES_API = DS_API + '/entities';
+const DS_ACTION_API = DS_API + '/action';
+let dsRows = [];
+let dsEditId = '';           // '' = 新建
+let dsEntitiesLoaded = false;
+let dsDetailId = '';
+
+async function dsFetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, Object.assign({ credentials: 'same-origin' }, opts || {}));
+    return await r.json();
+  } catch (e) {
+    return { success: false, error: 'HTTP/解析失败：' + e };
+  }
+}
+
+async function loadDailyStatsBadge() {
+  const j = await dsFetchJSON(DS_API);
+  if (j.success) setSubTabBadge('dailystats', (j.items || []).length);
+}
+
+async function dsLoadEntities(force) {
+  if (dsEntitiesLoaded && !force) return;
+  const j = await dsFetchJSON(DS_ENTITIES_API + '?limit=2000');
+  if (!j.success) return;
+  const dl = document.getElementById('dsEntityList');
+  if (!dl) return;
+  dl.innerHTML = (j.items || []).map(it =>
+    '<option value="' + escAttr(it.entity_id) + '">' + escHtml(it.name)
+    + (it.unit ? ' (' + escHtml(it.unit) + ')' : '') + '</option>').join('');
+  dsEntitiesLoaded = true;
+}
+
+function dsMetricLabel(m) {
+  return ({
+    count: '今日次数', usage: '今日使用量',
+    duration: '今日时长', state: '当前状态',
+  })[m] || m || '今日次数';
+}
+
+function dsFmtDur(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h > 0) return h + '时' + m + '分';
+  if (m > 0) return m + '分';
+  return s + '秒';
+}
+
+async function loadDailyStats() {
+  const box = document.getElementById('dsListWrap');
+  if (box) box.innerHTML = '<div class="hint">加载中...</div>';
+  dsLoadEntities(false);
+  const j = await dsFetchJSON(DS_API);
+  if (!j.success) {
+    if (box) box.innerHTML = '<div class="hint">加载失败：' + escHtml(j.error || '') + '</div>';
+    return;
+  }
+  dsRows = j.items || [];
+  renderDailyStats();
+  setSubTabBadge('dailystats', dsRows.length);
+}
+
+function renderDailyStats() {
+  const box = document.getElementById('dsListWrap');
+  if (!box) return;
+  if (!dsRows.length) {
+    box.innerHTML = '<div class="hint">（暂无统计 —— 点「➕ 新建统计」选择要采集的实体）</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr>'
+    + '<th>状态</th><th>stat_id</th><th>名称</th><th>源实体</th><th>状态显示</th>'
+    + '<th>使用量</th><th>今日次数</th><th>今日时长</th><th>今日用量</th>'
+    + '<th>月/年</th><th>操作</th></tr></thead><tbody>';
+  dsRows.forEach(r => {
+    const t = r.today || {};
+    const usageSrc = (r.usage_mode === 'none') ? '-'
+      : (r.usage_mode === 'power'
+        ? (Number(r.usage_power_w) || 0) + ' W'
+        : '<code>' + escHtml(r.usage_entity_id || '') + '</code>');
+    const my = (r.opt_monthlist ? '月' : '') + (r.opt_yearlist ? ' 年' : '');
+    html += '<tr>'
+      + '<td style="color:' + (r.enabled ? '#27ae60' : '#999') + '">'
+      + (r.enabled ? '启用' : '停用') + '</td>'
+      + '<td><code>' + escHtml(r.stat_id) + '</code><br>'
+      + '<span class="hint">' + escHtml(r.sensor_entity_id || '') + '</span></td>'
+      + '<td>' + escHtml(r.name || '') + '</td>'
+      + '<td><code>' + escHtml(r.entity_id || '') + '</code></td>'
+      + '<td>' + escHtml(dsMetricLabel(r.state_metric)) + '</td>'
+      + '<td style="font-size:12px">' + usageSrc + '</td>'
+      + '<td>' + (t.count || 0)
+      + (r.open ? ' <span style="color:#27ae60">开启中</span>' : '') + '</td>'
+      + '<td>' + dsFmtDur(t.duration) + '</td>'
+      + '<td>' + ((r.usage_mode === 'none') ? '-'
+        : ((t.usage || 0) + ' ' + escHtml(r.usage_unit || ''))) + '</td>'
+      + '<td>' + (my || '-') + '</td>'
+      + '<td style="white-space:nowrap">'
+      + '<button class="btn-accent" onclick="dsEdit(\'' + escAttr(r.stat_id) + '\')">✎ 编辑</button> '
+      + '<button class="btn-accent" onclick="dsShowDetail(\'' + escAttr(r.stat_id) + '\', \'day\')">📜 明细</button> '
+      + '<button class="btn-accent" onclick="dsClearHistory(\'' + escAttr(r.stat_id) + '\')">🧹 清历史</button> '
+      + '<button class="btn-accent" onclick="dsDelete(\'' + escAttr(r.stat_id) + '\')" style="background:#c0392b;border-color:#c0392b">🗑 删除</button>'
+      + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<div class="hint" style="margin-top:8px">「今日」列为实时值；完整的 daylist / monthlist / yearlist 在实体属性里；'
+    + '历史逐段会话可用「📜 明细」或接口 <code>/api/ha_data_store/daily_stats/sessions?stat_id=</code> 查看。</div>';
+  box.innerHTML = html;
+}
+
+function dsOnUsageModeChange() {
+  const mode = (document.getElementById('dsUsageMode') || {}).value || 'none';
+  const entWrap = document.getElementById('dsUsageEntityWrap');
+  const powWrap = document.getElementById('dsUsagePowerWrap');
+  if (entWrap) entWrap.style.display = (mode === 'entity') ? '' : 'none';
+  if (powWrap) powWrap.style.display = (mode === 'power') ? '' : 'none';
+}
+
+function dsOnEntityInput() {
+  const eid = (document.getElementById('dsEntity') || {}).value || '';
+  const sid = document.getElementById('dsStatId');
+  if (!sid || sid.dataset.touched === '1' || dsEditId) return;
+  const obj = eid.indexOf('.') >= 0 ? eid.split('.')[1] : eid;
+  sid.value = (obj || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+}
+
+function dsNew() {
+  dsEditId = '';
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('dsEntity', ''); set('dsName', ''); set('dsIcon', 'mdi:calendar-clock');
+  set('dsStatId', ''); set('dsUsageEntity', ''); set('dsUsagePower', '');
+  set('dsUsageUnit', ''); set('dsUsageScale', '1');
+  const sid = document.getElementById('dsStatId');
+  if (sid) { sid.disabled = false; sid.dataset.touched = ''; }
+  const eid = document.getElementById('dsEntity');
+  if (eid) eid.disabled = false;
+  document.getElementById('dsStateMetric').value = 'count';
+  document.getElementById('dsUsageMode').value = 'none';
+  document.getElementById('dsOptMonth').checked = false;
+  document.getElementById('dsOptYear').checked = false;
+  document.getElementById('dsEnabled').checked = true;
+  document.getElementById('dsEditTitle').textContent = '新建统计';
+  document.getElementById('dsEditHint').textContent = '';
+  document.getElementById('dsEditWrap').style.display = '';
+  dsOnUsageModeChange();
+  dsLoadEntities(false);
+}
+
+function dsEdit(statId) {
+  const row = dsRows.find(r => r.stat_id === statId);
+  if (!row) return;
+  dsEditId = statId;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = (v === null || v === undefined) ? '' : v; };
+  set('dsEntity', row.entity_id || '');
+  set('dsName', row.name || '');
+  set('dsIcon', row.icon || '');
+  set('dsStatId', row.stat_id || '');
+  set('dsStateMetric', row.state_metric || 'count');
+  set('dsUsageMode', row.usage_mode || 'none');
+  set('dsUsageEntity', row.usage_entity_id || '');
+  set('dsUsagePower', row.usage_power_w || '');
+  set('dsUsageUnit', row.usage_unit || '');
+  set('dsUsageScale', row.usage_scale || 1);
+  const sid = document.getElementById('dsStatId');
+  if (sid) { sid.disabled = true; sid.dataset.touched = '1'; }
+  const eid = document.getElementById('dsEntity');
+  if (eid) eid.disabled = true;
+  document.getElementById('dsOptMonth').checked = !!row.opt_monthlist;
+  document.getElementById('dsOptYear').checked = !!row.opt_yearlist;
+  document.getElementById('dsEnabled').checked = !!row.enabled;
+  document.getElementById('dsEditTitle').textContent = '编辑统计：' + statId;
+  document.getElementById('dsEditHint').textContent = '';
+  document.getElementById('dsEditWrap').style.display = '';
+  dsOnUsageModeChange();
+}
+
+function dsCloseEdit() {
+  const wrap = document.getElementById('dsEditWrap');
+  if (wrap) wrap.style.display = 'none';
+  dsEditId = '';
+}
+
+function dsBuildPayload() {
+  const val = id => (document.getElementById(id) || {}).value || '';
+  const chk = id => !!(document.getElementById(id) || {}).checked;
+  const entityId = val('dsEntity').trim();
+  if (!entityId || entityId.indexOf('.') < 0) throw new Error('请填写源实体（形如 switch.xxx）');
+  const usageMode = val('dsUsageMode') || 'none';
+  const stateMetric = val('dsStateMetric') || 'count';
+  const payload = {
+    stat_id: val('dsStatId').trim().toLowerCase(),
+    entity_id: entityId,
+    name: val('dsName').trim(),
+    icon: val('dsIcon').trim(),
+    state_metric: stateMetric,
+    usage_mode: usageMode,
+    usage_entity_id: val('dsUsageEntity').trim(),
+    usage_unit: val('dsUsageUnit').trim(),
+    usage_scale: parseFloat(val('dsUsageScale') || '1') || 1,
+    opt_monthlist: chk('dsOptMonth') ? 1 : 0,
+    opt_yearlist: chk('dsOptYear') ? 1 : 0,
+    enabled: chk('dsEnabled') ? 1 : 0,
+  };
+  if (usageMode === 'entity' && payload.usage_entity_id.indexOf('.') < 0) {
+    throw new Error('使用量模式为「读数实体」时必须填写用电量实体');
+  }
+  if (usageMode === 'power') {
+    const p = parseFloat(val('dsUsagePower'));
+    if (!(p > 0)) throw new Error('固定功率必须是大于 0 的数字（W）');
+    payload.usage_power_w = p;
+  }
+  if (stateMetric === 'usage' && usageMode === 'none') {
+    throw new Error('状态显示选「今日使用量」时必须配置使用量');
+  }
+  return payload;
+}
+
+async function dsSave() {
+  let payload;
+  try { payload = dsBuildPayload(); } catch (e) {
+    const hint = document.getElementById('dsEditHint');
+    if (hint) hint.textContent = e.message;
+    return;
+  }
+  const hint = document.getElementById('dsEditHint');
+  if (hint) hint.textContent = '保存中...';
+  const j = await dsFetchJSON(DS_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!j.success) {
+    if (hint) hint.textContent = '保存失败：' + (j.error || '');
+    return;
+  }
+  showToast('已保存，实体已同步', true);
+  dsCloseEdit();
+  await loadDailyStats();
+}
+
+async function dsDelete(statId) {
+  if (!confirm('确认删除统计 ' + statId + '？\n将移除实体 sensor.hds_ds_' + statId
+    + '（历史数据默认保留）')) return;
+  const j = await dsFetchJSON(DS_API + '?stat_id=' + encodeURIComponent(statId), { method: 'DELETE' });
+  if (!j.success) { showToast('删除失败：' + (j.error || ''), false); return; }
+  showToast('已删除', true);
+  if (dsEditId === statId) dsCloseEdit();
+  if (dsDetailId === statId) dsCloseDetail();
+  await loadDailyStats();
+}
+
+async function dsClearHistory(statId) {
+  if (!confirm('清空 ' + statId + ' 的全部历史会话？\n（配置与实体保留，daylist 会变空）')) return;
+  const j = await dsFetchJSON(DS_ACTION_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'clear_history', stat_id: statId }),
+  });
+  if (!j.success) { showToast('清空失败：' + (j.error || ''), false); return; }
+  showToast('已清空 ' + (j.removed || 0) + ' 条会话', true);
+  await loadDailyStats();
+}
+
+async function dsShowDetail(statId, group) {
+  dsDetailId = statId;
+  const wrap = document.getElementById('dsDetailWrap');
+  const title = document.getElementById('dsDetailTitle');
+  const body = document.getElementById('dsDetailBody');
+  if (wrap) wrap.style.display = '';
+  if (title) title.textContent = statId + ' · ' + ({ day: '按日', month: '按月', year: '按年' }[group] || '按日');
+  if (body) body.innerHTML = '<div class="hint">加载中...</div>';
+  const j = await dsFetchJSON(DS_VALUES_API + '?stat_id=' + encodeURIComponent(statId)
+    + '&group=' + encodeURIComponent(group || 'day'));
+  if (!j.success) {
+    if (body) body.innerHTML = '<div class="hint">加载失败：' + escHtml(j.error || '') + '</div>';
+    return;
+  }
+  const items = j.items || [];
+  if (!items.length) {
+    if (body) body.innerHTML = '<div class="hint">暂无数据</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr>';
+  if (group === 'day') {
+    html += '<th>日期</th><th>次数</th><th>首次开启</th><th>最后关闭</th><th>时长</th><th>用量</th><th>时段</th>';
+  } else {
+    html += '<th>' + (group === 'month' ? '月份' : '年份') + '</th><th>天数</th><th>次数</th><th>时长</th><th>用量</th>';
+  }
+  html += '</tr></thead><tbody>';
+  items.forEach(it => {
+    if (group === 'day') {
+      const sessions = (it.sessions || []).map(s =>
+        (s.on || '?') + '→' + (s.off || '进行中')
+        + (s.dur ? '（' + dsFmtDur(s.dur) + '）' : '')).join('，');
+      html += '<tr><td><code>' + escHtml(it.date || '') + '</code></td>'
+        + '<td>' + (it.count || 0) + '</td>'
+        + '<td>' + escHtml(it.on || '') + '</td>'
+        + '<td>' + escHtml(it.off || '') + '</td>'
+        + '<td>' + dsFmtDur(it.duration) + '</td>'
+        + '<td>' + (it.usage || 0) + '</td>'
+        + '<td style="font-size:12px;color:var(--text2)">' + escHtml(sessions || '-') + '</td></tr>';
+    } else {
+      html += '<tr><td><code>' + escHtml(it[group] || '') + '</code></td>'
+        + '<td>' + (it.days || 0) + '</td>'
+        + '<td>' + (it.count || 0) + '</td>'
+        + '<td>' + dsFmtDur(it.duration) + '</td>'
+        + '<td>' + (it.usage || 0) + '</td></tr>';
+    }
+  });
+  html += '</tbody></table></div>';
+  if (body) body.innerHTML = html;
+}
+
+function dsCloseDetail() {
+  const wrap = document.getElementById('dsDetailWrap');
+  if (wrap) wrap.style.display = 'none';
+  dsDetailId = '';
 }
 
 // ==============================================================================
@@ -14974,7 +15717,7 @@ function apiHideAllParamRows() {
     ['apiHealthNameRow', 0], ['apiHealthTypeRow', 0], ['apiMediaUserRow', 0],
     ['apiMediaIdRow', 0], ['apiMediaNameRow', 0], ['apiDeviceUserNameRow', 0],
     ['apiDeviceUserDirRow', 0], ['apiCommRow', 0], ['apiOtdRow', 0], ['apiNoticeRow', 0],
-    ['apiBillRow', 0], ['apiEgRow', 0],
+    ['apiBillRow', 0], ['apiEgRow', 0], ['apiDsRow', 0],
   ];
   rows.forEach(function (item) {
     const el = document.getElementById(item[0]);
@@ -15234,6 +15977,15 @@ function onApiTypeChange() {
   if (isPush) {
     apiHideAllParamRows();
     generateApiUrl();
+    return;
+  }
+
+  // 日积月累（ds:*）：独立路径 /daily_stats，参数区按接口动态显隐
+  if (qt.startsWith('ds:')) {
+    apiHideAllParamRows();
+    const dsRow = document.getElementById('apiDsRow');
+    if (dsRow) dsRow.style.display = 'block';
+    renderDsParams(qt);
     return;
   }
 
@@ -16356,6 +17108,49 @@ function generateApiUrl() {
       : '';
     document.getElementById('apiUrlOutput').value = url;
     renderPushApiHint(kind, target, url);
+    return;
+  }
+
+  // 日积月累：/api/ha_data_store/daily_stats[/values|/sessions|/entities]
+  // 读接口用 query 传参；写接口（save / action）地址只带 key，参数放 JSON body
+  if (qt.startsWith('ds:')) {
+    const dv = (id) => {
+      const el = document.getElementById(id);
+      return el ? String(el.value || '').trim() : '';
+    };
+    const dsBase = BASE_PATH + '/api/ha_data_store/daily_stats';
+    const qp = [];
+    if (selectedApiKey) qp.push('key=' + encodeURIComponent(selectedApiKey));
+    const push = (k, val) => {
+      if (val !== '' && val !== null && val !== undefined) {
+        qp.push(encodeURIComponent(k) + '=' + encodeURIComponent(val));
+      }
+    };
+    let dsUrl = dsBase;
+    if (qt === 'ds:values') {
+      dsUrl += '/values';
+      push('stat_id', dv('apiDsStatId'));
+      push('group', dv('apiDsGroup') || 'day');
+      if (dv('apiDsDays') && dv('apiDsDays') !== '0') push('days', dv('apiDsDays'));
+    } else if (qt === 'ds:sessions') {
+      dsUrl += '/sessions';
+      push('stat_id', dv('apiDsStatId'));
+      push('date', dv('apiDsDate'));
+      push('start', dv('apiDsStart'));
+      push('end', dv('apiDsEnd'));
+      push('limit', dv('apiDsLimit'));
+    } else if (qt === 'ds:entities') {
+      dsUrl += '/entities';
+      push('keyword', dv('apiDsKeyword'));
+      push('domain', dv('apiDsDomain'));
+      push('limit', dv('apiDsLimit'));
+    } else if (qt === 'ds:delete') {
+      push('stat_id', dv('apiDsStatId'));
+      push('keep_history', dv('apiDsKeepHistory'));
+    }
+    const dsFull = dsUrl + (qp.length ? '?' + qp.join('&') : '');
+    document.getElementById('apiUrlOutput').value = dsFull;
+    renderDsApiHint(qt, dsFull);
     return;
   }
 

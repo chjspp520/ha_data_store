@@ -1,5 +1,69 @@
 # 更新日志
 
+## 2026-11-22 — v6.3.0 日积月累：按实体采集每日开启 / 关闭 / 使用量
+
+> 新独立模块。**一条配置 = 一个实体**（设备「日积月累」），不配置就没有实体、也没有设备。
+> 数据全部落库，实体上的 `daylist` / `monthlist` / `yearlist` 只是读取时的聚合视图。
+> 口径与排障见 README 第 26 章。
+
+### 一、后端
+
+| 文件 | 内容 |
+|---|---|
+| `daily_stats.py`（新） | `ensure_tables`（`daily_stats_configs` / `daily_stats_sessions` + 2 索引，幂等）；`classify_state` 开/关判定（总则「非 off / 非未知 / 非离线 = 开」+ 按域词表 + 数值域白名单）；配置 CRUD（`list/get/save/delete_config_sync` + `suggest_stat_id`，含「功率 ≤ 0、entity 模式缺读数实体、usage 指标未配使用量、改源实体」四类校验）；会话读写（`insert/close/get_open_session_sync`、`load_all_day_rows_sync`、`list_sessions_sync`）；`_build_day` / `_build_periods` 日·月·年聚合（月/年不落表）；`DailyStatSensor`（`_unrecorded_attributes` 排除大列表 + state/attrs 脏检查）；`DailyStatsManager`（`reload_sync` 增量建删实体、`_on_state_changed` 只在判定翻转时动作、`_open_session` / `_close_open_session`、`_split_open_sessions` 跨日拆段、`reconcile` 启动对账、`_async_midnight`、`push`、`snapshot_configs`、`values`）；5 个 HTTP View；`async_setup_daily_stats` 入口 |
+| `const.py` | `TABLE_DAILY_STATS_CONFIGS` / `TABLE_DAILY_STATS_SESSIONS`；`DAILY_STATS_ENTITY_PREFIX`（`hds_ds_`）/ `DAILY_STATS_DEVICE_IDENT` / `DAILY_STATS_DEVICE_NAME`（日积月累）/ `DAILY_STATS_MANUFACTURER`；VERSION → 6.3.0 |
+| `__init__.py` | `_register_api_views` 尾部注册日积月累 View；`forward_entry_setups` 之后延迟 3 秒后台启动（等 `async_add_sensor` 就绪）；`async_unload_entry` 调用 `async_stop` 释放总线监听与午夜定时器 |
+| `manifest.json` | 6.3.0 |
+
+### 二、前端（`db_viewer.html`）
+
+| 位置 | 内容 |
+|---|---|
+| 系统配置 → 子选项卡 | 新增「📆 日积月累」+ `#sub-dailystats` 面板：列表（今日次数/时长/用量、开启中标记、月·年开关）/ 新建·编辑（11 个字段，源实体与 stat_id 建后锁定）/ 历史明细（按日·月·年，含逐段会话）/ 清历史 / 删除；`switchSubTab` 懒加载钩子与 `DOMContentLoaded` 角标 |
+| 前端函数族 | `loadDailyStats` / `loadDailyStatsBadge` / `renderDailyStats` / `dsNew` / `dsEdit` / `dsCloseEdit` / `dsBuildPayload` / `dsSave` / `dsDelete` / `dsClearHistory` / `dsShowDetail` / `dsCloseDetail` / `dsLoadEntities`（实体 datalist）/ `dsOnEntityInput`（stat_id 自动生成）/ `dsOnUsageModeChange`（用量模式联动） |
+| API 工具 | 新增分组「📆 日积月累」（列表 / 日·月·年 / 会话明细 / 候选实体 / 新建·修改 / 删除 / 维护动作）+ 独立参数块 `#apiDsRow`（按类型显隐）+ `renderDsParams` / `loadApiDsStatIds` / `renderDsApiHint`；`apiHideAllParamRows` 清单与 `onApiTypeChange` / `generateApiUrl` 两个分支 |
+| 系统监控 | 汇总卡片 `#dailyStatsCard`（数字 = 配置条数，第三行 = 今日次数/时长/用量/运行中）+ 区块 `dailyStatsMonitorSectionHtml()` / `loadMonitorDailyStats()` / `gotoDailyStatsManage()`；`MONITOR_SEC_LABELS` 增加 `dailystats` |
+| `README.md` | 目录 / 功能总览 / 新增第 26 章（8 小节）/ API 文档「日积月累接口」/ 表结构「日积月累表」/ 更新日志条 |
+
+### 三、行为约定
+
+- **采集**：只在「开启 ↔ 关闭」判定翻转时写库与写状态；同一状态换值（`climate` 的 `cool→heat`、`cover` 的 `open→opening`）不算翻转，不写库、不写状态。
+- **离线**：`unavailable` / `unknown` 不判定，会话保持原状（离线期间继续计时），恢复后按当时状态继续。
+- **会话**：每次开关机一行（`on_time` / `off_time` / `duration` / `usage`），未关闭时 `off_time` 为空串；跨午夜 00:00 把上一段关在 `23:59:59` 并补一段 `00:00:00` 起（`restored=1`）。
+- **使用量**：`none` / `entity`（会话读数差 × 换算系数，负值记 0，读数缺失 → `usage_known=0` 不参与求和）/ `power`（`W × 小时 ÷ 1000`，单位 kWh）。
+- **state**：今日开关次数（默认）/ 今日使用量 / 今日开启时长（min）/ 当前状态（开启·关闭）。
+- **属性**：`today` / `daylist`（**不裁剪**，逐段 `sessions` 展开）/ 可选 `monthlist`、`yearlist`（读取时 `SUBSTR` 聚合）；全部进 `_unrecorded_attributes`，只有 state 值进 recorder 历史。
+- **更新策略**：零轮询 —— 除午夜 00:00 一个 `async_track_time_change` 外无任何定时器；写状态前做脏检查；「今日开启时长」在会话进行中不跳动（需实时用 `today.on` 自算）。
+- **新建/删除**：保存即建实体、删除即移除（registry + states 双删），无需重启；停用会移除实体但保留配置与历史；源实体建后不可修改。
+
+### 四、验证
+
+- `Y:\tmp\_test_daily_stats.py`：**49 项断言全过** —— 判定表（light/climate/cover/media/unavailable/数值域）、配置校验 4 类、`power` 与 `entity` 两种用量口径、同日多段、跨日拆段（昨日关 23:59:59 + 今日补 00:00:00）、月/年聚合、重启对账、新建时已在开启立刻补段、指标取值（时长/用量/单位）。
+- `python -m py_compile`：`daily_stats.py` / `__init__.py` / `const.py` 通过。
+- `db_viewer.html` 内联脚本（774,780 字符）语法检查通过；`#sub-dailystats` 与 `#apiDsRow` DOM 平衡；子选项卡按钮与面板一一对应；API 工具 7 个查询类型与 `onApiTypeChange` / `generateApiUrl` 分支一一对应。
+
+### 五、升级注意
+
+- 重启 HA 后自动建表（`CREATE TABLE IF NOT EXISTS`），无需手工 SQL；日志会打印「`[daily_stats] 已启动：N 条配置，M 个实体`」。
+- 不配置任何条目时不会出现设备与实体；配置后实体固定为 `sensor.hds_ds_<stat_id>`。
+- HA 停机期间的源实体变化无法感知：重启用 `state.last_changed` 兜底补开/关，`entity` 口径在补出来的段上标记 `usage_known=0`；已落库的历史日不受影响。
+- **属性体积较大，建议排除**：`daylist` 不裁剪且 `sessions` 逐段展开 —— 一个配置一年约 30~60KB、十年可达数百 KB，且每次写状态都会把整份属性推给所有前端（已用「事件驱动 + 脏检查」把频率压到每天几次）。
+  - 只想保留 `state` 曲线：**无需配置**，`daylist` / `monthlist` / `yearlist` / `today` 已登记 `_unrecorded_attributes`（属性不进 recorder 历史）；
+  - 连 `state` 也不想进 HA 历史库（实体多 / 历史长 / 数据库增长快）：在 `configuration.yaml` 里按前缀整类排除：
+
+```yaml
+# configuration.yaml
+recorder:
+  exclude:
+    entity_globs:
+      - sensor.hds_ds_*      # 日积月累生成的全部实体
+    # 或只排除单个：entities: [sensor.hds_ds_ke_ting_deng]
+```
+
+  排除 recorder **不影响采集与统计**：数据仍在 `daily_stats_sessions` 表里，`daylist` / `monthlist` / `yearlist` 与所有 API 照常可用；需要更细的历史时走 `/api/ha_data_store/daily_stats/sessions`。
+
+---
+
 ## 2026-11-16 — v6.1.1 通知附件 + 关联配置 + 自动化「HA推送」动作
 
 ### 一、后端

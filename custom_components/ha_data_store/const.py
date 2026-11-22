@@ -42,6 +42,16 @@ TABLE_POWER_ENERGY_DAILY = "power_energy_daily"
 TABLE_METRICS_CATALOG = "metrics_catalog"
 TABLE_NOTIFICATIONS = "notifications"
 
+# ── 日积月累（daily_stats.py：按实体采集每日开启/关闭与使用量）──
+# 配置表 + 会话表（一行 = 一次开启到关闭；未关闭时 off_time 为空串）
+TABLE_DAILY_STATS_CONFIGS = "daily_stats_configs"
+TABLE_DAILY_STATS_SESSIONS = "daily_stats_sessions"
+# 投影实体的固定前缀 / 设备标识（零配置时无实体、无设备）
+DAILY_STATS_ENTITY_PREFIX = "hds_ds_"      # sensor.hds_ds_<stat_id>
+DAILY_STATS_DEVICE_IDENT = "daily_stats"
+DAILY_STATS_DEVICE_NAME = "日积月累"
+DAILY_STATS_MANUFACTURER = "HA数据存储 — 日积月累"
+
 # ── 设备控制来源（device_history.on/off_source_*）────────────────────────────
 # 记录「这次状态变化是被什么控制的」，前端只看 device_history 一张表即可展示来源：
 #   card      卡片内操作  → source_id = user_actions.id
@@ -363,7 +373,7 @@ NOTIFICATION_ASSET_DENY_FILES = ("secrets.yaml", "configuration.yaml")
 NOTIFICATION_ASSET_DENY_SUFFIX = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3")
 
 # 系统版本号（与 manifest.json 同步）
-VERSION = "6.2.9"
+VERSION = "6.3.0"
 
 # ── 自动化执行引擎版本 ──
 # 独立于集成版本（VERSION）：引擎能力单独演进，集成版本跟整个仓库走。
