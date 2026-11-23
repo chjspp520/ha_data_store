@@ -1,5 +1,50 @@
 # 更新日志
 
+## 2026-11-23 — v6.3.2 清理死代码 + 自定义路由列表输出转义
+
+> 纯维护版本：**无接口变更、无功能变化、无配置迁移**。删掉早前重构遗留的「被覆盖定义」，
+> 并把自定义路由列表的文本输出做 HTML 转义。
+
+### 一、后端
+
+| 文件 | 内容 |
+|---|---|
+| `http_api.py` | 删除 `QueryView` 中被后定义覆盖的方法（Python 语义下**永不执行**）：`_query_attr_history` 2 份、`_query_attr_latest` 2 份、`_query_attr_latest_single` 2 份；另删零调用的 `_calc_device_summary`。共 **-381 行**（17836 → 17455） |
+| `power_energy.py` | `ensure_tables` 处补注释，记录「先查脏值、脏了才 UPDATE」实测**无收益**：21 行表的 `SELECT COUNT(typeof())` 比 `UPDATE` 本身更贵，且连接关闭即触发检查点、WAL 不累积（实测 2.30 → 2.45 ms/次）。代码零变化，仅为避免后人重复尝试 |
+
+删除理由：`class` 体内同名方法后定义覆盖前定义，前几份在类创建完成后即被丢弃，**任何调用路径都到不了**；
+同时它们让「改错副本」的风险变高（给 `attr_history` 加参数时极易改到死的那份）。
+
+### 二、前端（`db_viewer.html`）
+
+| 位置 | 内容 |
+|---|---|
+| `loadCustomRoutes` | 自定义路由列表的 `route_path` / `description` / SQL 片段改用 `escHtml()` 输出。其中 `description` 是**用户自由输入**且原样拼进 `innerHTML`，构成存储型 XSS |
+| 同上 | `onclick="fn('…')"` 的拼接**未改动** —— 路径后端已有 `^[A-Za-z0-9_\-]{1,64}$` 白名单（`http_api.py:3688`），改动拼接反而容易引入 JS 语法错 |
+| 同上 | `<span>运行时动态生成</span>` / `<span>—</span>` 等固定标记保持原样，只转义 SQL 文本本身 |
+
+### 三、验证
+
+- **AST 等价性校验**：删除前后 `QueryView` 每个**生效**方法的源码哈希逐项相等；类内 `def` 数 92 → 85（正好 -7）；全仓「被覆盖定义」计数归 0。
+- `http_api.py` / `power_energy.py` 编译通过；`ensure_tables` 的 AST 与改前**完全一致**（只多了注释）。
+- `db_viewer.html` 内联脚本 774,712 字节，`node --check` 通过；正常数据的渲染字符串逐字符不变。
+
+### 四、升级注意
+
+- 后端改动需**重启 HA** 生效；`db_viewer.html` 为每次请求读取，刷新页面即生效（响应带 `no-store`）。
+
+---
+
+## 2026-11-23 — v6.3.1 修复「实体→网络」删除报 `parameters are of unsupported type`
+
+| 文件 | 内容 |
+|---|---|
+| `http_api.py` | `PushTargetsView.delete` 按 `id` 删除时把 `param` 赋成裸 `int`，而 `sqlite3.execute(sql, parameters)` 要求第二参数是**序列** → 抛 `ProgrammingError: parameters are of unsupported type`。改为统一传 tuple（`(target_id,)` / `(entity_id,)` / `(token, token)`）；`id` 缺失、非法或 ≤0 时直接返回 400「需要 id / entity_id / token 参数」，不再按 `id=0` 查询后回 404 |
+
+验证：`execute('… WHERE id = ?', 1)` 复现报错、`(1,)` 正常删除；全仓扫描同类「第二参数传裸值」写法仅此一处。
+
+---
+
 ## 2026-11-22 — v6.3.0 日积月累：按实体采集每日开启 / 关闭 / 使用量
 
 > 新独立模块。**一条配置 = 一个实体**（设备「日积月累」），不配置就没有实体、也没有设备。

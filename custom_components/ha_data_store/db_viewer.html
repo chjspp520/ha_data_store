@@ -4489,15 +4489,17 @@ async function loadCustomRoutes() {
         ? '<span style="color:#3fb950;cursor:pointer" onclick="toggleCustomRoute(\'' + path.replace(/'/g,'') + '\',0)" title="点击停用">● 启用</span>'
         : '<span style="color:#f85149;cursor:pointer" onclick="toggleCustomRoute(\'' + path.replace(/'/g,'') + '\',1)" title="点击启用">○ 停用</span>';
       const sql = (r.sql_statement || '').toString();
-      const sqlShow = isFull ? (isBuilder && !sql ? '<span style="color:var(--text2);font-style:italic">运行时动态生成</span>' : (sql.length > 40 ? sql.slice(0, 37) + '...' : sql))
+      // SQL 片段属自由文本，进 innerHTML 前必须转义（span 提示语是固定标记，保持原样）
+      const sqlText = sql.length > 40 ? sql.slice(0, 37) + '...' : sql;
+      const sqlShow = isFull ? (isBuilder && !sql ? '<span style="color:var(--text2);font-style:italic">运行时动态生成</span>' : escHtml(sqlText))
         : '<span style="color:var(--text2)">—</span>';
       const callUrl = '/api/ha_data_store/custom/' + path;
       const editBtn = isBuilder
         ? '<button onclick="builderEditRoute(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#7d5fff;border-color:#7d5fff;color:#fff;border-radius:5px;cursor:pointer;margin-right:4px">🧩 构造器编辑</button>'
         : '<button onclick="editRouteForm(\'' + path.replace(/'/g,'') + '\')" style="padding:3px 10px;font-size:12px;background:#2980b9;border-color:#2980b9;color:#fff;border-radius:5px;cursor:pointer;margin-right:4px">✏️ 编辑</button>';
       html += '<tr>'
-        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:12px;color:var(--green)">' + path + '</td>'
-        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + desc + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:12px;color:var(--green)">' + escHtml(path) + '</td>'
+        + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + escHtml(desc) + '</td>'
         + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + sourceLabel + '</td>'
         + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">' + stateLabel + '</td>'
         + '<td style="padding:6px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;color:var(--text2)">' + sqlShow + '</td>'

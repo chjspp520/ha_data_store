@@ -195,6 +195,8 @@ def ensure_tables(db_path: str) -> None:
                     # 重建失败则退回原地 UPDATE（至少让值语义正确）
                     pass
             else:
+                # 注：曾试过「先查脏值、脏了才 UPDATE」，实测无收益（21 行表的 SELECT
+                # 比 UPDATE 本身还贵，且连接关闭即检查点，WAL 不累积），故保持原写法。
                 conn.execute(
                     f"UPDATE {TABLE_POWER_METER_CONFIGS} SET enabled = "
                     f"CASE WHEN COALESCE(CAST(enabled AS TEXT), '1') IN ('0', 'false', 'no', '') "
